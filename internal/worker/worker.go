@@ -60,15 +60,17 @@ type Queue interface {
 	// Complete while the row is still in processing status; an empty type is a
 	// no-op (the row keeps NULL outcome_type, classified as "unknown").
 	SetOutcomeType(ctx context.Context, id int64, outcomeType string) error
-	// SetProviderLane stamps the winning provider lane name onto a work_queue row
-	// for per-track provenance. Call at completion time before Complete so the row
-	// permanently records which provider served it. An empty lane is a no-op.
+	// SetProviderLane stamps the winning provider lane name and its upstream
+	// licensor (lyrics.RecordedUpstream of the same result) onto a work_queue row
+	// in one statement, for per-track provenance. Call at completion time before
+	// Complete so the row permanently records which provider served it. An empty
+	// lane is a no-op; an empty upstream clears one that a prior attempt left.
 	//
 	// NOT used for a detector-sourced instrumental settle: that goes through
 	// SettleInstrumental, which stamps the lane inside the settle transaction. This
 	// remains the path for a PROVIDER hit, where the lane is one of several and the
 	// completion is the ordinary multi-step one.
-	SetProviderLane(ctx context.Context, id int64, lane string) error
+	SetProviderLane(ctx context.Context, id int64, lane, upstream string) error
 	// ClearProviderLane drops a processing row's lane, for a completion served
 	// from a laneless cache entry (#1207).
 	ClearProviderLane(ctx context.Context, id int64) error
@@ -976,21 +978,26 @@ func (w *Worker) recordHit(ctx context.Context, id int64, lane string) {
 		return
 	}
 	w.recordHitCounter(ctx, lane)
-	w.stampLane(ctx, id, lane)
+	// No result in hand: recordHit names no licensor, so the row's licensor is cleared.
+	w.stampLane(ctx, id, models.Song{WinningLane: lane})
 }
 
-// stampLane is recordHit's per-track half: it stamps lane onto the row,
-// non-fatally. RunOnce calls it only once the lane's result has a standing to
-// be named on the row -- after a write landed, or on a verify/guard exit that
-// records which lane was rejected -- and never for a result the writer refused
-// as a downgrade (#553): purgeprovenance.provenanceAgrees compares a sidecar's
-// [source:] against this column, so naming the refused lane on a row whose
-// kept file came from another lane would misattribute that file.
-func (w *Worker) stampLane(ctx context.Context, id int64, lane string) {
+// stampLane is recordHit's per-track half: it stamps song's lane and its
+// RecordedUpstream onto the row in one write, non-fatally. A rejected result
+// (verify or guard exit) records its own licensor with its lane, so the pair
+// always describes one result. RunOnce calls it only once the lane's result
+// has a standing to be named on the row -- after a write landed, or on a
+// verify/guard exit that records which lane was rejected -- and never for a
+// result the writer refused as a downgrade (#553):
+// purgeprovenance.provenanceAgrees compares a sidecar's [source:] against this
+// column, so naming the refused lane on a row whose kept file came from
+// another lane would misattribute that file.
+func (w *Worker) stampLane(ctx context.Context, id int64, song models.Song) {
+	lane := song.WinningLane
 	if lane == "" {
 		return
 	}
-	if err := w.queue.SetProviderLane(ctx, id, lane); err != nil {
+	if err := w.queue.SetProviderLane(ctx, id, lane, lyrics.RecordedUpstream(song)); err != nil {
 		slog.Warn("worker: stamp provider lane failed", "id", id, "lane", lane, "error", err)
 	}
 }
@@ -1594,7 +1601,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if err := w.verify(ctx, item, song, confidence); err != nil {
 			slog.Warn("worker verification failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "confidence", confidence, "error", err)
 			if !item.UpgradeQueued {
-				w.stampLane(context.WithoutCancel(ctx), item.ID, song.WinningLane)
+				w.stampLane(context.WithoutCancel(ctx), item.ID, song)
 			}
 			return w.fail(ctx, item, err)
 		}
@@ -1615,7 +1622,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 				return w.settleUpgradeTrip(ctx, item)
 			}
 			ctxNoCancel := context.WithoutCancel(ctx)
-			w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
+			w.stampLane(ctxNoCancel, item.ID, song)
 			// Record WHY this row settled with nothing on disk, before Complete
 			// while the row is still 'processing' (#655).
 			//
@@ -1738,7 +1745,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			slog.Warn("worker: clear provider lane failed", "id", item.ID, "error", err)
 		}
 	} else {
-		w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
+		w.stampLane(ctxNoCancel, item.ID, song)
 	}
 	if !cacheHit {
 		// Cached only AFTER a write landed (#553). cache consumers are the

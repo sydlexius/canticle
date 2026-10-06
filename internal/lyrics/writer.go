@@ -400,8 +400,8 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		// below.
 		if song.WinningLane != "" {
 			tags = append(tags, fmt.Sprintf("[source:%s]", song.WinningLane))
-			if song.Upstream != "" {
-				tags = append(tags, fmt.Sprintf("[upstream:%s]", song.Upstream))
+			if up := RecordedUpstream(song); up != "" {
+				tags = append(tags, fmt.Sprintf("[upstream:%s]", up))
 			}
 		}
 		if !song.FetchedAt.IsZero() {
@@ -462,8 +462,8 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		// version), so a directly-built detector Song is caught too.
 		if src != "" {
 			tags = append(tags, fmt.Sprintf("[source:%s]", src))
-			if src != SourceDetector && song.Upstream != "" {
-				tags = append(tags, fmt.Sprintf("[upstream:%s]", song.Upstream))
+			if up := RecordedUpstream(song); up != "" {
+				tags = append(tags, fmt.Sprintf("[upstream:%s]", up))
 			}
 		}
 		// [dv:] is omitted when unknown -- it records WHICH model decided, and an
@@ -1103,4 +1103,25 @@ func writeInstrumental(buff *bufio.Writer) error {
 		return fmt.Errorf("flushing instrumental lyrics: %w", err)
 	}
 	return nil
+}
+
+// RecordedUpstream is the licensor a completion records, by the one rule the
+// [upstream:] tag and work_queue.upstream (#1297) share. It is empty unless a
+// lane won (no lane, no attribution: the one-shot fetch path stamps none) and
+// the result is not canticle's own detector verdict (a detector call is never a
+// licensor's). A cache hit decodes with no Upstream, so it is empty here too.
+//
+// The row follows provider_lane, not the file: the value equals the [upstream:]
+// tag wherever a tag block is written, and the worker records it too where the
+// file has none (an unsynced or demoted .txt) or nothing is written (a
+// categorical result).
+//
+// The synced tag site gained the detector exclusion (lane and DetectorVersion)
+// the instrumental site already had; no file changes today, since only an
+// instrumental song carries a detector version.
+func RecordedUpstream(song models.Song) string {
+	if song.WinningLane == "" || song.WinningLane == DetectorLaneName || song.DetectorVersion != "" {
+		return ""
+	}
+	return song.Upstream
 }

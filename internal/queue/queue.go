@@ -877,6 +877,7 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
              detector_version = ?,
              outcome_type = 'instrumental',
              provider_lane = ?,
+             upstream = NULL,
              status = 'done',
              completed_at = ?,
              last_error = '',
@@ -2170,17 +2171,24 @@ func (q *DBQueue) RecordLaneAttempts(ctx context.Context, queueID int64, attempt
 	return nil
 }
 
-// SetProviderLane stamps the winning provider lane name onto a work_queue row.
-// Call at completion time (before Complete) so the row permanently records which
-// provider served it. A NULL provider_lane means not-yet-completed, retired
-// without a match, or a row that predates this column.
-func (q *DBQueue) SetProviderLane(ctx context.Context, id int64, lane string) error {
+// SetProviderLane stamps the winning provider lane name and its upstream
+// licensor onto a work_queue row in ONE statement (#1297), so the two always
+// describe the same result: a later lane stamp can never leave an earlier
+// attempt's licensor behind. Call at completion time (before Complete) so the
+// row permanently records which provider served it. An empty upstream is stored
+// as NULL (a lane that is its own upstream, or a result that names none) and
+// overwrites one a prior attempt left. A NULL provider_lane means
+// not-yet-completed, retired without a match, or a row that predates this
+// column. The upstream follows provider_lane, not the sidecar: it is the
+// result's licensor wherever a tag block is written and also where none is
+// (an unsynced .txt, a demoted .txt, a categorical result with nothing on disk).
+func (q *DBQueue) SetProviderLane(ctx context.Context, id int64, lane, upstream string) error {
 	if lane == "" {
 		return nil
 	}
 	_, err := q.db.ExecContext(ctx,
-		`UPDATE work_queue SET provider_lane = ? WHERE id = ?`,
-		lane, id,
+		`UPDATE work_queue SET provider_lane = ?, upstream = ? WHERE id = ?`,
+		lane, nullIfEmpty(upstream), id,
 	)
 	if err != nil {
 		return fmt.Errorf("queue: set provider lane for id %d: %w", id, err)
@@ -2195,7 +2203,7 @@ func (q *DBQueue) SetProviderLane(ctx context.Context, id int64, lane string) er
 // 'processing', like the other pre-Complete stamps' callers.
 func (q *DBQueue) ClearProviderLane(ctx context.Context, id int64) error {
 	if _, err := q.db.ExecContext(ctx,
-		`UPDATE work_queue SET provider_lane = NULL WHERE id = ? AND status = 'processing'`, id,
+		`UPDATE work_queue SET provider_lane = NULL, upstream = NULL WHERE id = ? AND status = 'processing'`, id,
 	); err != nil {
 		return fmt.Errorf("queue: clear provider lane for id %d: %w", id, err)
 	}
@@ -3810,6 +3818,7 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
          SET instrumental_result = 0,
              outcome_type = NULL,
              provider_lane = NULL,
+             upstream = NULL,
              status = 'deferred',
              completed_at = NULL,
              priority = ?,
@@ -3966,7 +3975,7 @@ func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 // row carries no stale record of the fetch that will no longer be true once
 // it re-runs: attempts, next_attempt_at, last_error, completed_at (the
 // original reset shape, present since before this helper existed) PLUS
-// provider_lane, outcome_type, outcome_detail, timing_outcome,
+// provider_lane, upstream, outcome_type, outcome_detail, timing_outcome,
 // overrun_magnitude, overrun_ratio and evaluated_at (added for #960).
 //
 // This is the shared reopen every "settle state must not survive a reopen"
@@ -4024,6 +4033,7 @@ func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (
              last_error = '',
              completed_at = NULL,
              provider_lane = NULL,
+             upstream = NULL,
              outcome_type = NULL,
              outcome_detail = NULL,
              timing_outcome = NULL,

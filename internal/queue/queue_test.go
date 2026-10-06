@@ -3672,12 +3672,12 @@ func TestDBQueue_SetProviderLane(t *testing.T) {
 	}
 
 	// Empty lane must be a no-op (no error, no row update).
-	if err := q.SetProviderLane(ctx, item.ID, ""); err != nil {
+	if err := q.SetProviderLane(ctx, item.ID, "", ""); err != nil {
 		t.Fatalf("SetProviderLane empty: %v", err)
 	}
 
 	// Stamp a real lane and verify it is stored.
-	if err := q.SetProviderLane(ctx, item.ID, "musixmatch"); err != nil {
+	if err := q.SetProviderLane(ctx, item.ID, "musixmatch", ""); err != nil {
 		t.Fatalf("SetProviderLane: %v", err)
 	}
 
@@ -3719,7 +3719,7 @@ func TestDBQueue_ClearProviderLane(t *testing.T) {
 		return lane
 	}
 
-	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics"); err != nil {
+	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics", ""); err != nil {
 		t.Fatalf("SetProviderLane: %v", err)
 	}
 	if err := q.ClearProviderLane(ctx, item.ID); err != nil {
@@ -3730,7 +3730,7 @@ func TestDBQueue_ClearProviderLane(t *testing.T) {
 	}
 
 	// Outside processing the clear must not touch the row.
-	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics"); err != nil {
+	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics", ""); err != nil {
 		t.Fatalf("SetProviderLane: %v", err)
 	}
 	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done' WHERE id = ?`, item.ID); err != nil {
@@ -3934,7 +3934,7 @@ func TestDBQueue_ProviderMethodsClosedDB(t *testing.T) {
 	if err := q.RecordLaneAttempts(ctx, 1, []models.LaneAttempt{{Lane: "musixmatch", Hit: true}}); err == nil {
 		t.Fatal("RecordLaneAttempts on closed db: want error, got nil")
 	}
-	if err := q.SetProviderLane(ctx, 1, "musixmatch"); err == nil {
+	if err := q.SetProviderLane(ctx, 1, "musixmatch", ""); err == nil {
 		t.Fatal("SetProviderLane on closed db: want error, got nil")
 	}
 	if err := q.SetInstrumentalResult(ctx, 1, 1, InstrumentalTelemetry{}); err == nil {
@@ -4845,7 +4845,7 @@ func TestDBQueue_UnsettleInstrumentalLeavesProviderOwnedRowsAlone(t *testing.T) 
 	}
 	// Re-attribute to a provider: the row now looks exactly like one a provider
 	// completed and flagged instrumental.
-	if err := q.SetProviderLane(ctx, item.ID, "musixmatch"); err != nil {
+	if err := q.SetProviderLane(ctx, item.ID, "musixmatch", ""); err != nil {
 		t.Fatalf("SetProviderLane: %v", err)
 	}
 

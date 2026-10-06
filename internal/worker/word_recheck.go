@@ -220,7 +220,7 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	// the write (purgeprovenance compares the two). No provider_outcomes hit:
 	// like lane_attempts, that instrument counts ordinary dispatches, and an
 	// absent recheck has no symmetric miss to record.
-	if err := w.queue.SetProviderLane(ctxNoCancel, item.ID, song.WinningLane); err != nil {
+	if err := w.queue.SetProviderLane(ctxNoCancel, item.ID, song.WinningLane, lyrics.RecordedUpstream(song)); err != nil {
 		slog.Warn("worker: stamp provider lane failed", "id", item.ID, "lane", song.WinningLane, "error", err)
 	}
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
