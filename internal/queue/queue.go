@@ -3881,6 +3881,9 @@ func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 // on a hand-edited row (#1226: judged, never remediated), keeps the file and
 // its outcome_type; such a row is never reopened for another recording, which
 // would strand that file with no row and carry its edit mark and tier along.
+// It reads the row's record (outcome_type, sync_tier, the hand-edit stamp),
+// not the disk, so a row whose record was cleared while a sidecar remained on
+// disk still reads as fileless; tracked in #1366.
 const categoricalFileless = `(outcome_type IS NULL AND sync_tier IS NULL` + notLyricEdited + `)`
 
 // reopenCategoricalForScan reopens the 'done' + categorical row a scan-origin
@@ -3906,9 +3909,10 @@ const categoricalFileless = `(outcome_type IS NULL AND sync_tier IS NULL` + notL
 //
 // KNOWN LIMIT of that last guard (#1366 tracks per-recording verdict state):
 // when the other file is the judged recording itself and its scan_result is
-// pending or processing and still linked (after a forced --update/--upgrade
-// scan, or a provider-generation change), this recording is refused on every
-// scan until that scan_result settles. main suppresses it in that state too.
+// pending or processing and still linked, this recording is refused on every
+// scan until that scan_result settles. The state arises after a forced
+// --update/--upgrade scan and persists after a later provider-generation
+// change. main does not fetch it in that state either.
 func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
 	var (
 		id                   int64
