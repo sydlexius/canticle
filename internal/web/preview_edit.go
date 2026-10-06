@@ -350,6 +350,10 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert, a
 	case errors.Is(err, lyrics.ErrEditChanged):
 		writeEditJSON(w, http.StatusConflict, map[string]string{"error": "changed"})
 		return
+	case errors.Is(err, lyrics.ErrEditStaleOrig):
+		slog.Warn("lyric edit refused: the .orig backup is not this file's original", "id", id)
+		writeEditJSON(w, http.StatusConflict, map[string]string{"error": "stale_orig"})
+		return
 	case errors.Is(err, lyrics.ErrEditHasWords):
 		writeEditJSON(w, http.StatusConflict, map[string]string{"error": "has_words"})
 		return
