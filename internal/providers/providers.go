@@ -21,6 +21,11 @@ const (
 	InnerTube = "innertube"
 )
 
+// UpstreamLanes lists the lanes that multiplex between upstream licensors and
+// so can carry an [upstream:] tag / work_queue.upstream (#1298). Only InnerTube
+// does today; Musixmatch and PetitLyrics are their own upstream.
+func UpstreamLanes() []string { return []string{InnerTube} }
+
 // Fetcher is the shared lyrics lookup behavior used by provider adapters.
 type Fetcher interface {
 	FindLyrics(ctx context.Context, track models.Track) (models.Song, error)
