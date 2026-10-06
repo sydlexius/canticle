@@ -55,6 +55,7 @@ func ParamNames(ns string) (sortParam, dirParam string) {
 	return ns + "_sort", ns + "_dir"
 }
 
+// vocabulary is the set of sort keys any table may name; a Spec admits a subset of it.
 var vocabulary = map[string]bool{
 	KeyArtist: true, KeyAlbum: true, KeyTitle: true, KeyStatus: true,
 	KeyNextAttempt: true, KeyMisses: true, KeyAttempts: true, KeyUpdated: true,

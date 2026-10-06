@@ -57,6 +57,7 @@ func LaneLabel(lane string) string {
 // request input; single quotes are still doubled.
 var sourceLabelExpr = buildSourceLabelExpr()
 
+// buildSourceLabelExpr renders the SQL CASE that maps provider_lane to its displayed label, so a source sort orders by what the table shows.
 func buildSourceLabelExpr() string {
 	var b strings.Builder
 	b.WriteString("CASE provider_lane")
@@ -67,4 +68,5 @@ func buildSourceLabelExpr() string {
 	return b.String()
 }
 
+// sqlQuote doubles single quotes so a label constant can sit inside a SQL string literal.
 func sqlQuote(s string) string { return strings.ReplaceAll(s, "'", "''") }

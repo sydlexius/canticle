@@ -79,6 +79,7 @@ func assertArtistAlbumTitle(t *testing.T, heads, cells []string, album string) {
 	}
 }
 
+// Header labels of the three track tables, in column order.
 var (
 	recentLabels = []string{"Artist", "Album", "Title", "Result", "Detail", "Source", "Completed"}
 	instrLabels  = []string{"Artist", "Album", "Title", "ID", "File", "Detect requested"}
@@ -94,12 +95,14 @@ func plainCols(labels ...string) []SortHeaderView {
 	return out
 }
 
+// Fixture values shared by the track-column tests.
 const (
 	tcArtist = "Test Artist"
 	tcAlbum  = "Test Album"
 	tcTitle  = "Test Title"
 )
 
+// TestTrackTablesArtistAlbumTitle pins that each track table shows artist, album and title in that order under matching headers.
 func TestTrackTablesArtistAlbumTitle(t *testing.T) {
 	tests := []struct {
 		name string
@@ -150,6 +153,7 @@ func TestInstrumentalsArtistLeads(t *testing.T) {
 	}
 }
 
+// TestTrackTablesEmptyAlbumIsDash pins that an empty album renders as a dash in every track table.
 func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
 	tests := []struct {
 		name string

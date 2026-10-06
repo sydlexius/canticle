@@ -15,6 +15,7 @@ func renderHeader(t *testing.T, h SortHeaderView) string {
 	return b.String()
 }
 
+// TestSortHeaderRender pins the SortHeader markup for sorted, unsorted and unsortable columns.
 func TestSortHeaderRender(t *testing.T) {
 	cases := []struct {
 		name    string

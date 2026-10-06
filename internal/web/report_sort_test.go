@@ -49,6 +49,7 @@ func badSorts(ns string) []string {
 	}
 }
 
+// TestReportSortRecentOutcomes pins the Recent outcomes ordering for the default and for sort and dir params, including that bad values fall back to the default.
 func TestReportSortRecentOutcomes(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	out := `[{"outdir":"/o","filename":"a.lrc"}]`
@@ -111,6 +112,7 @@ func TestReportSortCarriesOtherTables(t *testing.T) {
 	}
 }
 
+// TestReportSortInstrumentals pins the Instrumentals ordering: id by default, then the namespaced in_sort and in_dir params.
 func TestReportSortInstrumentals(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	// Insertion order (the default, by id) is Zed, Mid, Alpha.
@@ -132,6 +134,7 @@ func TestReportSortInstrumentals(t *testing.T) {
 	}
 }
 
+// TestReportSortReviewQueue pins the Review queue ordering for the namespaced rq_sort and rq_dir params against its default.
 func TestReportSortReviewQueue(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	insertReviewQueueRow(t, sqlDB, "Old", "mis_synced", 1, 3.0, "2026-08-01T00:00:00Z")

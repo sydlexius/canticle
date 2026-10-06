@@ -198,6 +198,7 @@ func TestQueueForgedCursorFallsBackToFirstPage(t *testing.T) {
 	}
 }
 
+// TestQueueHeadersSortableAndAria pins that the queue headers are sort links with a single aria-sort on the active column, toggling direction and keeping the search.
 func TestQueueHeadersSortableAndAria(t *testing.T) {
 	db := openReportsTestDB(t)
 	seedQueueRows(t, db, "pending", "Pend", 2)

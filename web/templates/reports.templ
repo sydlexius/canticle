@@ -104,6 +104,7 @@ templ reportEmpty(msg string) {
 	<div class="mx-report-empty"><span>{ msg }</span></div>
 }
 
+// tableRecentOutcomes renders the Recent outcomes table under its sortable header row.
 templ tableRecentOutcomes(cols []SortHeaderView, rows []RecentOutcomeRow) {
 	if len(rows) == 0 {
 		@reportEmpty("No completed tracks yet.")
@@ -170,6 +171,7 @@ templ tableProviders(rows []ProviderRow) {
 	}
 }
 
+// tableInstrumentals renders the instrumental inventory under its sortable header row.
 templ tableInstrumentals(cols []SortHeaderView, rows []InstrumentalRow) {
 	if len(rows) == 0 {
 		@reportEmpty("No audio-detected instrumentals.")
@@ -295,6 +297,7 @@ templ FailureGroupRows(view FailureGroupView) {
 	}
 }
 
+// tableReviewQueue renders the timing review queue under its sortable header row, with a link to the wrong-timing view.
 templ tableReviewQueue(cols []SortHeaderView, rows []ReviewQueueRow, wrongTimingHref string) {
 	if len(rows) == 0 {
 		@reportEmpty("No tracks awaiting a timing review.")

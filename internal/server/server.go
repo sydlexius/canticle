@@ -957,6 +957,7 @@ var loggableQueryKeys = map[string]func(string) bool{
 	},
 }
 
+// init registers the namespaced Reports sort params with the request-log redactor, each under its sort or dir validator.
 func init() {
 	// The namespaced sort params of the Reports tables (#1260) take the same
 	// validators as sort and dir.

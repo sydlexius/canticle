@@ -510,6 +510,7 @@ var RecentOutcomesSpec = tablesort.Spec{
 	Default: tablesort.Order{Key: tablesort.KeyCompleted, Desc: true},
 }
 
+// scanRecentOutcomes drains a recent-outcomes query into rows, wrapping a query error with the report name.
 func scanRecentOutcomes(rows *sql.Rows, err error) ([]RecentOutcome, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reports: recent outcomes: %w", err)
