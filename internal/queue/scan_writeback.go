@@ -21,9 +21,11 @@ import (
 // was settled before the trip began and SettleUpgradeTrip writes nothing back,
 // so letting one block would strand the result short of done.
 //
-// The last sibling to finish writes the result back. If a blocking sibling is
-// deleted instead of finishing, the result stays non-done and the next scan
-// offers it to Enqueue again, which costs one lookup, never a lost lyric.
+// The last sibling to finish writes the result back. A blocking sibling that
+// is deleted instead of finishing (Cleanup, CancelByLibrary) resets the
+// results it was the last live owner of to 'pending' in the same transaction
+// (resetScanResultsPending), because a scan offers only pending results to
+// Enqueue and would otherwise never revisit them.
 const scanResultNoLiveSibling = `
            AND NOT EXISTS (
                SELECT 1 FROM work_queue_scan_results sib
@@ -44,5 +46,20 @@ const scanResultsDoneWriteback = `UPDATE scan_results SET status = 'done'
 // tx. Callers wrap the error with their own context.
 func writeBackScanResultsDone(ctx context.Context, tx *sql.Tx, workQueueID int64) error {
 	_, err := tx.ExecContext(ctx, scanResultsDoneWriteback, workQueueID, workQueueID)
+	return err
+}
+
+// scanResultsPendingReset resets to 'pending' the scan_results linked to one
+// work_queue row that deleting it would strand: not already done, and no OTHER
+// live sibling remains (the same guard as the done writeback). Args: the
+// work_queue id, twice.
+const scanResultsPendingReset = `UPDATE scan_results SET status = 'pending'
+         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
+           AND status != 'done'` + scanResultNoLiveSibling
+
+// resetScanResultsPending runs scanResultsPendingReset for workQueueID inside
+// tx. Call it BEFORE deleting the row, while the junction still links it.
+func resetScanResultsPending(ctx context.Context, tx *sql.Tx, workQueueID int64) error {
+	_, err := tx.ExecContext(ctx, scanResultsPendingReset, workQueueID, workQueueID)
 	return err
 }

@@ -151,3 +151,88 @@ func TestDoneWritebacksHonorLiveSibling(t *testing.T) {
 		}
 	}
 }
+
+// linkTwoRows enqueues one scan result under two keys (a re-keyed rescan) and
+// returns both work_queue ids; the result is 'processing' as after an Enqueue.
+func linkTwoRows(t *testing.T, q *DBQueue, srID int64) (int64, int64) {
+	t.Helper()
+	ids := make([]int64, 0, 2)
+	for _, artist := range []string{"Old Artist", "New Artist"} {
+		item, err := q.Enqueue(context.Background(), models.Inputs{
+			Track: models.Track{ArtistName: artist, TrackName: "Song"}, ScanResultID: srID,
+		}, PriorityScan)
+		if err != nil {
+			t.Fatalf("Enqueue %s: %v", artist, err)
+		}
+		ids = append(ids, item.ID)
+	}
+	return ids[0], ids[1]
+}
+
+// TestCleanupResetsStrandedScanResult: deleting the last live owner of a
+// scan_result must return it to 'pending' so a scan re-offers it (#1038); a
+// result another live row still owns is left alone.
+func TestCleanupResetsStrandedScanResult(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	solo := insertScanResult(t, sqlDB, "/music/solo.flac")
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track: models.Track{ArtistName: "Solo", TrackName: "Song"}, ScanResultID: solo,
+	}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue solo: %v", err)
+	}
+	if got := readScanStatus(t, sqlDB, solo); got != "processing" {
+		t.Fatalf("precondition: scan_result = %q; want processing", got)
+	}
+	if _, err := q.Cleanup(ctx, models.Inputs{Track: models.Track{ArtistName: "Solo", TrackName: "Song"}}); err != nil {
+		t.Fatalf("Cleanup solo: %v", err)
+	}
+	if got := readScanStatus(t, sqlDB, solo); got != "pending" {
+		t.Fatalf("after cleanup of last owner: scan_result = %q; want pending", got)
+	}
+
+	shared := insertScanResult(t, sqlDB, "/music/shared/shared.flac")
+	linkTwoRows(t, q, shared)
+	if _, err := q.Cleanup(ctx, models.Inputs{Track: models.Track{ArtistName: "Old Artist", TrackName: "Song"}}); err != nil {
+		t.Fatalf("Cleanup shared: %v", err)
+	}
+	if got := readScanStatus(t, sqlDB, shared); got != "processing" {
+		t.Fatalf("after cleanup with a live sibling: scan_result = %q; want processing", got)
+	}
+}
+
+// TestCancelByLibraryResetsStrandedScanResult: the delete branch resets a
+// result whose only live owner it removes, and leaves one a live sibling owns.
+func TestCancelByLibraryResetsStrandedScanResult(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	lib := addLibrary(t, sqlDB, "A", "/music/a")
+
+	solo := addScanResultIn(t, sqlDB, lib, "/music/a/1.mp3", "/music/a", "1.lrc")
+	if _, err := q.Enqueue(ctx, models.Inputs{
+		Track:       models.Track{ArtistName: "Solo", TrackName: "Song"},
+		OutputPaths: []models.OutputPath{{Outdir: "/music/a", Filename: "1.lrc"}}, ScanResultID: solo,
+	}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue solo: %v", err)
+	}
+	mustExec(t, sqlDB, `UPDATE scan_results SET status = 'processing' WHERE id = ?`, solo)
+	// A second result with a live (processing) sibling the cancel never touches.
+	shared := addScanResultIn(t, sqlDB, lib, "/music/a/2.mp3", "/music/a", "2.lrc")
+	mustExec(t, sqlDB, `UPDATE scan_results SET status = 'processing' WHERE id = ?`, shared)
+	oldID, newID := linkTwoRows(t, q, shared)
+	mustExec(t, sqlDB, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, newID)
+	mustExec(t, sqlDB, `UPDATE work_queue SET output_paths = ? WHERE id = ?`,
+		`[{"outdir":"/music/a","filename":"2.lrc"}]`, oldID)
+
+	if _, _, err := q.CancelByLibrary(ctx, lib); err != nil {
+		t.Fatalf("CancelByLibrary: %v", err)
+	}
+	if got := readScanStatus(t, sqlDB, solo); got != "pending" {
+		t.Fatalf("after cancel of last owner: scan_result = %q; want pending", got)
+	}
+	if got := readScanStatus(t, sqlDB, shared); got != "processing" {
+		t.Fatalf("after cancel with a live sibling: scan_result = %q; want processing", got)
+	}
+}
