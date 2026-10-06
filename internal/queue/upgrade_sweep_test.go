@@ -427,7 +427,7 @@ func TestEnqueueScanLiftsArmedUpgradeTrip(t *testing.T) {
 // done partition on every sweep cycle. Judged on the arm's real predicate text.
 func TestUpgradeMissyncedArmUsesPartialIndex(t *testing.T) {
 	_, dbh := upgradeQueue(t)
-	rows, err := dbh.Query(`EXPLAIN QUERY PLAN SELECT id, upgrade_checked_at, completed_at FROM work_queue WHERE`+upgradeMissyncedPredicate, 1, "", "")
+	rows, err := dbh.Query(`EXPLAIN QUERY PLAN SELECT id, upgrade_checked_at, completed_at FROM work_queue WHERE`+upgradeMissyncedPredicate, 1, "2026-09-22T12:00:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
