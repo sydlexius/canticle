@@ -3988,7 +3988,8 @@ func TestNoWordLane(t *testing.T) {
 		{"musixmatch primary with token", providers.Musixmatch, "tok", nil, nil, false},
 		{"musixmatch primary no token, no fallback", providers.Musixmatch, "", nil, nil, true},
 		{"musixmatch primary no token, innertube fallback", providers.Musixmatch, "", []string{providers.InnerTube}, nil, true},
-		{"musixmatch primary no token, petitlyrics fallback", providers.Musixmatch, "", []string{providers.PetitLyrics}, nil, false},
+		// lyrics disabled starts neither worker nor scheduler, so a fallback never runs.
+		{"musixmatch primary no token, petitlyrics fallback", providers.Musixmatch, "", []string{providers.PetitLyrics}, nil, true},
 		{"innertube primary, musixmatch fallback no token", providers.InnerTube, "", []string{providers.Musixmatch}, nil, true},
 		{"innertube primary, musixmatch fallback with token", providers.InnerTube, "tok", []string{providers.Musixmatch}, nil, false},
 		{"innertube primary, petitlyrics fallback disabled", providers.InnerTube, "", []string{providers.PetitLyrics}, []string{providers.PetitLyrics}, true},

@@ -2129,17 +2129,18 @@ type namedLane string
 func (n namedLane) Name() string { return string(n) }
 
 // noWordLane reports whether no enabled lane can serve word timing, which makes
-// line the web UI's top rung (#1350). The lanes are the fallbacks plus the
-// primary, except that the primary is skipped when lyricsDisabled: that is the
-// no-op placeholder still NAMED musixmatch (resolveServeProvider), not a lane
-// that serves anything. fallbackProviders already omits a token-less Musixmatch
-// fallback and every disabled lane, so this reads configuration, never health.
+// line the web UI's top rung (#1350). With lyricsDisabled (a Musixmatch primary
+// and no token, resolveServeProvider) nothing fetches at all: runServe starts
+// neither the worker nor the scheduler, so even a configured word-capable
+// fallback cannot process a row and no word tier is reachable. Otherwise the
+// lanes are the primary plus the fallbacks; fallbackProviders already omits a
+// token-less Musixmatch fallback and every disabled lane, so this reads
+// configuration, never health.
 func noWordLane(primary providers.LyricsProvider, lyricsDisabled bool, fallbacks []providers.LyricsProvider) bool {
-	names := laneNames(primary, fallbacks)
 	if lyricsDisabled {
-		names = names[1:]
+		return true
 	}
-	return !providers.AnyWordCapable(names)
+	return !providers.AnyWordCapable(laneNames(primary, fallbacks))
 }
 
 // laneNames is the primary's name followed by each fallback's.
