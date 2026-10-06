@@ -348,3 +348,28 @@ func TestSortFailureItemsToleratesAVanishedRow(t *testing.T) {
 		t.Errorf("sorted survivors = %v, want %v", titles, want)
 	}
 }
+
+// TestSortFailureItemsDropsAVanishedSoleRow pins that a one-item group whose
+// only row is deleted between the group read and the sort comes back empty,
+// not rendered from the stale input.
+func TestSortFailureItemsDropsAVanishedSoleRow(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	const reason = "musixmatch: unexpected matcher status_code 500"
+	id := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "Solo", status: "failed", lastError: reason, attempts: 1})
+	items, err := repo.FailureGroupItems(ctx, "failed", reason, 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("group read: %v, %v", items, err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `DELETE FROM work_queue WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.SortFailureItems(ctx, items, tablesort.Order{Key: tablesort.KeyTitle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("sorted = %+v, want empty (the sole row vanished)", got)
+	}
+}

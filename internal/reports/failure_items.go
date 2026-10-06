@@ -173,7 +173,9 @@ var FailureItemSpec = tablesort.Spec{
 // fixed expression from FailureItemSpec. The id list is bounded by the caller's
 // page size (at most MaxFailureItemsLimit), far under SQLite's variable limit.
 func (r *Repo) SortFailureItems(ctx context.Context, items []FailureItem, o tablesort.Order) ([]FailureItem, error) {
-	if len(items) < 2 {
+	// Only an empty slice skips the query: a single row can also have vanished,
+	// and the query is what drops it.
+	if len(items) == 0 {
 		return items, nil
 	}
 	byID := make(map[int64]FailureItem, len(items))
