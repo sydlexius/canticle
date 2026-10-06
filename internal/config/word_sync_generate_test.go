@@ -275,7 +275,8 @@ func TestLoad_RetiredBudgetPerCycleFileBoots(t *testing.T) {
 // TestLoad_RetiredBudgetPerCycleEnvBoots pins #1324: a leftover env var boots
 // whatever its value, records no provenance (nothing is applied), and warns.
 func TestLoad_RetiredBudgetPerCycleEnvBoots(t *testing.T) {
-	for _, v := range []string{"25", "0", "lots"} {
+	// "" is present-but-empty: presence, not content, controls the warning.
+	for _, v := range []string{"25", "0", "lots", ""} {
 		t.Run(v, func(t *testing.T) {
 			isolateEnv(t)
 			logs := captureRetiredWarn(t)

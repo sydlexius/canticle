@@ -2258,7 +2258,7 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		cfg.WordSyncGenerate.URL = v
 		applied["word_sync_generate.url"] = true
 	}
-	if os.Getenv(retiredWordSyncGenerateBudgetEnv) != "" {
+	if _, set := os.LookupEnv(retiredWordSyncGenerateBudgetEnv); set {
 		// Retired (#1324): never parsed, so any value boots. No provenance is
 		// recorded, since nothing is applied.
 		slog.Warn(retiredWordSyncGenerateBudgetEnv + " is retired and has no effect; unset it")
