@@ -2596,7 +2596,13 @@ func (w *Worker) writeFor(item queue.WorkItem) func(models.Song, string, string)
 // with the row still describing the file on disk (queue.SettleUpgradeTrip).
 // Every caller settles on an answer (a miss, a refused result, a guard verdict).
 func (w *Worker) settleUpgradeTrip(ctx context.Context, item queue.WorkItem) error {
-	if _, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID, true); err != nil {
+	return w.settleUpgradeTripAnswered(ctx, item, true)
+}
+
+// settleUpgradeTripAnswered is settleUpgradeTrip with an explicit answered flag
+// (false: no lane gave a verdict, so the #1120 pass marker stays unrecorded).
+func (w *Worker) settleUpgradeTripAnswered(ctx context.Context, item queue.WorkItem, answered bool) error {
+	if _, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID, answered); err != nil {
 		return w.fail(ctx, item, fmt.Errorf("worker: settle upgrade trip %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
@@ -2620,6 +2626,12 @@ func (w *Worker) settleUpgradeTrip(ctx context.Context, item queue.WorkItem) err
 func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause error) error {
 	if item.UpgradeQueued {
 		// No miss_count for a track that already has lyrics on disk (#553).
+		// A hollow subtitle body (ErrTruncatedResponse, #1131) is not an answer:
+		// the provider has the lyric but returned none for this request, so the
+		// post-settle mis_synced pass must not be recorded as spent.
+		if errors.Is(cause, musixmatch.ErrTruncatedResponse) {
+			return w.settleUpgradeTripAnswered(ctx, item, false)
+		}
 		return w.settleUpgradeTrip(ctx, item)
 	}
 	nextMissCount := item.MissCount + 1

@@ -677,3 +677,23 @@ func TestPreviewAutoAcceptLargeBody(t *testing.T) {
 		t.Error("the last line's stamp was not written")
 	}
 }
+
+// A stale .orig of equal line count must refuse the save with 409 and leave
+// the current file byte for byte alone (#1313).
+func TestPreviewEditRefusesStaleOrig(t *testing.T) {
+	e := newEditEnv(t)
+	stale := "[ti:y]\n[00:01.00]uno\n[00:05.00]dos\n[00:09.00]tres\n"
+	if err := os.WriteFile(e.lrcP+".orig", []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "stale_orig") {
+		t.Fatalf("save = %d %s, want 409 stale_orig", rec.Code, rec.Body)
+	}
+	if e.lrc(t) != editLRC {
+		t.Errorf("a refused save rewrote the file:\n%s", e.lrc(t))
+	}
+	if _, edited, _ := e.q.LyricEdit(context.Background(), e.rowID); edited {
+		t.Error("a refused save left the edit mark")
+	}
+}

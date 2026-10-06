@@ -297,6 +297,33 @@ func (r *upgradeRig) marker(t *testing.T) sql.NullInt64 {
 	return g
 }
 
+// TestUpgradeTrip_MissyncedHollowBodyIsNoPass (#1131): a hollow subtitle body
+// is not an answer, so the post-settle mis_synced pass settles the trip but
+// records no pass marker and the row is re-offered after the hold; a clean
+// miss still spends the pass.
+func TestUpgradeTrip_MissyncedHollowBodyIsNoPass(t *testing.T) {
+	hollow := fmt.Errorf("%w: subtitle_body empty despite HasSubtitles=1", musixmatch.ErrTruncatedResponse)
+	r := newUpgradeRig(t, &fakeFetcher{err: hollow})
+	r.postSettleMissynced(t)
+	r.run(t)
+	if got, want := r.row(t), "done outcome=unsynced timing=mis_synced lane= misses=14 armed=0"; got != want {
+		t.Fatalf("row = %q, want %q", got, want)
+	}
+	if g := r.marker(t); g.Valid {
+		t.Fatalf("pass marker = %+v, want none (hollow body is not an answer)", g)
+	}
+	if got, _ := r.q.ListUpgradeCandidates(context.Background(), time.Now().Add(8*24*time.Hour), 10); len(got) != 1 {
+		t.Fatalf("upgrade candidates after the hold = %v, want the row re-offered", got)
+	}
+
+	clean := newUpgradeRig(t, &fakeFetcher{err: musixmatch.ErrNotFound})
+	clean.postSettleMissynced(t)
+	clean.run(t)
+	if g := clean.marker(t); !g.Valid {
+		t.Fatal("a clean miss must record the pass marker")
+	}
+}
+
 // TestUpgradeTrip_MissyncedNeedsAudioDuration (#1120 review I1): the pass may
 // replace a file judged mis_synced against the audio only with a result judged
 // exactly ok against the AUDIO FILE's own duration. The same bad lyric judged

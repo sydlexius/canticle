@@ -11,6 +11,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -104,6 +105,9 @@ type timingSweepJob struct {
 	// edit lock. A test seam only: it lets a test order a concurrent edit
 	// against the per-move re-check deterministically.
 	beforeEditLock func(sidecar string)
+	// setTiming, when set, replaces q.SetTimingOutcome for the row stamp. A test
+	// seam only: it injects a write failure without a second queue type.
+	setTiming func(ctx context.Context, id int64, rec queue.TimingRecord) error
 }
 
 // newTimingSweepJob validates the config and builds the cycle's dependencies,
@@ -390,9 +394,16 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 		rec := timingRecordFor(f)
 		rec.Source = queue.TimingSourceSweep // post-settle stamp (#1120): the upgrade sweep gives it one provider pass
 		rec.FileState = fileStateFor(f)      // same UPDATE as the verdict (#1130): both land or neither
-		if serr := j.q.SetTimingOutcome(ctx, f.ID, rec); serr != nil {
-			// Non-fatal per row: the file is already remediated, and an unstamped
-			// row is merely re-judged next cycle, which is idempotent.
+		set := j.q.SetTimingOutcome
+		if j.setTiming != nil {
+			set = j.setTiming
+		}
+		if serr := retryStamp(ctx, func() error { return set(ctx, f.ID, rec) }); serr != nil {
+			// Non-fatal per row, but the retries are exhausted: the file is already
+			// remediated, so the next cycle re-judges it as no_sidecar rather than
+			// recording this verdict (#1136). The window is one failed write that
+			// outlasts stampAttempts tries; a transient busy/locked error clears
+			// well inside it.
 			slog.Warn("timing validation sweep: could not stamp a judged row", "id", f.ID, "error", serr)
 			continue
 		}
@@ -408,6 +419,18 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 		res.Remaining = remaining
 	}
 	return res, nil
+}
+
+// stampAttempts bounds the in-process retry of a row stamp that follows an
+// already-applied remediation (#1136). The filesystem change cannot be redone
+// and a later pass cannot rediscover it (the sidecar is gone), so a transient
+// SQLITE_BUSY is retried (db.RetryOnBusy, geometric backoff); any other error
+// is permanent and returns at once, so a bad batch is not slowed per row.
+const stampAttempts = 4
+
+// retryStamp runs op, retrying only on SQLITE_BUSY up to stampAttempts times.
+func retryStamp(ctx context.Context, op func() error) error {
+	return db.RetryOnBusy(ctx, stampAttempts, op)
 }
 
 // holdEditedRows strips the planned remediation from every sidecar that ANY

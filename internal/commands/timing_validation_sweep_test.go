@@ -1253,3 +1253,29 @@ func TestSweepApplyBackupFailureTouchesNothing(t *testing.T) {
 		t.Errorf("backlog = %d, %v; want 1: the row stays for a retry", n, err)
 	}
 }
+
+// TestRunCycleRetriesAFailedRowStamp (#1136): the remediation applied but the
+// first stamp writes fail; the cycle retries and the row is still recorded.
+func TestRunCycleRetriesAFailedRowStamp(t *testing.T) {
+	ctx := context.Background()
+	busy := triggerBusyErr(t)
+	job, q, _, _ := sweepFixture(t, nil)
+	calls := 0
+	job.setTiming = func(ctx context.Context, id int64, rec queue.TimingRecord) error {
+		calls++
+		if calls <= 2 {
+			return busy
+		}
+		return q.SetTimingOutcome(ctx, id, rec)
+	}
+	res, err := job.runCycle(ctx)
+	if err != nil {
+		t.Fatalf("runCycle: %v", err)
+	}
+	if res.Stamped != 1 || calls != 3 {
+		t.Errorf("Stamped=%d calls=%d, want 1 and 3", res.Stamped, calls)
+	}
+	if n, _ := q.CountTimingBacklog(ctx); n != 0 {
+		t.Errorf("backlog = %d, want 0: the remediation was never recorded", n)
+	}
+}

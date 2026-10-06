@@ -505,3 +505,131 @@ func TestSettleStuckUpgradeTrip(t *testing.T) {
 		}
 	})
 }
+
+// TestUpgradeHoldEscalation (#1118): a row's hold is the base hold times
+// 2^MIN(misses, cap), an answered settle counts a miss, an unanswered one does
+// not, completing an armed trip resets it, and the cap bounds the wait.
+func TestUpgradeHoldEscalation(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	day := 24 * time.Hour
+	base := 7 * day
+	hold := upgradeNow.Add(-base)
+	// Admitted 20 days ago: past the 1x (7d) and 2x (14d) holds, inside 4x (28d).
+	admitted := formatTime(upgradeNow.Add(-20 * day))
+	ids := map[int]int64{}
+	for _, n := range []int{0, 1, 2, 3, 9} {
+		ids[n] = seedUpgradeRow(t, dbh, "m"+string(rune('a'+n)), "upgrade_checked_at = '"+admitted+"', upgrade_miss_count = "+string(rune('0'+n)))
+	}
+	got, err := q.ListUpgradeCandidates(ctx, hold, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	if want := []int64{ids[0], ids[1]}; !slices.Equal(got, want) {
+		t.Fatalf("20d after admission = %v, want misses 0 and 1 only %v", got, want)
+	}
+	// 30 days: 4x (28d) elapsed, 8x (56d) not; a miss count past the cap holds at 8x.
+	q.now = func() time.Time { return upgradeNow.Add(10 * day) }
+	got, _ = q.ListUpgradeCandidates(ctx, q.now().Add(-base), 100)
+	slices.Sort(got)
+	if want := []int64{ids[0], ids[1], ids[2]}; !slices.Equal(got, want) {
+		t.Fatalf("30d after admission = %v, want misses 0-2 %v", got, want)
+	}
+	// 60 days: the 8x hold (56d) elapsed for both the cap and a count past it.
+	q.now = func() time.Time { return upgradeNow.Add(40 * day) }
+	got, _ = q.ListUpgradeCandidates(ctx, q.now().Add(-base), 100)
+	if len(got) != 5 {
+		t.Fatalf("60d after admission = %v, want all five (cap is 8x, not unbounded)", got)
+	}
+	// A count past the cap is not held longer than the cap: 56d, not 2^9 weeks.
+	if flipped, err := q.MarkUpgradeQueued(ctx, []int64{ids[9]}, q.now().Add(-base)); err != nil || len(flipped) != 1 {
+		t.Fatalf("flip capped row = %v, %v", flipped, err)
+	}
+}
+
+func TestUpgradeMissCountSettleAndReset(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	read := func(id int64) int {
+		var n int
+		if err := dbh.QueryRow(`SELECT upgrade_miss_count FROM work_queue WHERE id = ?`, id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	arm := "status = 'processing', upgrade_queued = 1, upgrade_miss_count = 2"
+	answered := seedUpgradeRow(t, dbh, "answered", arm)
+	unanswered := seedUpgradeRow(t, dbh, "unanswered", arm)
+	landed := seedUpgradeRow(t, dbh, "landed", arm)
+	plain := seedUpgradeRow(t, dbh, "plain", "status = 'processing', upgrade_miss_count = 2")
+	if _, err := q.SettleUpgradeTrip(ctx, answered, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.SettleUpgradeTrip(ctx, unanswered, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Complete(ctx, landed); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Complete(ctx, plain); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		id   int64
+		want int
+	}{{"answered miss counts", answered, 3}, {"unanswered leaves it", unanswered, 2}, {"completed trip resets", landed, 0}, {"ordinary completion keeps it", plain, 2}} {
+		if got := read(c.id); got != c.want {
+			t.Errorf("%s: upgrade_miss_count = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestUpgradeCandidateArmUsesDequeueIndex(t *testing.T) {
+	q, dbh := upgradeQueue(t)
+	args := append([]any{"2026-09-22T12:00:00Z"}, q.upgradeHoldArgs(upgradeNow, upgradeNow.Add(-7*24*time.Hour))...)
+	rows, err := dbh.Query(`EXPLAIN QUERY PLAN SELECT id FROM work_queue WHERE`+upgradeCandidatePredicate, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("plan: %s", detail)
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	const want = "SEARCH work_queue USING INDEX idx_work_queue_status_next_attempt"
+	if !slices.ContainsFunc(details, func(d string) bool { return strings.HasPrefix(d, want) }) {
+		t.Fatalf("candidate arm plan lacks %q: %v", want, details)
+	}
+	for _, d := range details {
+		if strings.HasPrefix(d, "SCAN work_queue") {
+			t.Fatalf("candidate arm scans work_queue: %s", d)
+		}
+	}
+}
+
+// TestMarkUpgradeQueuedTakesOneClockSnapshotPerAttempt pins that the hold args
+// and the stamps share one q.now() read inside the retry closure, so a retry
+// re-reads the clock instead of reusing a stale escalation cutoff.
+func TestMarkUpgradeQueuedTakesOneClockSnapshotPerAttempt(t *testing.T) {
+	q, dbh := upgradeQueue(t)
+	id := seedUpgradeRow(t, dbh, "snap", "")
+	calls := 0
+	q.now = func() time.Time { calls++; return upgradeNow }
+	if _, err := q.MarkUpgradeQueued(context.Background(), []int64{id}, upgradeNow.Add(-7*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("q.now called %d times in one attempt, want 1", calls)
+	}
+}

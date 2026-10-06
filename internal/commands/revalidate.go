@@ -286,7 +286,14 @@ func stampRemediatedRows(ctx context.Context, q rowStamper, findings []revalidat
 		rec := timingRecordFor(byRow[id])
 		rec.Source = queue.TimingSourceRevalidate // post-settle stamp (#1120)
 		rec.FileState = fileStateFor(byRow[id])   // same UPDATE as the verdict (#1130)
-		ok, serr := q.SetTimingOutcomeIfIdle(ctx, id, rec)
+		// The sidecar is already remediated and cannot be rediscovered, so a
+		// failed write is retried before it is counted (#1136).
+		var ok bool
+		serr := retryStamp(ctx, func() error {
+			var e error
+			ok, e = q.SetTimingOutcomeIfIdle(ctx, id, rec)
+			return e
+		})
 		if serr != nil {
 			slog.Error("revalidate: could not stamp a remediated row", "id", id, "error", serr)
 			failed++

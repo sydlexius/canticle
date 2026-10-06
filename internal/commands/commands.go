@@ -3495,22 +3495,16 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 		if path == "" {
 			path = defaultConfigPath()
 		}
+		if path == "" {
+			_, _ = fmt.Fprintln(out, "cannot determine a config file location (no home directory); pass --config <path>")
+			return 2
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 			slog.Error("failed to create config directory", "error", err)
 			return 1
 		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600) //nolint:gosec // user-selected config path
-		if err != nil {
-			slog.Error("failed to open config file", "error", err)
-			return 1
-		}
-		if err := toml.NewEncoder(f).Encode(cfg); err != nil {
-			_ = f.Close()
+		if err := writeFileAtomic(path, func(w io.Writer) error { return toml.NewEncoder(w).Encode(cfg) }); err != nil {
 			slog.Error("failed to write config", "error", err)
-			return 1
-		}
-		if err := f.Close(); err != nil {
-			slog.Error("failed to close config", "error", err)
 			return 1
 		}
 		// Echo the SAVED value, not the raw input: setConfigValue may normalize
@@ -4027,15 +4021,73 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	return nil
 }
 
+// defaultConfigPath is where `config set` writes when no --config is given.
+// It delegates to config.ResolveConfigPath so the write target is the same
+// file serve and `config get` read, including /config under MXLRC_DOCKER (#980).
+// It returns "" when no path resolves (no home directory, not Docker); the
+// reader then loads no file at all, so the caller must refuse rather than
+// invent a path the reader would never see.
 func defaultConfigPath() string {
-	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
-		return filepath.Join(base, "mxlrcgo-svc", "config.toml")
+	return config.ResolveConfigPath("")
+}
+
+// writeFileAtomic writes via a temp file in the destination directory, fsyncs
+// it, and renames over path, so a failed encode or a crash never leaves a
+// truncated config. An existing file's mode is kept; a new file gets 0600.
+func writeFileAtomic(path string, encode func(io.Writer) error) (err error) {
+	// A symlinked destination is resolved first so the rename replaces the
+	// target, not the link. A missing path (or a dangling link) is kept as
+	// given: there is nothing to resolve, and the write creates it.
+	if resolved, evalErr := filepath.EvalSymlinks(path); evalErr == nil {
+		path = resolved
 	}
-	home, err := os.UserHomeDir()
+	mode := os.FileMode(0600)
+	if st, statErr := os.Stat(path); statErr == nil {
+		mode = st.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
 	if err != nil {
-		return filepath.Join("config.toml")
+		return fmt.Errorf("create temp config: %w", err)
 	}
-	return filepath.Join(home, ".config", "mxlrcgo-svc", "config.toml")
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if err = encode(tmp); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err = tmp.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod temp config: %w", err)
+	}
+	if err = tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temp config: %w", err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err = os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	// Best-effort: make the renamed entry durable. Directory sync is
+	// unsupported on some platforms (Windows) and the file is already
+	// replaced, so a failure here never fails the write.
+	_ = syncDir(filepath.Dir(path))
+	return nil
+}
+
+// syncDir fsyncs a directory so a rename inside it survives power loss.
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // reason: dir is the parent of the config path the caller already resolved
+	if err != nil {
+		return err
+	}
+	syncErr := d.Sync()
+	if closeErr := d.Close(); syncErr == nil {
+		syncErr = closeErr
+	}
+	return syncErr
 }
 
 func splitCSV(s string) []string {

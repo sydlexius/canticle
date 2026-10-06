@@ -20,7 +20,20 @@ const upgradeCandidatePredicate = ` status = 'done'
    AND TRIM(COALESCE(source_path, '')) <> ''
    AND COALESCE(last_error, '') = ''
    AND completed_at < ?
-   AND COALESCE(upgrade_checked_at, '') < ?` + notLyricEdited
+   AND COALESCE(upgrade_checked_at, '') < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '-' || (? * ((1 << MIN(upgrade_miss_count, ?)) - 1)) || ' seconds')` + notLyricEdited
+
+// UpgradeMaxHoldDoublings caps the hold escalation (#1118): a row that has
+// missed n consecutive trips waits base * 2^MIN(n, cap), so 1, 2, 4, 8 weeks
+// for a one-week base. #1107's instrumental-marker pacing should share this shape.
+const UpgradeMaxHoldDoublings = 3
+
+// upgradeHoldArgs are the three bound values of the first arm's hold term, in
+// predicate order: the base cut (holdBefore), the base hold in whole seconds
+// (clamped at zero for a future cut, which only ever disables escalation), and the cap.
+func (q *DBQueue) upgradeHoldArgs(now, holdBefore time.Time) []any {
+	base := int64(now.Sub(holdBefore) / time.Second)
+	return []any{formatTime(holdBefore), max(base, 0), UpgradeMaxHoldDoublings}
+}
 
 // upgradeMissyncedPredicate is the second
 // population (#1120): a settled row marked mis_synced AFTER its fetch (the #443
@@ -34,7 +47,8 @@ const upgradeCandidatePredicate = ` status = 'done'
 // re-admission under the same verdict (a lane-set change, or a trip no lane
 // answered, which SettleUpgradeTrip leaves unmarked) waits out the other arm's
 // week hold, so an unreachable provider cannot re-spend a trip every cycle.
-// Two args: the generation, then the hold cut.
+// Two args: the generation, then the hold cut. (Not escalated: its one-pass
+// marker already bounds it to one trip per lane-set change.)
 const upgradeMissyncedPredicate = ` status = 'done'
    AND timing_outcome = 'mis_synced'
    AND COALESCE(timing_stamp_source, '') <> 'fetch'
@@ -48,12 +62,14 @@ const upgradeMissyncedPredicate = ` status = 'done'
 // and last admitted before holdBefore (below the line rung), and post-settle
 // mis_synced rows not yet passed under the current providers generation
 // (SetProvidersVersion, #1120). Never-admitted first, then longest-held. Read-only.
+// holdBefore is the BASE hold's cut (now - one week); a row with upgrade_miss_count
+// n additionally waits (2^MIN(n, UpgradeMaxHoldDoublings) - 1) more base holds (#1118).
 func (q *DBQueue) ListUpgradeCandidates(ctx context.Context, holdBefore time.Time, limit int) ([]int64, error) {
 	cut := formatTime(holdBefore)
 	const cols = `SELECT id, upgrade_checked_at, completed_at FROM work_queue WHERE`
 	return q.queryIDs(ctx, "list upgrade candidates", `SELECT id FROM (`+cols+upgradeCandidatePredicate+ //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
 		` UNION ALL `+cols+upgradeMissyncedPredicate+`) ORDER BY upgrade_checked_at ASC, completed_at ASC, id ASC LIMIT ?`,
-		cut, cut, q.providersVersion, cut, limit)
+		append(append([]any{cut}, q.upgradeHoldArgs(q.now(), holdBefore)...), q.providersVersion, cut, limit)...)
 }
 
 // CountUpgradeInFlight counts upgrade trips not yet settled. The 053 trigger
@@ -84,12 +100,16 @@ func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore
 			return fmt.Errorf("queue: begin upgrade flip tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		now, cut := formatTime(q.now()), formatTime(holdBefore)
+		// One clock snapshot per attempt feeds the stamps AND the hold args, so a
+		// SQLITE_BUSY retry never reuses a stale escalation cutoff.
+		nowT := q.now()
+		holdArgs := q.upgradeHoldArgs(nowT, holdBefore)
+		now, cut := formatTime(nowT), formatTime(holdBefore)
 		for _, id := range ids {
 			res, err := tx.ExecContext(ctx, `UPDATE work_queue SET status = 'pending', priority = ?, next_attempt_at = ?, attempts = 0,
                  last_error = '', refused_waits = 0, upgrade_queued = 1, upgrade_checked_at = ?
              WHERE id = ? AND (`+upgradeCandidatePredicate+` OR `+upgradeMissyncedPredicate+`)`, //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
-				PriorityUpgrade, now, now, id, cut, cut, q.providersVersion, cut)
+				append(append([]any{PriorityUpgrade, now, now, id, cut}, holdArgs...), q.providersVersion, cut)...)
 			if err != nil {
 				return fmt.Errorf("queue: flip upgrade id %d: %w", id, err)
 			}
@@ -120,12 +140,16 @@ func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore
 // guard or verifier verdict). Only then does a mis_synced row (#1120) record
 // its one provider pass under the current generation; a trip that never
 // reached a lane (transport failures to the cap, a verifier error) is not a
-// pass and is re-offered after the week hold.
+// pass and is re-offered after the week hold. An answered settle is also a
+// MISS for the hold escalation (#1118): upgrade_miss_count grows by one, so the
+// next admission waits longer (see ListUpgradeCandidates); an unanswered one
+// leaves the count alone, since no lane said no.
 func (q *DBQueue) SettleUpgradeTrip(ctx context.Context, id int64, answered bool) (settled bool, err error) {
 	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
 		res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done', last_error = '', refused_waits = 0, attempts = 0,
-                 missync_recheck_generation = CASE WHEN ? AND timing_outcome = 'mis_synced' THEN ? ELSE missync_recheck_generation END
-             WHERE id = ? AND status = 'processing' AND upgrade_queued = 1`, answered, q.providersVersion, id)
+                 missync_recheck_generation = CASE WHEN ? AND timing_outcome = 'mis_synced' THEN ? ELSE missync_recheck_generation END,
+                 upgrade_miss_count = CASE WHEN ? THEN upgrade_miss_count + 1 ELSE upgrade_miss_count END
+             WHERE id = ? AND status = 'processing' AND upgrade_queued = 1`, answered, q.providersVersion, answered, id)
 		if err != nil {
 			return fmt.Errorf("queue: settle upgrade trip id %d: %w", id, err)
 		}
