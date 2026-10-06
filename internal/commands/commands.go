@@ -1046,7 +1046,15 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// would burn rate-limited mints during the exact window they are refused).
 	var tokenRenewer musixmatch.TokenRenewer
 	if !operatorSupplied && store != nil {
-		tokenRenewer = &persistingRenewer{minter: tokenMinterImpl, store: store}
+		r := &persistingRenewer{minter: tokenMinterImpl, store: store}
+		if tokenFromDB {
+			// A DB token with no identity record is the pre-#934 legacy shape
+			// and stays renewable; see persistingRenewer.legacyToken.
+			if _, ok, err := store.Get(ctx, secrets.NameMusixmatchClientIdentity); err == nil && !ok {
+				r.legacyToken = token
+			}
+		}
+		tokenRenewer = r
 	}
 
 	webhookKeys, webhookFromDB, err := resolveWebhookKeysWithStore(ctx, cfg.Server.WebhookAPIKeys, store)

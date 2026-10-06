@@ -270,3 +270,64 @@ func TestPersistMintedTokenIsAtomic(t *testing.T) {
 		t.Errorf("identity = %q, want the previous record: a failed token write must roll the record back", v)
 	}
 }
+
+// TestRenewerNeverOverwritesOperatorSavedToken pins #942: a renewer installed
+// at startup must not replace a token the operator saved afterwards (the web
+// settings/onboarding path, secrets.SetOperatorMusixmatchToken), and the
+// operator token and its absent identity record survive the renewal hint.
+func TestRenewerNeverOverwritesOperatorSavedToken(t *testing.T) {
+	ctx := context.Background()
+	store := secrets.NewMemoryStore()
+	m := &fakeMinter{token: "minted-tok"}
+	r := &persistingRenewer{minter: m, store: store}
+
+	if err := secrets.SetOperatorMusixmatchToken(ctx, store, "operator-tok"); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := r.Renew(ctx)
+	if !errors.Is(err, errOperatorTokenStored) || tok != "" {
+		t.Fatalf("Renew = (%q, %v), want (\"\", errOperatorTokenStored)", tok, err)
+	}
+	if m.calls != 0 {
+		t.Errorf("minter called %d times, want 0", m.calls)
+	}
+	if v, _, _ := store.Get(ctx, secrets.NameMusixmatchToken); v != "operator-tok" {
+		t.Errorf("stored token = %q, want operator-tok", v)
+	}
+	if _, ok, _ := store.Get(ctx, secrets.NameMusixmatchClientIdentity); ok {
+		t.Error("an identity record was written beside the operator token")
+	}
+}
+
+// TestRenewerStillRenewsMintedAndLegacyTokens pins that the #942 guard does
+// not disable renewal for the tokens it is meant to replace: a token canticle
+// minted (identity record present), a pre-#934 token the process started with
+// (no record, equals legacyToken), and an empty store.
+func TestRenewerStillRenewsMintedAndLegacyTokens(t *testing.T) {
+	ctx := context.Background()
+	cases := map[string]func(secrets.Store) string{
+		"empty store": func(secrets.Store) string { return "" },
+		"minted": func(s secrets.Store) string {
+			_ = secrets.SetMusixmatchTokenWithIdentity(ctx, s, "old-minted", musixmatch.ClientIdentityKey())
+			return ""
+		},
+		"legacy": func(s secrets.Store) string {
+			_ = s.Set(ctx, secrets.NameMusixmatchToken, "legacy-tok")
+			return "legacy-tok"
+		},
+	}
+	for name, seed := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := secrets.NewMemoryStore()
+			legacy := seed(store)
+			r := &persistingRenewer{minter: &fakeMinter{token: "minted-tok"}, store: store, legacyToken: legacy}
+			tok, err := r.Renew(ctx)
+			if err != nil || tok != "minted-tok" {
+				t.Fatalf("Renew = (%q, %v), want (minted-tok, nil)", tok, err)
+			}
+			if v, _, _ := store.Get(ctx, secrets.NameMusixmatchToken); v != "minted-tok" {
+				t.Errorf("stored token = %q, want minted-tok", v)
+			}
+		})
+	}
+}
