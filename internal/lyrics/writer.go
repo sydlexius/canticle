@@ -55,7 +55,7 @@ func SidecarNameFor(artist, track, filename string, kind sidecar.Kind) (string, 
 	if filename != "" {
 		if filename == "." || filename == ".." || filename != filepath.Base(filename) ||
 			isUnsafeBaseName(filename) {
-			return "", fmt.Errorf("refusing to write: output filename %q is not a base name", filename)
+			return "", errors.New("refusing to write: output filename is not a base name")
 		}
 		fn = strings.TrimSuffix(filename, filepath.Ext(filename)) + ext
 	} else {
@@ -65,7 +65,7 @@ func SidecarNameFor(artist, track, filename string, kind sidecar.Kind) (string, 
 	// Slugify, keeping the base-name invariant local and failing closed if either
 	// branch ever regresses.
 	if isUnsafeBaseName(fn) {
-		return "", fmt.Errorf("refusing to write: derived output name %q is not a base name", fn)
+		return "", errors.New("refusing to write: derived output name is not a base name")
 	}
 	return fn, nil
 }
@@ -763,14 +763,14 @@ func companionOwnershipOfErr(path string) (companionOwnership, error) {
 		return companionAbsent, nil
 	}
 	if err != nil {
-		return companionForeign, fmt.Errorf("stat companion %q: %w", path, err)
+		return companionForeign, fmt.Errorf("stat companion: %w", err)
 	}
 	if !fi.Mode().IsRegular() {
 		return companionForeign, nil
 	}
 	tags, _, err := parseLRCHeader(path)
 	if err != nil {
-		return companionForeign, fmt.Errorf("read companion header %q: %w", path, err)
+		return companionForeign, fmt.Errorf("read companion header: %w", err)
 	}
 	for _, t := range tags {
 		if strings.EqualFold(t.key, "by") && strings.TrimSpace(t.value) == "canticle" {
@@ -797,9 +797,9 @@ func (w *LRCWriter) resolveOutdir(outdir string) (string, error) {
 		// error, not a confinement violation. (No MkdirAll here -- behavior is
 		// unchanged; os.CreateTemp already requires the dir to exist.)
 		if _, statErr := os.Stat(outdir); os.IsNotExist(statErr) {
-			return "", fmt.Errorf("refusing to write: output dir %q does not exist", outdir)
+			return "", errors.New("refusing to write: output dir does not exist")
 		}
-		return "", fmt.Errorf("refusing to write to %q: output dir escapes confinement root %q or is unresolvable", outdir, root)
+		return "", errors.New("refusing to write: output dir escapes the confinement root or is unresolvable")
 	}
 	return resolved, nil
 }
@@ -811,14 +811,14 @@ func writeAtomic(outdir, fn string, tags []string, writeContent func(*bufio.Writ
 	fp := filepath.Join(outdir, fn)
 	tmp, err := os.CreateTemp(outdir, selfwrite.TempPattern(fn)) //nolint:gosec // path is constructed from sanitized song metadata
 	if err != nil {
-		return fmt.Errorf("creating temp file in %s: %w", outdir, err)
+		return fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 	tmpClosed := false
 	defer func() {
 		if !tmpClosed {
 			if cerr := tmp.Close(); cerr != nil && retErr == nil {
-				retErr = fmt.Errorf("closing %s: %w", tmpPath, cerr)
+				retErr = fmt.Errorf("closing temp file: %w", cerr)
 			}
 		}
 		if retErr != nil {
@@ -836,22 +836,22 @@ func writeAtomic(outdir, fn string, tags []string, writeContent func(*bufio.Writ
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing %s: %w", tmpPath, err)
+		return fmt.Errorf("closing temp file: %w", err)
 	}
 	tmpClosed = true
 	// Restore typical output file permissions (0666, subject to umask).
 	// os.CreateTemp creates files with mode 0600; chmod before rename so the
 	// final .lrc has the same permissions as a file created with os.Create.
 	if err := os.Chmod(tmpPath, 0o666); err != nil { //nolint:gosec // mode is a fixed constant, not user input
-		return fmt.Errorf("chmod %s: %w", tmpPath, err)
+		return fmt.Errorf("chmod temp file: %w", err)
 	}
 	// On Windows, os.Rename fails when the destination already exists.
 	// Remove it first so overwrite semantics are preserved cross-platform.
 	if err := os.Remove(fp); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing existing %s: %w", fp, err)
+		return fmt.Errorf("removing existing output: %w", err)
 	}
 	if err := os.Rename(tmpPath, fp); err != nil {
-		return fmt.Errorf("renaming %s to %s: %w", tmpPath, fp, err)
+		return fmt.Errorf("renaming temp file into place: %w", err)
 	}
 	// NEW-3: fsync the parent dir so the rename is durable across a hard crash.
 	fsyncDir(outdir)
