@@ -496,6 +496,7 @@
     var earHintText = earHint ? earHint.textContent : "";
     var earWasOn = false;
     var earJustOn = false;
+    var earWasSticky = false; // the bar was pinned (sticky, not unpinned) when By ear came on
     var moreBtn = $("mx-edit-more");
     function paintEar(isLocked) {
       if ((isLocked || playback.failed) && ear.on()) {
@@ -510,6 +511,10 @@
       banner.hidden = !v.on;
       if (v.on && !earWasOn) {
         earJustOn = true; // render() checks focus once repin() has decided
+        // Read before repin(): only an activation that itself unpins a sticky bar
+        // strands focus. Desktop and landscape layouts are not sticky, and an
+        // already-unpinned bar did not move when the toggle was pressed.
+        earWasSticky = !panel.classList.contains("is-unpinned") && window.getComputedStyle(panel).position === "sticky";
         collapse(); // an open phone panel would cover the banner and the lyrics
       }
       earWasOn = v.on;
@@ -606,7 +611,7 @@
         earJustOn = false;
         // An unpinned bar sits after the lyrics, far off-screen; focus left on
         // the toggle would follow it there. The banner's Cancel is in view.
-        if (panel.classList.contains("is-unpinned") && document.activeElement === earBtn) {
+        if (earWasSticky && panel.classList.contains("is-unpinned") && document.activeElement === earBtn) {
           earCancel.focus();
         }
       }

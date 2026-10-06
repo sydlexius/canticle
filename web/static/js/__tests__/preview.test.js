@@ -288,7 +288,10 @@ describe("offset editor helpers", () => {
     const times = () => Array.from(p.doc.querySelectorAll(".mx-preview-time")).map((e) => e.textContent);
     // layout stubs jsdom's missing geometry: the player's bottom edge (document
     // coordinates), the bar's content height and the viewport height.
-    const layout = ({ playerBottom, barHeight, viewport, bannerBottom = 0 }) => {
+    // sticky: jsdom loads no stylesheet, so the phone bar's computed position
+    // (sticky under the phone rule, static on desktop/landscape) is stubbed inline.
+    const layout = ({ playerBottom, barHeight, viewport, bannerBottom = 0, sticky = true }) => {
+      $("mx-edit").style.position = sticky ? "sticky" : "static";
       p.win.innerHeight = viewport;
       $("mx-ear-banner").getBoundingClientRect = () => ({ bottom: bannerBottom });
       $("mx-preview-audio").getBoundingClientRect = () => ({ bottom: playerBottom });
@@ -451,6 +454,29 @@ describe("offset editor helpers", () => {
       toggle.click();
       expect(unpinned(e)).toBe(true);
       expect(e.doc.activeElement).toBe(e.$("mx-ear-cancel"));
+    });
+
+    it("leaves focus on the toggle when the bar was already unpinned before activation (#1273)", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 400, viewport: 568 }); // does not fit even without the banner
+      e.nudge("+0.1");
+      expect(unpinned(e)).toBe(true);
+      const toggle = e.$("mx-ear-toggle");
+      toggle.focus();
+      toggle.click();
+      expect(e.$("mx-ear-banner").hidden).toBe(false);
+      expect(unpinned(e)).toBe(true);
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("leaves focus on the toggle in a non-sticky layout (desktop, landscape) (#1273)", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568, bannerBottom: 450, sticky: false });
+      const toggle = e.$("mx-ear-toggle");
+      toggle.focus();
+      toggle.click();
+      expect(unpinned(e)).toBe(true);
+      expect(e.doc.activeElement).toBe(toggle);
     });
 
     it("leaves focus on the By ear toggle when the bar stays pinned (#1273)", () => {
