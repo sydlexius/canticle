@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/sydlexius/canticle/internal/failsig"
+	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
 )
 
@@ -42,6 +43,17 @@ func (u *UI) handleFailureGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid status", http.StatusBadRequest)
 		return
 	}
+	// A bare fragment is only meaningful inside the page that requested it; a
+	// plain navigation (open in a new tab, copy-link) goes to the parent report.
+	w.Header().Add("Vary", "HX-Request")
+	if r.Header.Get("HX-Request") != "true" {
+		parent := "/reports/failure-analysis"
+		if status == "deferred" {
+			parent = "/reports/deferred-misses"
+		}
+		http.Redirect(w, r, parent, http.StatusSeeOther)
+		return
+	}
 	if u.reports == nil {
 		slog.Error("reports repo not wired; cannot serve failure group")
 		http.Error(w, "reports data source unavailable", http.StatusServiceUnavailable)
@@ -58,6 +70,18 @@ func (u *UI) handleFailureGroup(w http.ResponseWriter, r *http.Request) {
 	view := templates.FailureGroupView{Truncated: len(items) > failureGroupPageSize}
 	if view.Truncated {
 		items = items[:failureGroupPageSize]
+	}
+	// Truncate in the default (newest-first) order BEFORE sorting, so a sort
+	// arranges the rows shown and never changes which rows a big group shows.
+	order, cols := failureGroupSort(q, status, signature)
+	view.Columns = cols
+	if order != reports.FailureItemSpec.Default {
+		items, err = u.reports.SortFailureItems(r.Context(), items, order)
+		if err != nil {
+			slog.Error("failure group sort failed", "status", status)
+			http.Error(w, "failure group query failed", http.StatusInternalServerError)
+			return
+		}
 	}
 	for _, it := range items {
 		view.Rows = append(view.Rows, templates.FailureItemRow{

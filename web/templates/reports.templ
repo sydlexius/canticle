@@ -267,13 +267,9 @@ templ FailureGroupRows(view FailureGroupView) {
 			<table class="mx-table" aria-label="Rows in this failure group">
 				<thead>
 					<tr>
-						<th scope="col">Artist</th>
-						<th scope="col">Album</th>
-						<th scope="col">Title</th>
-						<th scope="col">Next attempt</th>
-						<th scope="col">Misses</th>
-						<th scope="col">Attempts</th>
-						<th scope="col">Updated</th>
+						for _, col := range view.Columns {
+							@SortHeader(col)
+						}
 					</tr>
 				</thead>
 				<tbody>

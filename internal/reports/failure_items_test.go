@@ -3,12 +3,14 @@ package reports_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/failsig"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
 var failedUpdatedAt = []string{
@@ -309,5 +311,40 @@ func TestNeedsAttentionLimitClampAndTieBreak(t *testing.T) {
 	}
 	if len(all) != 3 || all[0].ID != ids[2] || all[1].ID != ids[1] || all[2].ID != ids[0] {
 		t.Errorf("tie order = %+v; want ids %d, %d, %d", all, ids[2], ids[1], ids[0])
+	}
+}
+
+// TestSortFailureItemsToleratesAVanishedRow pins that a row deleted between the
+// group read and the sort drops out of the result while the survivors keep the
+// requested order (it used to return the unsorted input, vanished row included).
+func TestSortFailureItemsToleratesAVanishedRow(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	const reason = "musixmatch: unexpected matcher status_code 500"
+	var cc int64
+	for _, title := range []string{"Bb", "Aa", "Cc"} {
+		id := insertWorkItem(t, sqlDB, workItem{artist: "A", title: title, status: "failed", lastError: reason, attempts: 1})
+		if title == "Cc" {
+			cc = id
+		}
+	}
+	items, err := repo.FailureGroupItems(ctx, "failed", reason, 10)
+	if err != nil || len(items) != 3 {
+		t.Fatalf("group read: %v, %v", items, err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `DELETE FROM work_queue WHERE id = ?`, cc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.SortFailureItems(ctx, items, tablesort.Order{Key: tablesort.KeyTitle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var titles []string
+	for _, it := range got {
+		titles = append(titles, it.Title)
+	}
+	if want := []string{"Aa", "Bb"}; !reflect.DeepEqual(titles, want) {
+		t.Errorf("sorted survivors = %v, want %v", titles, want)
 	}
 }

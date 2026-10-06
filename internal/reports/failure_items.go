@@ -7,6 +7,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/failsig"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
 // MaxFailureItemsLimit caps one FailureGroupItems call so a caller cannot ask
@@ -152,5 +153,62 @@ func (r *Repo) NeedsAttention(ctx context.Context, limit int) ([]FailureItem, er
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reports: needs attention rows: %w", err)
 	}
+	return out, nil
+}
+
+// FailureItemSpec is the sort of one failure group's rows (#1260): the Work
+// Queue's columns, defaulting to the newest-updated-first order
+// FailureGroupItems returns. It is a spec over the work_queue columns, so the
+// keys are the queue bucket vocabulary.
+var FailureItemSpec = tablesort.Spec{
+	Columns: bucketColumns,
+	ID:      "id",
+	Default: tablesort.Order{Key: tablesort.KeyUpdated, Desc: true},
+}
+
+// SortFailureItems reorders items, which the caller has already bounded to
+// the rows it shows (FailureGroupItems in its default order, truncated), by o.
+// The row set is the caller's: only ids already in items are selected, so a
+// sort can never change WHICH rows a truncated group shows. The ORDER BY is a
+// fixed expression from FailureItemSpec. The id list is bounded by the caller's
+// page size (at most MaxFailureItemsLimit), far under SQLite's variable limit.
+func (r *Repo) SortFailureItems(ctx context.Context, items []FailureItem, o tablesort.Order) ([]FailureItem, error) {
+	if len(items) < 2 {
+		return items, nil
+	}
+	byID := make(map[int64]FailureItem, len(items))
+	args := make([]any, 0, len(items))
+	marks := make([]byte, 0, 2*len(items))
+	for i, it := range items {
+		byID[it.ID] = it
+		args = append(args, it.ID)
+		if i > 0 {
+			marks = append(marks, ',')
+		}
+		marks = append(marks, '?')
+	}
+	// marks is only "?" and ","; the ORDER BY is a fixed spec expression.
+	//nolint:gosec // reason: G202: marks is only '?' and ',' and the ORDER BY a fixed spec expression, never request text
+	query := `SELECT id FROM work_queue WHERE id IN (` + string(marks) + `) ORDER BY ` + FailureItemSpec.OrderBy(o)
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reports: sort failure items: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make([]FailureItem, 0, len(items))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("reports: scan sorted failure item: %w", err)
+		}
+		if it, ok := byID[id]; ok {
+			out = append(out, it)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reports: sorted failure item rows: %w", err)
+	}
+	// A row that vanished between the two reads is simply absent: the survivors
+	// stay in the requested order, so the header's sort state still matches.
 	return out, nil
 }
