@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"errors"
 	"io/fs"
 	"os"
 	"strings"
@@ -27,18 +26,29 @@ func scrubWritePaths(err error) error {
 		return nil
 	}
 	msg := err.Error()
-	for cur := err; cur != nil; cur = errors.Unwrap(cur) {
-		var orig, repl string
+	var walk func(error)
+	walk = func(cur error) {
 		switch e := cur.(type) {
 		case *fs.PathError:
-			orig, repl = e.Error(), e.Op+": "+e.Err.Error()
+			msg = strings.Replace(msg, e.Error(), e.Op+": "+e.Err.Error(), 1)
 		case *os.LinkError:
-			orig, repl = e.Error(), e.Op+": "+e.Err.Error()
-		default:
-			continue
+			msg = strings.Replace(msg, e.Error(), e.Op+": "+e.Err.Error(), 1)
 		}
-		msg = strings.Replace(msg, orig, repl, 1)
+		// Both Unwrap shapes: errors.Join and multi-%w wraps expose []error.
+		switch u := cur.(type) {
+		case interface{ Unwrap() error }:
+			if inner := u.Unwrap(); inner != nil {
+				walk(inner)
+			}
+		case interface{ Unwrap() []error }:
+			for _, inner := range u.Unwrap() {
+				if inner != nil {
+					walk(inner)
+				}
+			}
+		}
 	}
+	walk(err)
 	if msg == err.Error() {
 		return err
 	}

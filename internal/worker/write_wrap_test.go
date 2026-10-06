@@ -56,7 +56,11 @@ func writeErrorsWithPaths(t *testing.T) map[string]error {
 		"lyrics refusal": refused,
 		"path error":     &fs.PathError{Op: "open", Path: full + ".tmp", Err: syscall.ENOSPC},
 		"wrapped path":   fmt.Errorf("creating temp file: %w", &fs.PathError{Op: "open", Path: full, Err: syscall.EACCES}),
-		"link error":     &os.LinkError{Op: "rename", Old: full + ".tmp", New: full, Err: syscall.EROFS},
+		"joined": errors.Join(
+			&fs.PathError{Op: "open", Path: full + ".tmp", Err: syscall.ENOSPC},
+			fmt.Errorf("cleanup: %w", &fs.PathError{Op: "remove", Path: full + ".tmp", Err: syscall.EACCES})),
+		"companion header": companionHeaderErr(t),
+		"link error":       &os.LinkError{Op: "rename", Old: full + ".tmp", New: full, Err: syscall.EROFS},
 	}
 }
 
@@ -114,4 +118,17 @@ func TestScrubWritePathsKeepsChain(t *testing.T) {
 	if scrubWritePaths(nil) != nil {
 		t.Error("nil must stay nil")
 	}
+}
+
+// companionHeaderErr is the error the lyrics writer's companion-ownership read
+// returns for an unreadable header under a ": " path (#1336 CodeRabbit): its own
+// "open"/"scan" prefix must not carry the path outside the nested OS error.
+func companionHeaderErr(t *testing.T) error {
+	t.Helper()
+	path := t.TempDir() + "/" + colonOutdir + "/" + colonName
+	_, err := lyrics.ReadProvenanceTags(path)
+	if err == nil {
+		t.Fatal("expected a header read failure")
+	}
+	return fmt.Errorf("read companion header: %w", err)
 }
