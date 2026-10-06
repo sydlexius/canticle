@@ -478,6 +478,10 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 func laneStatus(h orchestrator.LaneState, now time.Time) (status, text string) {
 	switch h.State {
 	case orchestrator.LaneStateOpen:
+		if h.Refused {
+			// Not "Throttled": waiting does not lift a refusal (#1372).
+			return laneStatusFailing, "Refused by the provider (HTTP 403), not throttling (" + retryIn(h.OpenUntil, now) + ")"
+		}
 		if !h.EverSucceeded {
 			return laneStatusFailing, "Failing, no success this session - check token/config (" + retryIn(h.OpenUntil, now) + ")"
 		}

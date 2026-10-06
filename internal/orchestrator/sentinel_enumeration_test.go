@@ -83,6 +83,7 @@ func classifiedSentinels() map[string]error {
 	return map[string]error{
 		"musixmatch.ErrUnauthorized":           musixmatch.ErrUnauthorized,
 		"musixmatch.ErrRateLimited":            musixmatch.ErrRateLimited,
+		"musixmatch.ErrForbidden":              musixmatch.ErrForbidden,
 		"musixmatch.ErrNotFound":               musixmatch.ErrNotFound,
 		"musixmatch.ErrNoLyrics":               musixmatch.ErrNoLyrics,
 		"musixmatch.ErrTruncatedResponse":      musixmatch.ErrTruncatedResponse,
@@ -127,6 +128,11 @@ func transportExemptions() map[string]string {
 		// User-Agent denylist rejection read as a phantom rate limit. Transport is
 		// the correct class; internal/orchestrator/errors.go says so explicitly.
 		"petitlyrics.ErrForbidden": "a refused request shape, deliberately not an auth/throttle signal (#495)",
+		// An HTTP 403 on the lookup (#1372): the provider's edge refused the
+		// request, as when the egress address is blocked. Like the petitlyrics
+		// entry above it opens its lane (providerClassifier) but is not an auth or
+		// throttle signal, and it is not a miss: no catalog answer was given.
+		"musixmatch.ErrForbidden": "a provider refusal (HTTP 403); opens the lane, deliberately not an auth/throttle signal (#1372)",
 		// Bootstrap-path only: returned by the token mint in internal/musixmatch/
 		// token.go and handled in internal/commands/token_bootstrap.go. It is never
 		// produced by a lyric lookup, so it cannot reach a lane and therefore cannot

@@ -2,12 +2,17 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/sydlexius/canticle/internal/circuit"
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/petitlyrics"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/respdrift"
 )
@@ -46,6 +51,10 @@ type Lane struct {
 	// exactly as before. See WithResponseDrift.
 	drift   *respdrift.Detector
 	onDrift func(lane, run string)
+	// refused records that the lane's last resolve was refused by its provider
+	// (HTTP 403), so lane health can tell an open refused lane from a throttled
+	// one (#1372). Atomic: parallel dispatch runs lanes on their own goroutines.
+	refused atomic.Bool
 }
 
 // Name reports the lane's name.
@@ -82,6 +91,8 @@ func (l *Lane) FindLyrics(ctx context.Context, track models.Track, sourcePath st
 	}
 
 	song, err := l.resolve(ctx, track, sourcePath)
+	l.refused.Store(errors.Is(err, musixmatch.ErrForbidden) ||
+		errors.Is(err, petitlyrics.ErrForbidden) || errors.Is(err, innertube.ErrForbidden))
 	if err != nil {
 		return models.Song{}, l.classifyErr(l, err)
 	}

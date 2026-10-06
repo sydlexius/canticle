@@ -366,6 +366,9 @@ type dispatchResult struct {
 	haveGated    bool
 	// wordAnswered counts word-capable lanes that answered the word question.
 	wordAnswered int
+	// answered reports that a lyrics lane answered the catalog question with a
+	// clean miss (#1372), so a sibling's transport failure is not the whole story.
+	answered bool
 }
 
 // gate keeps song as the below-gate commit candidate if it lands strictly
@@ -384,10 +387,12 @@ func (r *dispatchResult) gate(song models.Song, laneName string, q Quality) {
 // cannot turn a refused lyric into words, and an open detector breaker is
 // reported before the lane even checks whether detection is enabled for the
 // item, so counting it would park rows that can never run it (#950 review I2).
+// It also notes a lyrics lane's clean miss as an answer (answered, #1372).
 func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName string, instrumentalOnly bool) {
 	if instrumentalOnly {
 		return
 	}
+	r.answered = r.answered || class == OutcomeBenignMiss
 	switch class {
 	case OutcomeUnavailable, OutcomeAuthRateLimit, OutcomeLaneNotReady:
 		if r.untriedErr == nil {
@@ -497,6 +502,9 @@ func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.S
 		return models.Song{}, ErrLaneUnavailable
 	}
 	if r.topErr != nil {
+		if r.topClass == OutcomeTransport && r.answered {
+			return models.Song{}, &PartialFailureError{Err: r.topErr}
+		}
 		return models.Song{}, r.topErr
 	}
 	// No lanes configured at all.

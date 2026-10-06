@@ -533,6 +533,27 @@ func TestFindLyricsInBodyInvalidTokenReturnsErrUnauthorized(t *testing.T) {
 	}
 }
 
+// An HTTP 403 with an HTML body (an edge refusal, #1372) is ErrForbidden, not
+// a miss, and its text keeps the generic status shape with a bounded body.
+func TestFindLyricsForbiddenIsSentinelWithBoundedBody(t *testing.T) {
+	client := NewClient("secret-token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusForbidden, "<html><head><title>403 Forbidden</title></head>\n<body>"+strings.Repeat("x", 4000)+"</body></html>"), nil
+	})}
+
+	_, err := client.FindLyrics(context.Background(), models.Track{TrackName: "title", ArtistName: "artist"})
+	if !errors.Is(err, ErrForbidden) || IsBenignMiss(err) || errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("error = %v; want ErrForbidden, and neither a miss nor unauthorized", err)
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "musixmatch API error: status 403, body: <html><head><title>403 Forbidden</title>") {
+		t.Errorf("message = %q; want the generic status shape with the body's start", msg)
+	}
+	if len(msg) > 200 || strings.Contains(msg, "secret-token") || strings.Contains(msg, "\n") {
+		t.Errorf("message is unbounded, multi-line or carries the token (%d bytes): %q", len(msg), msg)
+	}
+}
+
 func TestFindLyricsReturnsTransportError(t *testing.T) {
 	wantErr := errors.New("network down")
 	client := NewClient("token")

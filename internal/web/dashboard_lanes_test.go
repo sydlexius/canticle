@@ -92,6 +92,21 @@ func TestDashboard_NeverSucceededLanes(t *testing.T) {
 	}
 }
 
+// A lane opened by a provider refusal (HTTP 403) reads as refused, never as
+// throttled or as a token problem (#1372).
+func TestDashboard_RefusedLane(t *testing.T) {
+	health := []orchestrator.LaneState{
+		{Provider: "musixmatch", State: orchestrator.LaneStateOpen, Refused: true, EverSucceeded: true, OpenUntil: time.Now().Add(10 * time.Minute)},
+	}
+	body := getDashboard(t, laneHealthTestUI(t, threeLanes, func() []orchestrator.LaneState { return health }))
+	if want := statusSpan("failing", "Refused by the provider (HTTP 403), not throttling (retry in 10m)"); !strings.Contains(body, want) {
+		t.Errorf("dashboard missing %q", want)
+	}
+	if strings.Contains(body, "Throttled") || strings.Contains(body, "check token") {
+		t.Error("a refused lane must not read Throttled or as a token problem")
+	}
+}
+
 // TestDashboard_HealthOnlyLaneGetsTile is the fresh-install bad-token case: no
 // lane_attempts rows at all, but the configured lane's breaker is open. It
 // must still get a tile (zero counts) with its status, not the empty state.
