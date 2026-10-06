@@ -142,6 +142,32 @@ describe("Auto alignment", () => {
     expect(p.$("mx-preview-audio").currentTime).toBe(3.2);
   });
 
+  it("says what a suggestion changed, and marks exactly the moved lines", async () => {
+    const moved = (p) => Array.from(p.win.document.querySelectorAll(".mx-preview-time")).map((e) => e.classList.contains("is-auto-moved"));
+    const suggest = async (lines) => {
+      const p = mount();
+      await p.run(START);
+      p.answers.push(done(MTIME, lines));
+      await p.poll();
+      return p;
+    };
+    const later = await suggest("[1500,3200]");
+    expect(later.status()).toContain("Suggested timing: 2 of 2 lines moved, average 0.4 s later.");
+    expect(later.status()).toContain("Play to check it");
+    expect(moved(later)).toEqual([true, true]);
+    const earlier = await suggest("[400,3000]");
+    expect(earlier.status()).toContain("Suggested timing: 1 of 2 lines moved, average 0.6 s earlier.");
+    expect(moved(earlier)).toEqual([true, false]);
+    const same = await suggest("[1030,3000]"); // 30 ms is under the threshold
+    expect(same.status()).toContain("Suggested timing matches the current timing.");
+    expect(same.status()).not.toContain("lines moved");
+    expect(moved(same)).toEqual([false, false]);
+    later.$("mx-auto-stop").click();
+    expect(moved(later)).toEqual([false, false]);
+    expect(later.status()).not.toContain("lines moved");
+    expect(later.status()).toContain("Suggestion discarded");
+  });
+
   it("discard restores the starts shown before Auto, unsaved offset included", async () => {
     const p = mount();
     p.win.document.querySelector(".mx-edit-nudge").click();

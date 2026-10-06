@@ -36,6 +36,18 @@
   var AUTO_POLL_MS = 2000;
   var AUTO_MAX_RESTARTS = 2;
   var AUTO_BUSY_RETRIES = 3;
+  // A suggested start under 50 ms from the current one counts as unmoved.
+  var AUTO_MOVED_MS = 50;
+  // autoSummary says what a suggestion changed: how many of the lines moved
+  // and the mean signed shift of those (sumMS is in ms, negative = earlier).
+  function autoSummary(n, sumMS, total) {
+    if (n === 0) {
+      return "Suggested timing matches the current timing. ";
+    }
+    var avg = Math.round(Math.abs(sumMS / n) / 100) / 10;
+    var dir = sumMS < 0 ? "earlier" : "later";
+    return "Suggested timing: " + n + " of " + total + " lines moved, average " + avg.toFixed(1) + " s " + dir + ". ";
+  }
   // AUTO_MESSAGES words each Auto outcome for the status line: [text, tone].
   // "running" and a busy answer with a retry time are worded in render().
   var AUTO_MESSAGES = {
@@ -588,9 +600,21 @@
     function render() {
       var starts = [];
       var sug = au.starts;
+      var movedN = 0;
+      var movedSum = 0;
       lines.forEach(function (li, i) {
-        lineStarts[i] = sug ? sug[i] : Math.max(0, base[i] + st.offset);
+        var before = Math.max(0, base[i] + st.offset);
+        lineStarts[i] = sug ? sug[i] : before;
         times[i].textContent = fmtTime(lineStarts[i]);
+        // A moved line's time is also underlined and bold, so the change
+        // does not rest on the accent color alone (#1326).
+        var shift = sug ? sug[i] - before : 0;
+        var moved = Math.abs(shift) >= AUTO_MOVED_MS;
+        times[i].classList.toggle("is-auto-moved", moved);
+        if (moved) {
+          movedN++;
+          movedSum += shift;
+        }
         if (live[i]) {
           starts.push(base[i]);
         }
@@ -623,6 +647,9 @@
       var msg;
       if (au.msg) {
         msg = AUTO_MESSAGES[au.msg];
+        if (au.msg === "suggested") {
+          msg = [autoSummary(movedN, movedSum, lines.length) + msg[0].replace(/^Suggested timing shown\. /, ""), msg[1]];
+        }
         if (au.msg === "running") {
           msg = ["Aligning the lyrics to the audio (" + Math.round((Date.now() - au.since) / 1000) + " s). Nothing is written. Cancel or Esc stops it.", ""];
         } else if (au.msg === "busy" && au.retry > 0) {

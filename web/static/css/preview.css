@@ -297,6 +297,12 @@
 @keyframes mx-auto-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
 @media (prefers-reduced-motion: reduce) { .mx-auto-progress::before { animation: none; width: 100%; opacity: 0.6; } }
 .mx-preview-lyrics.is-auto-suggested .mx-preview-time { color: var(--mx-accent); }
+.mx-preview-lyrics.is-auto-suggested .mx-preview-time.is-auto-moved {
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: var(--mx-accent);
+  text-underline-offset: 3px;
+}
 .mx-ear-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; flex-shrink: 0; }
 .mx-ear-toggle[aria-pressed="true"] { border-color: var(--mx-sidebar-active-text); background: var(--mx-sidebar-active-bg); color: var(--mx-sidebar-active-text); }
 .mx-ear-short { display: none; }
