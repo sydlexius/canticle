@@ -327,7 +327,7 @@ The Dashboard (`/dashboard`) is the default landing page after you sign in - the
 - **Per-provider effectiveness tiles.** One tile per provider lane showing `hits/attempts` and an inline hit-rate bar (the percent is `hits / (hits + misses)`, where a hit means the lane served the winning result).
 - **Recent outcomes.** The 20 most recently completed tracks (artist, album, title, result class, the provider lane that served it, and the completion time in the server's timezone when `TZ` is set, otherwise UTC). A synced result carries a colored tier badge: word-synced (green) or line-synced (blue) reads as such in the badge text; a tier-unknown synced result gets a muted grey badge reading "synced (tier unknown)", so the tier is stated in text, not by color alone.
 
-The Dashboard requires the web UI to be enabled and an admin session (or a trusted-network request), the same as the other UI pages. For the deeper per-report views (queue summary, recent outcomes, provider effectiveness, instrumental inventory, failure analysis, deferred misses), see the [Reports workspace](#reports-workspace) below.
+The Dashboard requires the web UI to be enabled and an admin session (or a trusted-network request), the same as the other UI pages. For the deeper per-report views (recent outcomes, provider effectiveness, instrumental inventory, failure analysis, deferred misses), see the [Reports workspace](#reports-workspace) below.
 
 **Searching a queue bucket.** Each queue bucket page (`/queue/{bucket}`) has a search box above the table. Type part of an artist or title and press Search: the list narrows to the tracks in that bucket whose artist or title contains the text, ignoring case and most accents (searching `bjork` finds an accented name). The search is a plain substring match, so characters such as `%` and `_` match themselves. The text is kept in the page address (`?q=`), so a reload or a bookmark keeps the search and **Show more** continues through the matches only. Search text is limited to 200 characters. **Clear search** returns to the whole bucket. The search text is never written to the server log (the request log keeps only the page path and a short allowlist of non-text parameters).
 
@@ -835,7 +835,7 @@ The web UI exposes read-only report views under the Reports section. Every repor
 
 ### Queue summary
 
-Shows the count of work queue items grouped by status: Retrying, Errored, Queued, Finished, Settled (upgradable), Given up, and total (the total also counts tracks the worker is fetching right now, which have no row of their own). Finished and settled (upgradable) are the two halves of completed work - see the Dashboard section above. Use this as a quick health check - a rising Errored count warrants a look at the Failure analysis report; a large Retrying count is normal (those are benign misses awaiting their next retry, listed in Deferred misses).
+Retired. The Queue page (`/queue`, Queue in the sidebar) lists every bucket (Retrying, Errored, Queued, Finished, Settled (upgradable), Given up) with its count and links each to its track list. The old `/reports/queue-summary` address redirects there. For a rising Errored count see Failure analysis; for a large Retrying count see Deferred misses.
 
 ### Recent outcomes
 

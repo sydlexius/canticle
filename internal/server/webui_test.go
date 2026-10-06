@@ -91,16 +91,16 @@ func TestWithReportsDBMountsReports(t *testing.T) {
 		WithWebUI(config.Config{}, "vtest"),
 		WithReportsDB(sqlDB))
 
-	req := httptest.NewRequest(http.MethodGet, "/reports/queue-summary", nil)
+	req := httptest.NewRequest(http.MethodGet, "/reports/recent-outcomes", nil)
 	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /reports/queue-summary = %d, want 200", rec.Code)
+		t.Fatalf("GET /reports/recent-outcomes = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Total") {
-		t.Error("reports workspace did not render the queue-summary table")
+	if !strings.Contains(rec.Body.String(), "Refresh") {
+		t.Error("reports workspace did not render the recent-outcomes report")
 	}
 }
 

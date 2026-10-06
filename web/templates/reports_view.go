@@ -12,11 +12,11 @@ import (
 
 // RailItem is one report row in the sidebar's REPORTS group.
 type RailItem struct {
-	// Key is the report's stable URL slug (e.g. "queue-summary"). Kept raw for
+	// Key is the report's stable URL slug (e.g. "recent-outcomes"). Kept raw for
 	// the active-state comparison; Path is the encoded value used for links.
 	Key string
 	// Path is the pre-computed, path-segment-encoded link target
-	// (e.g. "/reports/queue-summary"). The handler builds it with
+	// (e.g. "/reports/recent-outcomes"). The handler builds it with
 	// url.PathEscape so a key with reserved characters cannot break the URL.
 	Path string
 	// Title is the human label shown in the sidebar row.
@@ -35,21 +35,12 @@ type ReportView struct {
 	// never run (the default-pane case never carries a populated ReportView).
 	LastRun string
 
-	QueueRows        []QueueSummaryRow
 	RecentRows       []RecentOutcomeRow
 	ProviderRows     []ProviderRow
 	InstrumentalRows []InstrumentalRow
 	FailureRows      []FailureRow
 	ReviewQueueRows  []ReviewQueueRow
 	AttentionRows    []AttentionRow
-}
-
-// QueueSummaryRow is one status/count pair. IsTotal marks the summary total row
-// so the template can emphasize it.
-type QueueSummaryRow struct {
-	Status  string
-	Count   string
-	IsTotal bool
 }
 
 // RecentOutcomeRow is one recently-completed track with its derived result.

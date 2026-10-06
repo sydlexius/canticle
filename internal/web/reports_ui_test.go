@@ -96,10 +96,10 @@ func insertUnavailable(t *testing.T, sqlDB *sql.DB, title string) {
 	}
 }
 
-// TestReportFragmentQueueSummaryUnavailableRow asserts the Given up row
-// renders its OWN count: 3 unavailable vs 2 done (total 5), so a row wired to
-// any other field cannot pass.
-func TestReportFragmentQueueSummaryUnavailableRow(t *testing.T) {
+// TestQueueIndexGivenUpRow asserts the Queue page's Given up row renders its
+// OWN count: 3 unavailable vs 2 done (total 5), so a row wired to any other
+// field cannot pass (retargeted from the retired queue-summary report, #1248).
+func TestQueueIndexGivenUpRow(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	insertDone(t, sqlDB, "d1", "musixmatch", `[{"outdir":"/out","filename":"d1.lrc"}]`, "2026-06-17T10:00:00Z")
 	insertDone(t, sqlDB, "d2", "musixmatch", `[{"outdir":"/out","filename":"d2.lrc"}]`, "2026-06-17T11:00:00Z")
@@ -108,14 +108,49 @@ func TestReportFragmentQueueSummaryUnavailableRow(t *testing.T) {
 	}
 	mux := newReportsUIServer(t, sqlDB)
 
-	body := getFragment(t, mux, "queue-summary").Body.String()
-	row := regexp.MustCompile(`<td>Given up</td>\s*<td class="mx-cell-mono">(\d+)</td>`)
+	body := getPath(t, mux, "/queue").Body.String()
+	row := regexp.MustCompile(`<td><a class="mx-text-link" href="/queue/unavailable">Given up</a></td>\s*<td class="mx-cell-mono">(\d+)</td>`)
 	m := row.FindStringSubmatch(body)
 	if m == nil {
-		t.Fatalf("queue-summary fragment missing Given up row; body:\n%s", body)
+		t.Fatalf("queue page missing Given up row; body:\n%s", body)
 	}
 	if m[1] != "3" {
 		t.Errorf("Given up row count = %s, want 3", m[1])
+	}
+}
+
+// TestRetiredQueueSummaryRedirects: the retired report URL still lands
+// somewhere useful (#1248), for the htmx fragment request and the plain one.
+func TestRetiredQueueSummaryRedirects(t *testing.T) {
+	mux := newReportsUIServer(t, openReportsTestDB(t))
+	for _, hx := range []bool{false, true} {
+		req := httptest.NewRequest(http.MethodGet, "/reports/queue-summary", nil)
+		if hx {
+			req.Header.Set("HX-Request", "true")
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if got := rec.Header().Values("Vary"); len(got) != 1 || got[0] != "HX-Request" {
+			t.Errorf("hx=%v: Vary = %q, want [HX-Request]", hx, got)
+		}
+		if hx {
+			if rec.Code != http.StatusOK {
+				t.Errorf("htmx: status = %d, want 200", rec.Code)
+			}
+			if got := rec.Header().Get("HX-Redirect"); got != "/queue" {
+				t.Errorf("htmx: HX-Redirect = %q, want /queue", got)
+			}
+			if loc := rec.Header().Get("Location"); loc != "" {
+				t.Errorf("htmx: Location = %q, want none", loc)
+			}
+			continue
+		}
+		if rec.Code != http.StatusMovedPermanently {
+			t.Errorf("plain: status = %d, want 301", rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); loc != "/queue" {
+			t.Errorf("plain: Location = %q, want /queue", loc)
+		}
 	}
 }
 
@@ -130,30 +165,25 @@ func getFragment(t *testing.T, mux *http.ServeMux, key string) *httptest.Respons
 	return rec
 }
 
-// TestReportFragmentQueueSummary runs the queue-summary report on demand and
+// TestReportFragmentRunsOnDemand runs a report on demand and
 // asserts the results table, the run timestamp, and the out-of-band rail update
 // (selection highlight + timestamp) are all present in one fragment response.
-func TestReportFragmentQueueSummary(t *testing.T) {
+func TestReportFragmentRunsOnDemand(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	insertDone(t, sqlDB, "d1", "musixmatch", `[{"outdir":"/out","filename":"d1.lrc"}]`, "2026-06-17T10:00:00Z")
 	insertDone(t, sqlDB, "d2", "musixmatch", `[{"outdir":"/out","filename":"d2.lrc"}]`, "2026-06-17T11:00:00Z")
 	mux := newReportsUIServer(t, sqlDB)
 
-	rec := getFragment(t, mux, "queue-summary")
+	rec := getFragment(t, mux, "recent-outcomes")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /reports/queue-summary = %d, want 200", rec.Code)
+		t.Fatalf("GET /reports/recent-outcomes = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
 
-	// Done renders as its two halves (#553): untiered rows are Settled.
-	for _, want := range []string{"Status", "Count", "Finished", "Settled (upgradable)", "Total", "Refresh"} {
+	for _, want := range []string{"Artist", "Title", "d1", "d2", "Refresh"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("queue-summary fragment missing %q", want)
+			t.Errorf("recent-outcomes fragment missing %q", want)
 		}
-	}
-	// Two done rows.
-	if !strings.Contains(body, ">2<") {
-		t.Errorf("queue-summary should report 2 done rows; body:\n%s", body)
 	}
 	// The run stamps a "Last run:" line, not the "Not run yet" default.
 	if !strings.Contains(body, "Last run:") {
@@ -166,8 +196,8 @@ func TestReportFragmentQueueSummary(t *testing.T) {
 	if n := strings.Count(body, `aria-current="page"`); n != 1 {
 		t.Errorf("expected exactly one active rail item, got %d", n)
 	}
-	if !strings.Contains(body, `hx-get="/reports/queue-summary"`) {
-		t.Error("active rail item should be queue-summary")
+	if !strings.Contains(body, `hx-get="/reports/recent-outcomes"`) {
+		t.Error("active rail item should be recent-outcomes")
 	}
 	// No-store so a run is never cached.
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
@@ -254,7 +284,7 @@ func TestReportFragmentNoRepo(t *testing.T) {
 	mux := http.NewServeMux()
 	NewUI(config.Config{}, "v-test").Register(mux) // no WithReports
 
-	rec := getFragment(t, mux, "queue-summary")
+	rec := getFragment(t, mux, "recent-outcomes")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("report with no repo = %d, want 503", rec.Code)
 	}
@@ -268,11 +298,11 @@ func TestReportFragmentNoJSFullPage(t *testing.T) {
 	insertDone(t, sqlDB, "d1", "musixmatch", `[{"outdir":"/out","filename":"d1.lrc"}]`, "2026-06-17T10:00:00Z")
 	mux := newReportsUIServer(t, sqlDB)
 
-	req := httptest.NewRequest(http.MethodGet, "/reports/queue-summary", nil) // no HX-Request
+	req := httptest.NewRequest(http.MethodGet, "/reports/recent-outcomes", nil) // no HX-Request
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("plain GET /reports/queue-summary = %d, want 200", rec.Code)
+		t.Fatalf("plain GET /reports/recent-outcomes = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
 	// Full page: sidebar shell present (wordmark) AND the report table rendered.
@@ -289,8 +319,8 @@ func TestReportFragmentNoJSFullPage(t *testing.T) {
 	if n := strings.Count(body, `aria-current="page"`); n != 1 {
 		t.Errorf("no-JS full page should mark exactly one sidebar row active, got %d", n)
 	}
-	if !strings.Contains(body, `hx-get="/reports/queue-summary" hx-target="#mx-main" hx-swap="innerHTML" hx-push-url="true" aria-current="page"`) {
-		t.Error("no-JS full page should mark the queue-summary sidebar row active")
+	if !strings.Contains(body, `hx-get="/reports/recent-outcomes" hx-target="#mx-main" hx-swap="innerHTML" hx-push-url="true" aria-current="page"`) {
+		t.Error("no-JS full page should mark the recent-outcomes sidebar row active")
 	}
 }
 
@@ -476,7 +506,7 @@ func TestReportFragmentQueryError(t *testing.T) {
 	mux := newReportsUIServer(t, sqlDB)
 	_ = sqlDB.Close() // force every query to error
 
-	rec := getFragment(t, mux, "queue-summary")
+	rec := getFragment(t, mux, "recent-outcomes")
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("report over a closed DB = %d, want 500", rec.Code)
 	}
@@ -491,7 +521,7 @@ func TestReportSelectionHighlightMovesAcrossReports(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	mux := newReportsUIServer(t, sqlDB)
 
-	for _, key := range []string{"queue-summary", "failure-analysis"} {
+	for _, key := range []string{"recent-outcomes", "failure-analysis"} {
 		body := getFragment(t, mux, key).Body.String()
 		// The out-of-band sidebar report nav is present so the highlight updates
 		// in place (not the in-content rail of the old design).
@@ -518,10 +548,9 @@ func TestReportSelectionHighlightMovesAcrossReports(t *testing.T) {
 // so it cannot break the URL.
 func TestBuildRailEncodesKeyPath(t *testing.T) {
 	ui := NewUI(config.Config{}, "v-test")
-	rail := ui.buildRail("queue-summary")
+	rail := ui.buildRail("recent-outcomes")
 
 	wantKeys := []string{
-		"queue-summary",
 		"recent-outcomes",
 		"needs-attention",
 		"provider-effectiveness",
