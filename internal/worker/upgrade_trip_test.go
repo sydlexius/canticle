@@ -473,7 +473,54 @@ func TestUpgradeTrip_CompleteFailureAppliesAttemptCap(t *testing.T) {
 		if got := r.row(t); got != "done outcome=synced timing=ok lane=musixmatch misses=14 armed=0" {
 			t.Fatalf("row = %q, want settled done describing the written file", got)
 		}
+		if got := r.completedAt(t); got == "2026-08-01T00:00:00Z" {
+			t.Fatalf("completed_at = %q, want re-stamped for the file this pass wrote", got)
+		}
 	})
+}
+
+// TestUpgradeTrip_KeptCompleteFailureAtCapRecordsPass: a post-settle mis_synced
+// trip whose result the writer KEPT out and whose Complete then fails to the cap
+// was answered by the lanes, so the settle records the #1120 pass (as Complete
+// would) and, since nothing was written, leaves completed_at on the kept file.
+func TestUpgradeTrip_KeptCompleteFailureAtCapRecordsPass(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "correctly timed")})
+	dir := filepath.Dir(r.txt)
+	if err := os.Remove(r.txt); err != nil {
+		t.Fatal(err)
+	}
+	word := "[00:10.00]<00:10.00>kept <00:11.00>word <00:12.00>line\n[02:00.00]<02:00.00>past <02:01.00>the <02:02.00>end\n"
+	if err := os.WriteFile(filepath.Join(dir, "track.lrc"), []byte(word), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.db.Exec(`UPDATE work_queue SET outcome_type = 'synced', sync_tier = 'word' WHERE id = ?`, r.id); err != nil {
+		t.Fatal(err)
+	}
+	r.postSettleMissynced(t)
+	r.w.queue = failingCompleteQueue{r.q}
+	if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ? WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	if got, want := r.row(t), "done outcome=synced timing=mis_synced lane= misses=14 armed=0"; got != want {
+		t.Fatalf("row = %q, want %q", got, want)
+	}
+	if g := r.marker(t); !g.Valid || g.Int64 != 5 {
+		t.Fatalf("pass marker = %+v, want 5 (a kept result is an answer)", g)
+	}
+	if got := r.completedAt(t); got != "2026-08-01T00:00:00Z" {
+		t.Fatalf("completed_at = %q, want the kept file's time untouched", got)
+	}
+}
+
+// completedAt is the row's completed_at as stored.
+func (r *upgradeRig) completedAt(t *testing.T) string {
+	t.Helper()
+	var s sql.NullString
+	if err := r.db.QueryRow(`SELECT completed_at FROM work_queue WHERE id = ?`, r.id).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s.String
 }
 
 // TestUpgradeTrip_StampFailureAtCapStaysRetryable: a trip at the cap whose
