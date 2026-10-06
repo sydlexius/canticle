@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -117,5 +118,41 @@ func TestConfigSetRefusesWhenNoPathResolves(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cwd, "config.toml")); !os.IsNotExist(err) {
 		t.Errorf("config.toml written to the working directory (err=%v)", err)
+	}
+}
+
+func TestWriteFileAtomicPreservesSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.toml")
+	link := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(target, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(link, func(w io.Writer) error { _, err := w.Write([]byte("new")); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Lstat(link); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink replaced by a regular file (err=%v)", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "new" {
+		t.Errorf("target = %q, want new", b)
+	}
+}
+
+func TestSyncDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory sync is unsupported on Windows")
+	}
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Errorf("syncDir on a real directory: %v", err)
+	}
+	if err := syncDir(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("syncDir on a missing directory returned nil")
 	}
 }

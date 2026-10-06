@@ -4035,6 +4035,12 @@ func defaultConfigPath() string {
 // it, and renames over path, so a failed encode or a crash never leaves a
 // truncated config. An existing file's mode is kept; a new file gets 0600.
 func writeFileAtomic(path string, encode func(io.Writer) error) (err error) {
+	// A symlinked destination is resolved first so the rename replaces the
+	// target, not the link. A missing path (or a dangling link) is kept as
+	// given: there is nothing to resolve, and the write creates it.
+	if resolved, evalErr := filepath.EvalSymlinks(path); evalErr == nil {
+		path = resolved
+	}
 	mode := os.FileMode(0600)
 	if st, statErr := os.Stat(path); statErr == nil {
 		mode = st.Mode().Perm()
@@ -4064,7 +4070,24 @@ func writeFileAtomic(path string, encode func(io.Writer) error) (err error) {
 	if err = os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("replace config: %w", err)
 	}
+	// Best-effort: make the renamed entry durable. Directory sync is
+	// unsupported on some platforms (Windows) and the file is already
+	// replaced, so a failure here never fails the write.
+	_ = syncDir(filepath.Dir(path))
 	return nil
+}
+
+// syncDir fsyncs a directory so a rename inside it survives power loss.
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // reason: dir is the parent of the config path the caller already resolved
+	if err != nil {
+		return err
+	}
+	syncErr := d.Sync()
+	if closeErr := d.Close(); syncErr == nil {
+		syncErr = closeErr
+	}
+	return syncErr
 }
 
 func splitCSV(s string) []string {
