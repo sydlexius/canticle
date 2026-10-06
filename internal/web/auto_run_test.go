@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/aligner"
+	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
 func (f *fakeAuto) AlignFile(context.Context, io.Reader, []string) (aligner.Result, error) {
@@ -28,7 +29,8 @@ func (f *fakeAuto) AlignFile(context.Context, io.Reader, []string) (aligner.Resu
 }
 
 // runFake is an AutoAligner whose AlignFile blocks on hold (when set) until it
-// is closed or the run's context ends, then answers err or two words.
+// is closed or the run's context ends (deaf: only until it is closed), then
+// answers err or two words.
 type runFake struct {
 	fakeAuto
 	mu     sync.Mutex
@@ -37,6 +39,7 @@ type runFake struct {
 	lines  []string
 	err    error
 	hold   chan struct{}
+	deaf   bool
 	pre    func() // runs first
 }
 
@@ -50,7 +53,9 @@ func (f *runFake) AlignFile(ctx context.Context, audio io.Reader, lines []string
 	f.audio, f.lines = string(b), lines
 	err, hold := f.err, f.hold
 	f.mu.Unlock()
-	if hold != nil {
+	if hold != nil && f.deaf {
+		<-hold
+	} else if hold != nil {
 		select {
 		case <-hold:
 		case <-ctx.Done():
@@ -127,6 +132,9 @@ func (e *autoEnv) waitState(t *testing.T, want string) map[string]any {
 		_, body = e.poll()
 		return body["state"] == want
 	})
+	if want != autoRunning {
+		<-e.run().done // the goroutine has ended: its last log line is written
+	}
 	return body
 }
 
@@ -209,8 +217,11 @@ func TestAutoRunRefusals(t *testing.T) {
 	if os.Symlink(e.writeFile(t, e.outside, "secret.flac"), audio) == nil {
 		check("audio outside the root", e.start(t), http.StatusNotFound, "")
 	}
-	e.put(t, "song.lrc", "[00:01.00]\n[00:05.00]♪\n")
+	e.put(t, "song.lrc", "[00:01.00]\n[00:03.00]\u3000\n[00:05.00]♪\n")
 	check("no line to align", e.start(t), http.StatusUnprocessableEntity, `"no_lines"`)
+	if lines, any := autoLines([]lyrics.TimedLine{{Text: " \t\u3000"}, {StartMS: 9, Text: "\u00a0"}}); any || lines[0] != "" || lines[1] != "" {
+		t.Errorf("whitespace-only cues = %q any %v, want blanks and no line to align", lines, any)
+	}
 	if got := fake.aligns.Load(); got != 0 {
 		t.Fatalf("sidecar calls after refusals only = %d, want 0", got)
 	}
@@ -242,7 +253,8 @@ func TestAutoRunChangedFile(t *testing.T) {
 	e.start(t)
 	old := e.run()
 	e.touch(2)
-	e.start(t)
+	// Busy until the canceled goroutine ends (the cap is 1), then admitted.
+	waitFor(t, "the replacing start", func() bool { return e.start(t).Code == http.StatusAccepted })
 	ended("a start named a newer .lrc", old)
 	if cur := e.run(); cur == nil || cur == old || cur.state != autoRunning {
 		t.Fatalf("run after a start with a newer mtime = %+v, want a new running run", cur)
@@ -274,6 +286,39 @@ func TestAutoRunGlobalCap(t *testing.T) {
 	}
 }
 
+// The cap counts live goroutines: a replaced or dropped run that has not
+// noticed its cancel still holds its audio and its sidecar call.
+func TestAutoRunCapCountsLiveGoroutines(t *testing.T) {
+	fake := &runFake{hold: make(chan struct{}), deaf: true}
+	e := newAutoEnv(t, fake)
+	release := sync.OnceFunc(func() { close(fake.hold) })
+	t.Cleanup(release) // before the env's own cleanup, which waits for every run
+	busy := func(what string) {
+		t.Helper()
+		if rec := e.start(t); rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"busy"`) {
+			t.Fatalf("start %s = %d %s, want 429 busy", what, rec.Code, rec.Body)
+		}
+	}
+	e.start(t)
+	first := e.run()
+	waitFor(t, "the first sidecar call", func() bool { return fake.aligns.Load() == 1 })
+	e.touch(1)
+	busy("replacing a run whose goroutine is alive")
+	if code, _ := e.poll(); code != http.StatusConflict || e.run() != nil {
+		t.Fatalf("poll after the .lrc changed = %d (run %v), want 409 and the run dropped", code, e.run())
+	}
+	busy("after the run was dropped but before its goroutine ended")
+	release()
+	<-first.done
+	if got := fake.aligns.Load(); got != 1 {
+		t.Fatalf("sidecar calls while the first goroutine lived = %d, want 1", got)
+	}
+	if rec := e.start(t); rec.Code != http.StatusAccepted {
+		t.Fatalf("start once the goroutine ended = %d %s, want 202", rec.Code, rec.Body)
+	}
+	e.waitState(t, autoDone)
+}
+
 // The words aligned are the current .lrc's, never a .orig backup's. A panic in
 // the aligner call, or audio grown past the cap since its stat, fails the run.
 func TestAutoRunCurrentFilePanicGrownAudio(t *testing.T) {
@@ -302,6 +347,15 @@ func TestAutoRunCurrentFilePanicGrownAudio(t *testing.T) {
 	e.start(t)
 	if got := e.waitState(t, autoFailed); got["error"] != "too_large" {
 		t.Errorf("audio that grew past the cap mid-run = %v, want failed too_large", got)
+	}
+	// A real sidecar answers the oversized upload 413: the byte cap still wins.
+	fake.script(fmt.Errorf("%w, status 413", aligner.ErrRejected), nil)
+	e.writeFile(t, e.root, "song.flac") // back under the cap; pre grows it again
+	if rec := e.start(t); rec.Code != http.StatusAccepted {
+		t.Fatalf("start with the audio back under the cap = %d %s, want 202", rec.Code, rec.Body)
+	}
+	if got := e.waitState(t, autoFailed); got["error"] != "too_large" {
+		t.Errorf("grown audio the sidecar rejected = %v, want failed too_large", got)
 	}
 }
 

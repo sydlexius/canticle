@@ -560,8 +560,8 @@ min_similarity = 0.35
 # Env: MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE.
 # budget_per_cycle = 10
 
-# Alignments the Auto action may run at once. Reserved: nothing enforces it
-# yet. Default 1 (serialized) -- the reference
+# Caps how many Auto alignment runs go at once across tracks; a start over the
+# cap is refused as busy. Default 1 (serialized) -- the reference
 # sidecar processes /align requests one at a time by design (it admits up to
 # ALIGNER_MAX_PENDING, default 2: one running, one queued; a request beyond
 # that gets 429 with Retry-After rather than being refused outright). Values

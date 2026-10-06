@@ -850,14 +850,18 @@ func TestAlign_Preconditions(t *testing.T) {
 // TestAlignFile: the reader's bytes are sent, a ctx deadline replaces the
 // client timeout, and a sidecar refusal of the input is ErrRejected.
 func TestAlignFile(t *testing.T) {
-	var got []byte
-	status := http.StatusOK
+	// The handler outlives a timed-out call, so what it shares with the test
+	// is atomic: the first upload's bytes and the status to answer.
+	var got atomic.Pointer[[]byte]
+	var status atomic.Int32
+	status.Store(http.StatusOK)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if f, _, err := r.FormFile("file"); err == nil {
-			got, _ = io.ReadAll(f)
+			b, _ := io.ReadAll(f)
+			got.CompareAndSwap(nil, &b)
 		}
 		time.Sleep(150 * time.Millisecond) // longer than the client timeout below
-		w.WriteHeader(status)
+		w.WriteHeader(int(status.Load()))
 		_, _ = w.Write([]byte(`{"words":[],"transcript":""}`))
 	}))
 	defer srv.Close()
@@ -870,15 +874,15 @@ func TestAlignFile(t *testing.T) {
 	if _, err := c.AlignFile(ctx, strings.NewReader("invented-bytes"), []string{"line"}); err != nil {
 		t.Fatalf("AlignFile under a ctx deadline longer than the client timeout: %v", err)
 	}
-	if string(got) != "invented-bytes" {
-		t.Errorf("uploaded audio = %q, want the reader's bytes", got)
+	if b := got.Load(); b == nil || string(*b) != "invented-bytes" {
+		t.Errorf("uploaded audio = %v, want the reader's bytes", b)
 	}
-	status = http.StatusUnprocessableEntity
+	status.Store(http.StatusUnprocessableEntity)
 	if _, err := c.AlignFile(ctx, strings.NewReader("x"), []string{"line"}); !errors.Is(err, ErrRejected) {
 		t.Errorf("422 error = %v, want ErrRejected", err)
 	}
 	// Last on c (it trips the breaker): no ctx deadline, so the client timeout.
-	status = http.StatusOK
+	status.Store(http.StatusOK)
 	var te interface{ Timeout() bool }
 	if _, err := c.AlignFile(context.Background(), strings.NewReader("x"), []string{"line"}); !errors.As(err, &te) || !te.Timeout() {
 		t.Errorf("AlignFile without a ctx deadline = %v, want the client timeout", err)

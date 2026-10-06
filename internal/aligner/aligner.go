@@ -514,6 +514,9 @@ func isPythonBlank(s string) bool {
 	return strings.TrimFunc(s, isPythonSpace) == ""
 }
 
+// IsBlank reports whether the client drops line as blank before sending it.
+func IsBlank(line string) bool { return isPythonBlank(line) }
+
 // filteredToRawLineIndex returns, for each non-blank line in lines (per
 // isPythonBlank, mirroring the sidecar's own _parse_lines), that line's raw
 // index in lines, in order. Its length is the sidecar's own filtered line

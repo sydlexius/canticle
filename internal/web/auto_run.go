@@ -49,6 +49,9 @@ type autoRun struct {
 type autoRuns struct {
 	mu sync.Mutex
 	m  map[int64]*autoRun
+	// active counts run goroutines not yet finished. A replaced or dropped
+	// run leaves m at once but holds its audio and sidecar call until then.
+	active int
 	// Set at attach, m included; fields so a test can shrink or fail them.
 	timeout  time.Duration
 	maxAudio int64
@@ -67,7 +70,8 @@ func (s *autoRuns) get(id int64) (autoRun, bool) {
 // begin registers r as the row's run (started). A run already going for the
 // row against the same .lrc mtime is attached to instead (one run per track);
 // one against another mtime aligned a file that has since changed, so it is
-// canceled and replaced. busy: limit runs are going for other rows already.
+// canceled and replaced. busy: limit run goroutines are still live, the
+// canceled one included until it ends (the client retries the start).
 func (s *autoRuns) begin(id int64, r *autoRun, limit int) (started, busy bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,19 +79,14 @@ func (s *autoRuns) begin(id int64, r *autoRun, limit int) (started, busy bool) {
 	if cur != nil && cur.state == autoRunning && cur.mtime == r.mtime {
 		return false, false
 	}
-	others := 0
-	for other, o := range s.m {
-		if other != id && o.state == autoRunning {
-			others++
-		}
-	}
-	if others >= limit {
-		return false, true
-	}
 	if cur != nil && cur.state == autoRunning {
 		cur.cancel()
 	}
+	if s.active >= limit {
+		return false, true
+	}
 	s.m[id] = r
+	s.active++
 	return true, false
 }
 
@@ -102,10 +101,12 @@ func (s *autoRuns) drop(id int64, r autoRun) {
 	r.cancel()
 }
 
-// finish records the run's outcome and returns its log class.
+// finish records the run's outcome, frees its place under the cap (its audio
+// is closed by then) and returns its log class.
 func (s *autoRuns) finish(r *autoRun, res aligner.Result, err error) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.active--
 	r.state, r.result = autoDone, res
 	if err != nil {
 		r.state = autoFailed
@@ -140,10 +141,12 @@ func autoRunCode(err error) (code string, retryAfter int) {
 // a line left with text to align.
 func autoLines(cues []lyrics.TimedLine) (lines []string, any bool) {
 	lines = make([]string, len(cues))
+	var prev lyrics.TimedLine
 	for i, l := range cues {
-		if !l.Decorative && (i == 0 || l.StartMS != cues[i-1].StartMS) {
-			lines[i] = l.Text
-			any = any || l.Text != ""
+		follower := i > 0 && l.StartMS == prev.StartMS
+		// Blank as the client filters it: whitespace alone is no line.
+		if prev = l; !l.Decorative && !follower && !aligner.IsBlank(l.Text) {
+			lines[i], any = l.Text, true
 		}
 	}
 	return lines, any
@@ -248,22 +251,24 @@ func (u *UI) handleAutoStart(w http.ResponseWriter, r *http.Request) {
 	running()
 	slog.Info("auto alignment: run started", "id", id)
 	go func() {
+		// done closes last: by then the run holds nothing and has logged.
 		defer close(run.done)
-		defer cancel()
-		defer func() { _ = audio.Close() }()
 		// A panic must still finish the run; its value (a path?) is not logged.
 		res, err := aligner.Result{}, errors.New("auto alignment: the aligner call panicked")
 		defer func() {
 			if recover() != nil {
 				slog.Error("auto alignment: the aligner call panicked", "id", id)
 			}
+			_ = audio.Close()
+			cancel()
 			slog.Info("auto alignment: run finished", "id", id, "result", runs.finish(run, res, err),
 				"duration_ms", u.auto.now().Sub(started).Milliseconds())
 		}()
-		// One byte past the cap is readable: a file grown since the stat fails.
+		// One byte past the cap is readable: a file grown since the stat fails,
+		// whatever the aligner answered to the oversized upload (a 413).
 		bounded := &io.LimitedReader{R: audio, N: limit + 1}
 		res, err = u.auto.aligner.AlignFile(ctx, bounded, lines)
-		if err == nil && bounded.N <= 0 {
+		if bounded.N <= 0 {
 			res, err = aligner.Result{}, errAutoTooLarge
 		}
 	}()
