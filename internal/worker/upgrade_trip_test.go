@@ -475,3 +475,18 @@ func TestUpgradeTrip_CompleteFailureAppliesAttemptCap(t *testing.T) {
 		}
 	})
 }
+
+// TestUpgradeTrip_StampFailureAtCapStaysRetryable: a trip at the cap whose
+// sync-tier stamp AND clear both fail must not settle (SettleUpgradeTrip would
+// keep the previous tier for a file this pass rewrote); it fails and stays armed.
+func TestUpgradeTrip_StampFailureAtCapStaysRetryable(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+	r.w.queue = failingSyncTierQueue{r.q}
+	if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ? WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	if got := r.row(t); got != "failed outcome=synced timing=ok lane=musixmatch misses=14 armed=1" {
+		t.Fatalf("row = %q, want failed and still armed (not settled)", got)
+	}
+}

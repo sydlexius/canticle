@@ -1790,10 +1790,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// this same completion may have just changed. Fail it via the same path
 	// a failed Complete already takes, below.
 	if err := w.stampSyncTier(ctxNoCancel, item, song); err != nil {
-		return w.failStuckItem(ctxNoCancel, item, err)
+		return w.failStuckItem(ctxNoCancel, item, false, err)
 	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
-		return w.failStuckItem(ctxNoCancel, item, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
+		return w.failStuckItem(ctxNoCancel, item, true, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
 	return nil
@@ -1867,10 +1867,10 @@ func (w *Worker) completeKept(ctx context.Context, item queue.WorkItem, kept []*
 		}
 	}
 	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
-		return w.failStuckItem(ctxNoCancel, item, err)
+		return w.failStuckItem(ctxNoCancel, item, false, err)
 	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
-		return w.failStuckItem(ctxNoCancel, item, fmt.Errorf("worker: complete kept item %d: %w", item.ID, err))
+		return w.failStuckItem(ctxNoCancel, item, true, fmt.Errorf("worker: complete kept item %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
 	return nil
@@ -1884,12 +1884,15 @@ func (w *Worker) completeKept(ctx context.Context, item queue.WorkItem, kept []*
 // An upgrade trip applies the same attempt cap failPass does (#1119): the
 // failure that reaches upgradeMaxAttempts settles the trip through
 // SettleUpgradeTrip instead of failing it, so a persistent Complete failure is
-// bounded. The completion stamps are written before Complete, so the row
-// already describes whatever this pass left on disk; settling is not an
-// answer (answered=false), matching a transport-failure cap. A settle error
+// bounded. settleAtCap is true only when the completion metadata is known
+// consistent (a failed Complete, after every stamp landed); a failed
+// stamp-and-clear of the sync tier passes false, because SettleUpgradeTrip
+// leaves the file-record columns alone and would keep the PREVIOUS tier for a
+// file this pass already rewrote, so that case stays retryable. Settling is not
+// an answer (answered=false), matching a transport-failure cap. A settle error
 // falls through to Fail, so the row never wedges.
-func (w *Worker) failStuckItem(ctxNoCancel context.Context, item queue.WorkItem, cause error) error {
-	if item.UpgradeQueued && item.Attempts+1 >= upgradeMaxAttempts {
+func (w *Worker) failStuckItem(ctxNoCancel context.Context, item queue.WorkItem, settleAtCap bool, cause error) error {
+	if settleAtCap && item.UpgradeQueued && item.Attempts+1 >= upgradeMaxAttempts {
 		slog.Info("worker: upgrade trip could not complete; settling at the attempt cap", "id", item.ID, "attempts", item.Attempts+1, "error", cause)
 		if settled, err := w.queue.SettleUpgradeTrip(ctxNoCancel, item.ID, false); err == nil && settled {
 			return fmt.Errorf("worker: item %d (upgrade trip settled at the attempt cap): %w", item.ID, cause)
