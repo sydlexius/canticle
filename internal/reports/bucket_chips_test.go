@@ -161,7 +161,7 @@ func TestBucketChipsPerBucket(t *testing.T) {
 		reports.BucketSettled:  {reports.ChipLineSynced, reports.ChipEdited, reports.ChipMissynced},
 	}
 	for _, b := range reports.Buckets() {
-		if got := fmt.Sprint(reports.BucketChips(b)); got != fmt.Sprint(want[b]) {
+		if got := fmt.Sprint(reports.BucketChips(b, reports.TopRungWord)); got != fmt.Sprint(want[b]) {
 			t.Errorf("BucketChips(%s) = %s, want %v", b, got, want[b])
 		}
 		if wantAny := len(want[b]) > 0; reports.ChipBucket(b) != wantAny {
@@ -172,10 +172,22 @@ func TestBucketChipsPerBucket(t *testing.T) {
 			for _, w := range want[b] {
 				wantHas = wantHas || w == c
 			}
-			if reports.HasChip(b, c) != wantHas {
+			if reports.HasChip(b, c, reports.TopRungWord) != wantHas {
 				t.Errorf("HasChip(%s, %s) = %v, want %v", b, c, !wantHas, wantHas)
 			}
 		}
+	}
+}
+
+// #1275: under TopRungLine the Line-synced chip follows the line rows into Finished.
+func TestBucketChipsLineTopRung(t *testing.T) {
+	top := reports.TopRungLine
+	got := fmt.Sprint(reports.BucketChips(reports.BucketFinished, top), reports.BucketChips(reports.BucketSettled, top))
+	if got != "[tier edited] [edited missync]" {
+		t.Errorf("line-rung chips (finished, settled) = %s", got)
+	}
+	if !reports.HasChip(reports.BucketFinished, reports.ChipLineSynced, top) || reports.HasChip(reports.BucketSettled, reports.ChipLineSynced, top) {
+		t.Error("HasChip disagrees with BucketChips under TopRungLine")
 	}
 }
 
@@ -188,12 +200,12 @@ func TestValidTier(t *testing.T) {
 // A caller writing into the returned slice must not change the chip set later
 // callers (or HasChip) see.
 func TestBucketChipsReturnsACopy(t *testing.T) {
-	got := reports.BucketChips(reports.BucketSettled)
+	got := reports.BucketChips(reports.BucketSettled, reports.TopRungWord)
 	got[0] = reports.ChipMissynced
-	if again := reports.BucketChips(reports.BucketSettled); again[0] != reports.ChipLineSynced {
+	if again := reports.BucketChips(reports.BucketSettled, reports.TopRungWord); again[0] != reports.ChipLineSynced {
 		t.Errorf("BucketChips(settled)[0] = %q after a caller write, want %q", again[0], reports.ChipLineSynced)
 	}
-	if !reports.HasChip(reports.BucketSettled, reports.ChipLineSynced) {
+	if !reports.HasChip(reports.BucketSettled, reports.ChipLineSynced, reports.TopRungWord) {
 		t.Error("HasChip(settled, line) = false after a caller write to a returned slice")
 	}
 }

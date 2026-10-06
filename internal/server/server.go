@@ -96,6 +96,7 @@ type Handler struct {
 	startupGate        <-chan struct{}
 	pathChecker        func(string) error
 	webui              *web.UI
+	wordSyncOff        bool // output.word_sync_mode = off in the UI's config: line is the reports' top rung (#1275)
 	onboarding         *web.Onboarding
 	reportsDB          *sql.DB
 	editDurations      *audiodur.Store
@@ -232,7 +233,10 @@ func WithPathChecker(check func(string) error) Option {
 // by the Config view and version labels the sidebar. Omitting this option
 // leaves the handler serving only the JSON API.
 func WithWebUI(cfg config.Config, version string) Option {
-	return func(h *Handler) { h.webui = web.NewUI(cfg, version) }
+	return func(h *Handler) {
+		h.webui = web.NewUI(cfg, version)
+		h.wordSyncOff = cfg.Output.WordSyncMode == config.WordSyncModeOff
+	}
 }
 
 // WithTrustedNetworks wires the trusted-network policy that gates GET /metrics
@@ -255,6 +259,7 @@ func WithTrustedNetworks(p *trustnet.Policy) Option {
 // existing behavior rather than panicking.
 func WithWebUIAuth(cfg config.Config, version string, auth *web.Auth) Option {
 	return func(h *Handler) {
+		h.wordSyncOff = cfg.Output.WordSyncMode == config.WordSyncModeOff
 		if auth == nil {
 			h.webui = web.NewUI(cfg, version)
 			return
@@ -382,7 +387,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 			h.webui.AttachOnboarding(h.onboarding)
 		}
 		if h.reportsDB != nil {
-			h.webui.AttachReports(reports.New(h.reportsDB))
+			h.webui.AttachReports(reports.New(h.reportsDB, reports.WithLineTopRung(h.wordSyncOff)))
 			h.webui.AttachQueueActions(queue.NewDBQueue(h.reportsDB))
 			h.webui.AttachLyricEditor(web.EditDeps{
 				Queue: queue.NewDBQueue(h.reportsDB), Durations: h.editDurations, SelfWrites: h.editSelfWrites,

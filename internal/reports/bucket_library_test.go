@@ -154,7 +154,7 @@ func TestLibraryPredicateUsesPrefixProbe(t *testing.T) {
 	for _, bucket := range []Bucket{BucketSettled, BucketFailed} {
 		for _, o := range []tablesort.Order{BucketSpec(bucket).Default, {Key: tablesort.KeyTitle}} {
 			name := string(bucket) + "/" + o.Key
-			q, args, err := bucketQuery(bucket, BucketFilter{LibraryID: 1}, o, tablesort.Cursor{}, 50)
+			q, args, err := bucketQuery(bucket, TopRungWord, BucketFilter{LibraryID: 1}, o, tablesort.Cursor{}, 50)
 			if err != nil {
 				t.Fatal(err)
 			}

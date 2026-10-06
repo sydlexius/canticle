@@ -43,8 +43,29 @@ var bucketPredicates = map[Bucket]string{
 	BucketDeferred:    `status = 'deferred'`,
 	BucketFailed:      `status = 'failed'`,
 	BucketFinished:    finishedPredicate,
-	BucketSettled:     `status = 'done' AND NOT COALESCE((` + finishedPredicate + `), 0)`,
+	BucketSettled:     settledPredicate(finishedPredicate),
 	BucketUnavailable: `status = 'unavailable'`,
+}
+
+// lineTopBucketPredicates overrides Finished and Settled under TopRungLine
+// (#1275), from the same finishedPredicates entry QueueSummary counts.
+var lineTopBucketPredicates = map[Bucket]string{
+	BucketFinished: finishedPredicates[TopRungLine],
+	BucketSettled:  settledPredicate(finishedPredicates[TopRungLine]),
+}
+
+// settledPredicate is Settled: done and not Finished, the exact complement.
+func settledPredicate(finished string) string {
+	return `status = 'done' AND NOT COALESCE((` + finished + `), 0)`
+}
+
+// bucketPredicate is the bucket's SQL under rung top.
+func bucketPredicate(b Bucket, top TopRung) (string, bool) {
+	if p, ok := lineTopBucketPredicates[b]; ok && top == TopRungLine {
+		return p, true
+	}
+	p, ok := bucketPredicates[b]
+	return p, ok
 }
 
 // Buckets returns every valid bucket in display order.
@@ -209,7 +230,9 @@ func (r *Repo) Libraries(ctx context.Context) ([]BucketLibrary, error) {
 
 // TierLine is the one Tier chip key (the URL value tier=line). A word-synced
 // chip is deliberately absent: Finished IS the word tier and Settled excludes it,
-// so on either bucket that chip would be a no-op or always empty.
+// so on either bucket that chip would be a no-op or always empty. (Under
+// TopRungLine, Finished's word rows are only those written before word sync was
+// turned off; the Line-synced chip there isolates the editable ones.)
 const TierLine = "line"
 
 // tierPredicates maps a Tier key to its SQL: the dashboard's own shared tier
@@ -239,8 +262,9 @@ const (
 	ChipMissynced  Chip = "missync"
 )
 
-// bucketChips is the ONE place the chip set per bucket is decided, in display
-// order. Finished is status done AND synced AND word tier (which excludes
+// bucketChips and lineTopBucketChips are the ONE place the chip set per bucket
+// is decided, in display order. Under TopRungWord, Finished is status done AND
+// synced AND word tier (which excludes
 // mis_synced) and Settled is its complement within done, so only Hand-edited
 // can match on Finished, while Line-synced and Mis-synced only ever match on
 // Settled. A chip a bucket does not list is never offered and never honored.
@@ -249,19 +273,29 @@ var bucketChips = map[Bucket][]Chip{
 	BucketSettled:  {ChipLineSynced, ChipEdited, ChipMissynced},
 }
 
-// BucketChips returns the chips b offers, in display order (nil for none). The
-// result is a copy, so a caller cannot change the set other requests see.
-func BucketChips(b Bucket) []Chip { return slices.Clone(bucketChips[b]) }
-
-// HasChip reports whether bucket b offers chip c.
-func HasChip(b Bucket, c Chip) bool {
-	for _, have := range bucketChips[b] {
-		if have == c {
-			return true
-		}
-	}
-	return false
+// lineTopBucketChips is bucketChips under TopRungLine (#1275): line-synced rows
+// are Finished there, so the Line-synced chip moves with them (it would always
+// be empty on Settled). Mis-synced stays on Settled: the line tier excludes it.
+var lineTopBucketChips = map[Bucket][]Chip{
+	BucketFinished: {ChipLineSynced, ChipEdited},
+	BucketSettled:  {ChipEdited, ChipMissynced},
 }
+
+// chipsFor is the chip set for b under rung top.
+func chipsFor(b Bucket, top TopRung) []Chip {
+	if top == TopRungLine {
+		return lineTopBucketChips[b]
+	}
+	return bucketChips[b]
+}
+
+// BucketChips returns the chips b offers under rung top, in display order (nil
+// for none). The result is a copy, so a caller cannot change the set other
+// requests see.
+func BucketChips(b Bucket, top TopRung) []Chip { return slices.Clone(chipsFor(b, top)) }
+
+// HasChip reports whether bucket b offers chip c under rung top.
+func HasChip(b Bucket, c Chip, top TopRung) bool { return slices.Contains(chipsFor(b, top), c) }
 
 // ValidTier reports whether t is a Tier chip key.
 func ValidTier(t string) bool { _, ok := tierPredicates[t]; return ok }
@@ -312,8 +346,8 @@ func BucketSpec(b Bucket) tablesort.Spec {
 
 // bucketQuery builds the page query and its arguments; split from the listing
 // so the plan test can EXPLAIN the real text.
-func bucketQuery(bucket Bucket, f BucketFilter, o tablesort.Order, after tablesort.Cursor, limit int) (string, []any, error) {
-	pred, ok := bucketPredicates[bucket]
+func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, after tablesort.Cursor, limit int) (string, []any, error) {
+	pred, ok := bucketPredicate(bucket, top)
 	if !ok {
 		return "", nil, fmt.Errorf("reports: unknown bucket %q", string(bucket))
 	}
@@ -373,7 +407,7 @@ func bucketQuery(bucket Bucket, f BucketFilter, o tablesort.Order, after tableso
 // themselves (LIKE would need escaping). The query is bound as a parameter,
 // never concatenated, and never logged by this package.
 func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFilter, o tablesort.Order, after tablesort.Cursor, limit int) ([]BucketRow, error) {
-	query, args, err := bucketQuery(bucket, f, o, after, limit)
+	query, args, err := bucketQuery(bucket, r.top, f, o, after, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -10,7 +10,18 @@ type queueBucket struct {
 	Key     reports.Bucket
 	Label   string
 	Tooltip string
-	Value   func(reports.QueueSummary) int64
+	// LineTooltip, when set, replaces Tooltip under reports.TopRungLine (word
+	// sync off, #1275). The Label never changes: the chart colors key on it.
+	LineTooltip string
+	Value       func(reports.QueueSummary) int64
+}
+
+// tooltip is the hover text under rung top.
+func (b queueBucket) tooltip(top reports.TopRung) string {
+	if top == reports.TopRungLine && b.LineTooltip != "" {
+		return b.LineTooltip
+	}
+	return b.Tooltip
 }
 
 // queueBuckets is the ONE definition of the work-queue buckets (#599). The
@@ -49,16 +60,18 @@ var queueBuckets = []queueBucket{
 		Value:   func(s reports.QueueSummary) int64 { return s.Pending },
 	},
 	{
-		Key:     reports.BucketFinished,
-		Label:   "Finished",
-		Tooltip: "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain.",
-		Value:   func(s reports.QueueSummary) int64 { return s.Finished },
+		Key:         reports.BucketFinished,
+		Label:       "Finished",
+		Tooltip:     "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain.",
+		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk. Word sync is off, so line-synced is the best result: nothing further to gain.",
+		Value:       func(s reports.QueueSummary) int64 { return s.Finished },
 	},
 	{
-		Key:     reports.BucketSettled,
-		Label:   "Settled (upgradable)",
-		Tooltip: "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state.",
-		Value:   func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
+		Key:         reports.BucketSettled,
+		Label:       "Settled (upgradable)",
+		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state.",
+		LineTooltip: "Completed tracks below line sync (unsynced, instrumental, or tier not yet recorded). Word sync is off, so they could still be upgraded to line sync.",
+		Value:       func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{
 		// Given up is status 'unavailable' (#477): an exhausted benign miss,
@@ -77,7 +90,9 @@ var queueBuckets = []queueBucket{
 type resultBucket struct {
 	Label   string
 	Tooltip string
-	Value   func(reports.ResultsBreakdown) int64
+	// LineTooltip, when set, replaces Tooltip under reports.TopRungLine (#1275).
+	LineTooltip string
+	Value       func(reports.ResultsBreakdown) int64
 }
 
 // resultBuckets is the ONE definition of the dashboard Results row (#599). It
@@ -94,9 +109,10 @@ var resultBuckets = []resultBucket{
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.WordSynced },
 	},
 	{
-		Label:   "Line-synced",
-		Tooltip: "The .lrc on disk has line-level timing and no word timing. It may still be upgraded.",
-		Value:   func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
+		Label:       "Line-synced",
+		Tooltip:     "The .lrc on disk has line-level timing and no word timing. It may still be upgraded.",
+		LineTooltip: "The .lrc on disk has line-level timing and no word timing: the best result with word sync off.",
+		Value:       func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
 	},
 	{
 		Label:   "Unsynced",
