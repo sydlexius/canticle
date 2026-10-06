@@ -1,10 +1,13 @@
 package scan_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/audiodur"
@@ -72,16 +75,22 @@ func TestEnqueuePendingReopensCategoricalOnlyForDifferentRecording(t *testing.T)
 // database: recording A settled done + categorical (judged 200 s, nothing
 // written), recording B of the same song pending. A different-length B moves
 // the shared row to itself and is what the worker claims, its scan row linked;
-// a same-length B stays pending with nothing to claim.
+// a same-length B stays pending with nothing to claim. So does a
+// different-length B when A's row records a file (the sweep stamped it under
+// on_categorical = off) or a hand edit: the scan never asks, so no enqueue
+// transaction runs and the row is left exactly as it was.
 func TestScanReopensCategoricalRowEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name        string
 		fileSeconds int
+		rowSetup    string
 		wantClaimB  bool
 	}{
-		{"different length", 300, true},
-		{"same length", 201, false},
+		{"different length", 300, "", true},
+		{"same length", 201, "", false},
+		{"different length, hand-edited row", 300, "lyric_edited_at = '2026-02-01T00:00:00Z', outcome_type = 'synced', sync_tier = 'line'", false},
+		{"different length, file kept by the sweep", 300, "outcome_type = 'synced'", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dbh := openTestDB(t)
@@ -106,12 +115,32 @@ func TestScanReopensCategoricalRowEndToEnd(t *testing.T) {
 				pathA, `[{"outdir":"`+root+`","filename":"a.lrc"}]`).Scan(&rowID); err != nil {
 				t.Fatalf("seed work_queue: %v", err)
 			}
+			rowState := func() (state string) {
+				t.Helper()
+				if err := dbh.QueryRow(`SELECT status || '|' || source_path || '|' || timing_outcome || '|' ||
+                         COALESCE(outcome_type, '') || '|' || COALESCE(sync_tier, '') || '|' || COALESCE(lyric_edited_at, '') || '|' || updated_at
+                     FROM work_queue WHERE id = ?`, rowID).Scan(&state); err != nil {
+					t.Fatalf("read row: %v", err)
+				}
+				return state
+			}
+			if tc.rowSetup != "" {
+				if _, err := dbh.Exec(`UPDATE work_queue SET `+tc.rowSetup+` WHERE id = ?`, rowID); err != nil {
+					t.Fatalf("row setup: %v", err)
+				}
+			}
+			before := rowState()
 			q := queue.NewDBQueue(dbh)
 			q.SetProvidersVersion(1)
-			e := scan.Enqueuer{Results: repo, Cache: cache.New(dbh), Queue: q, Priority: queue.PriorityScan,
+			counted := &countingQueue{WorkQueue: q}
+			e := scan.Enqueuer{Results: repo, Cache: cache.New(dbh), Queue: counted, Priority: queue.PriorityScan,
 				Timing: scan.TimingVerdicts{Reader: q}, ProvidersVersion: 1, Durations: durations}
 			if _, _, err := e.EnqueuePending(ctx, lib); err != nil {
 				t.Fatalf("EnqueuePending: %v", err)
+			}
+			if !tc.wantClaimB && (counted.calls != 0 || rowState() != before) {
+				t.Fatalf("Enqueue calls = %d, row %q (was %q); want the file suppressed with no enqueue and the row untouched",
+					counted.calls, rowState(), before)
 			}
 
 			var bStatus string
@@ -139,12 +168,25 @@ func TestScanReopensCategoricalRowEndToEnd(t *testing.T) {
 	}
 }
 
+// countingQueue counts the enqueues a scan pass makes.
+type countingQueue struct {
+	scan.WorkQueue
+	calls int
+}
+
+func (c *countingQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority int) (queue.WorkItem, error) {
+	c.calls++
+	return c.WorkQueue.Enqueue(ctx, inputs, priority)
+}
+
 // TestScanLeavesFilePendingWhileWorkerHoldsCategoricalRow (#972): the verdict
 // read ignores status, so a row a worker still holds ('processing', stamped
 // categorical before Complete) asks for a reopen that cannot happen. The file
 // must not be linked to that row: its Complete would mark the file done though
 // it was never fetched. It stays pending, and the next scan, with the row
-// settled, reopens the row for it.
+// settled, reopens the row for it. The refused file is logged under its own
+// count, never as "quarantined": a second song suppressed in the same pass
+// shows the two lines carry separate counts.
 func TestScanLeavesFilePendingWhileWorkerHoldsCategoricalRow(t *testing.T) {
 	ctx := context.Background()
 	dbh := openTestDB(t)
@@ -160,6 +202,14 @@ func TestScanLeavesFilePendingWhileWorkerHoldsCategoricalRow(t *testing.T) {
 	if err := repo.Upsert(ctx, lib.ID, []models.ScanResult{{FilePath: pathB,
 		Track: models.Track{ArtistName: "A", TrackName: "T"}, Outdir: root, Filename: "b.lrc"}}, scan.UpsertOptions{}); err != nil {
 		t.Fatalf("upsert: %v", err)
+	}
+	if err := repo.Upsert(ctx, lib.ID, []models.ScanResult{{FilePath: writeTestAudioFile(t, root, "u.flac"),
+		Track: models.Track{ArtistName: "A", TrackName: "U"}, Outdir: root, Filename: "u.lrc"}}, scan.UpsertOptions{}); err != nil {
+		t.Fatalf("upsert quarantined song: %v", err)
+	}
+	if _, err := dbh.Exec(`INSERT INTO work_queue (artist, title, artist_key, title_key, status, providers_version, timing_outcome)
+         VALUES ('A', 'U', 'a', 'u', 'done', 1, 'categorical')`); err != nil {
+		t.Fatalf("seed quarantined song: %v", err)
 	}
 	var rowID int64
 	if err := dbh.QueryRow(`INSERT INTO work_queue (artist, title, artist_key, title_key, source_path, output_paths,
@@ -181,9 +231,25 @@ func TestScanLeavesFilePendingWhileWorkerHoldsCategoricalRow(t *testing.T) {
 		}
 		return status, links
 	}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	enqueued, _, err := e.EnqueuePending(ctx, lib)
+	slog.SetDefault(prev)
 	if err != nil || enqueued != 0 {
 		t.Fatalf("EnqueuePending = (%d, %v); want nothing enqueued and no error", enqueued, err)
+	}
+	var refusedLine, quarantinedLine string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		switch {
+		case strings.Contains(line, "could not be reopened"):
+			refusedLine = line
+		case strings.Contains(line, "quarantined"):
+			quarantinedLine = line
+		}
+	}
+	if !strings.Contains(refusedLine, "refused=1") || !strings.Contains(quarantinedLine, "suppressed=1") {
+		t.Fatalf("log lines:\n%s\nwant refused=1 on its own line and suppressed=1 on the quarantine line", logs.String())
 	}
 	if status, links := state(); status != scan.StatusPending || links != 0 {
 		t.Fatalf("B status %q, links %d; want pending and unlinked while the worker holds the row", status, links)

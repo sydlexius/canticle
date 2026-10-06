@@ -66,7 +66,8 @@ type TimingVerdict struct {
 	// was reached. It is what makes the suppression expire: see shouldSuppress.
 	ProvidersVersion int
 	// JudgedSeconds is the audio duration the verdict was judged against,
-	// derived from the stored overrun (#972); 0 means not derivable.
+	// derived from the stored overrun (#972); 0 means not derivable, or a row
+	// that records a file or a hand edit and is never reopened.
 	JudgedSeconds int
 }
 
@@ -272,6 +273,9 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 	// Rows enqueued to reopen a categorical verdict judged against a
 	// different-length recording of the same song (#972).
 	reopened := 0
+	// Different-length recordings Enqueue would not reopen the row for. Not
+	// counted as suppressed: no verdict quarantines them.
+	refused := 0
 
 	for _, res := range results {
 		if err := ctx.Err(); err != nil {
@@ -340,8 +344,10 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		// that recording (#972), at any provider generation. Skipping the
 		// suppression alone would strand this file (the shared row is done, so
 		// the upsert keeps its paths), so the enqueue asks Enqueue to reopen the
-		// row and move it here. This read is outside the enqueue transaction and
-		// ignores the row's status, so Enqueue judges the row again and refuses
+		// row and move it here. A row that records a file or a hand edit reports
+		// no judged duration, so it is never asked about and stays suppressed as
+		// before. This read is outside the enqueue transaction and ignores the
+		// row's status, so Enqueue judges the row again and refuses
 		// (queue.ErrCategoricalNotReopened) rather than link this file to a row
 		// it could not reopen.
 		reopenCategorical := false
@@ -382,10 +388,9 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			}
 			// The row could not be reopened just now (a worker holds it, or it
 			// is shared with an unfinished file): nothing was linked, so the
-			// result stays pending, suppressed for this pass, and is offered
-			// again on the next scan.
+			// result stays pending and is offered again on the next scan.
 			if errors.Is(err, queue.ErrCategoricalNotReopened) {
-				suppressed++
+				refused++
 				continue
 			}
 			return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w", res.ID, err)
@@ -398,6 +403,10 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 	if reopened > 0 {
 		slog.Info("scan: reopened categorical verdicts for a different-length recording",
 			"library_id", libraryID, "reopened", reopened)
+	}
+	if refused > 0 {
+		slog.Info("scan: left different-length recordings pending; the shared categorical row could not be reopened yet",
+			"library_id", libraryID, "refused", refused)
 	}
 	// Never leave the suppression silent: a track skipped here produces no work
 	// item, no sidecar and no queue row, so without this line an operator has no
