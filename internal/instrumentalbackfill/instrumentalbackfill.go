@@ -125,7 +125,7 @@ type Outcome struct {
 // is RowsSettled / RowsStamped / SkippedClaimed / SkippedAlreadySettled / Errors.
 type Result struct {
 	Total           int // eligible rows in the backlog, before Limit
-	Candidates      int // rows this run considered (Total capped by Limit)
+	Candidates      int // rows this run examined; exceeds Limit only by skipped rows paged past
 	Checked         int // rows the detector actually classified
 	Instrumental    int // detector agreed  (verdict axis)
 	NotInstrumental int // detector disagreed (verdict axis)
@@ -214,54 +214,16 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 
 	// Eligibility is resolved in SQL so ineligible rows never consume Limit; the
 	// per-item check below is the belt-and-braces half of the same rule.
-	candidates, err := b.store.ListUnclassified(ctx, queue.ListUnclassifiedOptions{
-		LibraryID:           opts.LibraryID,
-		Limit:               opts.Limit,
-		GlobalDetectDefault: opts.GlobalDetectDefault,
-	})
+	candidates, err := b.gather(ctx, opts, &res)
 	if err != nil {
-		return res, fmt.Errorf("instrumentalbackfill: list unclassified: %w", err)
+		return res, err
 	}
-	res.Candidates = len(candidates)
 
-	for _, item := range candidates {
+	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
-
-		// Honor the per-item decision stamped at enqueue, falling back to the global
-		// default, exactly as the worker resolves it. A row explicitly opted out
-		// stays opted out: this is a backfill for rows nobody looked at, not an
-		// override of a decision already made.
-		detect := opts.GlobalDetectDefault
-		if item.DetectInstrumental != nil {
-			detect = *item.DetectInstrumental
-		}
-		if !detect {
-			res.SkippedDetectOff++
-			continue
-		}
-
-		src := strings.TrimSpace(item.Inputs.SourcePath)
-		if src == "" {
-			res.SkippedNoSource++
-			continue
-		}
-
-		// A file ffmpeg already failed on at this exact (mtime, size) would fail
-		// identically: skip it without touching the audio again (#1149). A stat or
-		// store failure just falls through to the attempt.
-		var mtimeNano, size int64
-		var haveVersion bool
-		if b.failures != nil {
-			if fi, statErr := os.Stat(src); statErr == nil {
-				mtimeNano, size, haveVersion = fi.ModTime().UnixNano(), fi.Size(), true
-				if skip, skipErr := b.failures.ShouldSkip(ctx, src, mtimeNano, size); skipErr == nil && skip {
-					res.SkippedUnsampleable++
-					continue
-				}
-			}
-		}
+		item, src := c.item, c.src
 
 		verdict, err := b.det.Detect(ctx, src)
 		if err != nil {
@@ -274,8 +236,8 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 				// Warn names the file; this one names the row.
 				slog.Warn("instrumental backfill: audio could not be sampled; not retrying until the file changes",
 					"queue_id", item.ID, "cause", "unsampleable")
-				if haveVersion {
-					if recErr := b.failures.RecordFailure(ctx, src, mtimeNano, size, err); recErr != nil {
+				if c.haveVersion {
+					if recErr := b.failures.RecordFailure(ctx, src, c.mtimeNano, c.size, err); recErr != nil {
 						slog.Warn("instrumental backfill: could not record unsampleable file; it will be retried",
 							"queue_id", item.ID, "error", recErr)
 					}
@@ -452,6 +414,95 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 // removes the row from every future backfill's candidate set. So it gets the
 // same backup-first treatment as a positive one -- otherwise --yes could
 // quietly retire rows with no recoverable record of having done so.
+// maxGatherPages bounds how many Limit-sized pages one Run reads looking for
+// rows worth a detector call (#1149). A skipped row costs a stat and one
+// primary-key lookup, never an ffmpeg run, so reading past them is cheap; the
+// bound keeps a cycle's stats finite when the remembered population is huge.
+const maxGatherPages = 10
+
+// candidate is a row worth a detector call, with the file version observed when
+// it was checked against the remembered failures.
+type candidate struct {
+	item            queue.WorkItem
+	src             string
+	mtimeNano, size int64
+	haveVersion     bool
+}
+
+// gather returns up to opts.Limit rows worth a detector call. ListUnclassified
+// applies Limit in SQL, but a remembered-unsampleable row is only known to be
+// skippable after a stat, so a page whose rows were skipped would hand the same
+// rows to every cycle and the rows behind them would never be reached. gather
+// therefore reads further pages until Limit rows are collected, the backlog
+// ends, or maxGatherPages is spent. Nothing is mutated while gathering, so
+// offset paging is stable within the run; rows are de-duplicated by id in case
+// a concurrent writer reorders the set between pages.
+func (b *Backfiller) gather(ctx context.Context, opts Options, res *Result) ([]candidate, error) {
+	var out []candidate
+	seen := map[int64]bool{}
+	for page, offset := 0, 0; ; page++ {
+		items, err := b.store.ListUnclassified(ctx, queue.ListUnclassifiedOptions{
+			LibraryID:           opts.LibraryID,
+			Limit:               opts.Limit,
+			Offset:              offset,
+			GlobalDetectDefault: opts.GlobalDetectDefault,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("instrumentalbackfill: list unclassified: %w", err)
+		}
+		offset += len(items)
+		for _, item := range items {
+			if seen[item.ID] || (opts.Limit > 0 && len(out) == opts.Limit) {
+				continue
+			}
+			seen[item.ID] = true
+			res.Candidates++
+			if c, ok := b.admit(ctx, opts, item, res); ok {
+				out = append(out, c)
+			}
+		}
+		if opts.Limit <= 0 || len(items) < opts.Limit || len(out) == opts.Limit || page+1 >= maxGatherPages {
+			return out, nil
+		}
+	}
+}
+
+// admit applies the per-row skips, counting each in res.
+func (b *Backfiller) admit(ctx context.Context, opts Options, item queue.WorkItem, res *Result) (candidate, bool) {
+	// Honor the per-item decision stamped at enqueue, falling back to the global
+	// default, exactly as the worker resolves it. A row explicitly opted out
+	// stays opted out: this is a backfill for rows nobody looked at, not an
+	// override of a decision already made.
+	detect := opts.GlobalDetectDefault
+	if item.DetectInstrumental != nil {
+		detect = *item.DetectInstrumental
+	}
+	if !detect {
+		res.SkippedDetectOff++
+		return candidate{}, false
+	}
+
+	c := candidate{item: item, src: strings.TrimSpace(item.Inputs.SourcePath)}
+	if c.src == "" {
+		res.SkippedNoSource++
+		return candidate{}, false
+	}
+
+	// A file ffmpeg already failed on at this exact (mtime, size) would fail
+	// identically: skip it without touching the audio again (#1149). A stat or
+	// store failure just falls through to the attempt.
+	if b.failures != nil {
+		if fi, statErr := os.Stat(c.src); statErr == nil {
+			c.mtimeNano, c.size, c.haveVersion = fi.ModTime().UnixNano(), fi.Size(), true
+			if skip, skipErr := b.failures.ShouldSkip(ctx, c.src, c.mtimeNano, c.size); skipErr == nil && skip {
+				res.SkippedUnsampleable++
+				return candidate{}, false
+			}
+		}
+	}
+	return c, true
+}
+
 func (b *Backfiller) stampNotInstrumental(ctx context.Context, opts Options, change Change, res *Result) {
 	if opts.Report != nil {
 		if err := opts.Report(change); err != nil {

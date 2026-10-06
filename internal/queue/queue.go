@@ -2793,6 +2793,9 @@ type ListUnclassifiedOptions struct {
 	LibraryID *int64
 	// Limit caps the number of returned rows when > 0.
 	Limit int
+	// Offset skips that many rows of the ordered set; honored only with Limit > 0.
+	// The backfill pages past rows it skips in Go (#1149).
+	Offset int
 	// GlobalDetectDefault resolves rows whose per-item detect_instrumental is NULL,
 	// mirroring how the worker resolves it. It MUST be applied here, in SQL, rather
 	// than by the caller after the fact: Limit is applied by the database, so an
@@ -2833,7 +2836,13 @@ func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOpt
                        WHERE instrumental_result IS NULL
                          AND status = 'deferred'
                          AND TRIM(COALESCE(source_path, '')) <> ''` + notWordRecheckQueued
-	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
+	// A path the detector already failed to sample (detector_sample_failures,
+	// #1149) sorts LAST. Whether it is still skippable depends on the file's
+	// current (mtime, size), which only a stat can tell, so the backfill filters
+	// those rows in Go after Limit; ordering them behind every other row means a
+	// remembered row can never occupy a slot a never-attempted row is waiting for.
+	const orderClause = ` ORDER BY source_path IN (SELECT file_path FROM detector_sample_failures) ASC,
+                       priority DESC, created_at ASC, id ASC`
 	query := baseQuery
 	var args []any
 	// Eligibility BEFORE the limit: an ineligible row filtered in Go has already
@@ -2847,8 +2856,8 @@ func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOpt
 	args = append(args, libArgs...)
 	query += orderClause
 	if opts.Limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, opts.Limit)
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, max(opts.Offset, 0))
 	}
 
 	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: all concatenated fragments are package constants / recheckLibraryClause's + detectEligibleClause's fixed clauses; never user-built SQL
