@@ -230,7 +230,7 @@ func (n NameSignal) discriminator() string {
 // trackPrefix matches a leading track number and its separator ("05. ",
 // "05 - ", "5) ", "05_"). Every file in an album directory carries one, so it
 // adds shared, non-discriminating characters to a stem comparison.
-var trackPrefix = regexp.MustCompile(`^\d{1,3}\s*[-._)]*\s*`)
+var trackPrefix = regexp.MustCompile(`^\d{1,3}(?:\s*[-._)]\s*|\s+)`)
 
 // stripTrackPrefix removes a leading track number from a filename stem before
 // scoring (#1140). Left in, two unrelated tracks ("05. Alpha Beta" vs
