@@ -883,6 +883,21 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		case outcomeRelink:
 			toRelink = append(toRelink, cg.classifiedRelink)
 		case outcomePrune:
+			shared, err := p.sharedWithPresentFile(ctx, src, c, libraryID)
+			if err != nil {
+				return Result{}, err
+			}
+			if shared {
+				// #1293: the row is linked to a present file in another library; keep it.
+				rr := RetainedRow{SourcePath: src, Reason: "the queue row is also linked to a present file in another library; never deleted from under it", MBID: c.mbid, ISRC: c.isrc}
+				res.Retained = append(res.Retained, rr)
+				if hooks.Retained != nil {
+					if err := hooks.Retained(rr); err != nil {
+						return Result{}, fmt.Errorf("prune: report retained %q: %w", src, err)
+					}
+				}
+				continue
+			}
 			toPrune = append(toPrune, prunedRow(src, c))
 		}
 	}
@@ -2167,21 +2182,62 @@ func (p *Pruner) identityHeld(ctx context.Context, src string, c *candidate, roo
 // Asked only of a candidate otherwise ageable: per queue row, one prefix probe
 // of the junction's primary key and a rowid lookup per link; no stat.
 func (p *Pruner) sharedAcrossLibraries(ctx context.Context, src string, c *candidate, scope *int64) (bool, error) {
+	paths, err := p.otherLibraryPaths(ctx, src, c, scope, true)
+	return len(paths) > 0, err
+}
+
+// otherLibraryPaths lists the files, in libraries other than the one under
+// examination, that src's queue rows are also junction-linked to. firstOnly
+// stops at the first hit (the existence check the age-out needs).
+func (p *Pruner) otherLibraryPaths(ctx context.Context, src string, c *candidate, scope *int64, firstOnly bool) ([]string, error) {
 	lib, own := scope, ""
 	if lib == nil {
 		lib, own = c.libraryID, src
 	}
 	if lib == nil {
-		return false, nil
+		return nil, nil
 	}
+	var out []string
 	for _, w := range c.workItems {
-		var shared bool
-		if err := p.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM work_queue_scan_results j WHERE j.work_queue_id = ?
-            AND EXISTS (SELECT 1 FROM scan_results sr WHERE sr.id = j.scan_result_id AND sr.library_id != ? AND sr.file_path != ?))`,
-			w.id, *lib, own).Scan(&shared); err != nil {
-			return false, fmt.Errorf("prune: read other libraries' links: %w", err)
+		rows, err := p.db.QueryContext(ctx, `SELECT sr.file_path FROM work_queue_scan_results j
+            JOIN scan_results sr ON sr.id = j.scan_result_id
+            WHERE j.work_queue_id = ? AND sr.library_id != ? AND sr.file_path != ?`, w.id, *lib, own)
+		if err != nil {
+			return nil, fmt.Errorf("prune: read other libraries' links: %w", err)
 		}
-		if shared {
+		for rows.Next() {
+			var fp string
+			if err := rows.Scan(&fp); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("prune: read other libraries' links: %w", err)
+			}
+			out = append(out, fp)
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("prune: read other libraries' links: %w", err)
+		}
+		if firstOnly && len(out) > 0 {
+			return out, nil
+		}
+	}
+	return out, nil
+}
+
+// sharedWithPresentFile reports whether a gone source's queue row is also linked
+// to a file in another library that is still on disk (#1293). Such a row is
+// shared, not orphaned: deleting it would cascade away the other library's
+// link and its telemetry. Only reached for a row already classified for
+// deletion, so the unaffected path pays nothing. A stat that is not a clean
+// not-exist counts as present (retain on doubt).
+func (p *Pruner) sharedWithPresentFile(ctx context.Context, src string, c *candidate, scope *int64) (bool, error) {
+	paths, err := p.otherLibraryPaths(ctx, src, c, scope, false)
+	if err != nil {
+		return false, err
+	}
+	for _, fp := range paths {
+		if _, err := p.stat(fp); !errors.Is(err, fs.ErrNotExist) {
 			return true, nil
 		}
 	}
