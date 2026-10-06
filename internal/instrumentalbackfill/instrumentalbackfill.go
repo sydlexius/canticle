@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
@@ -186,6 +187,14 @@ type Backfiller struct {
 	det      Detector
 	w        Writer
 	failures FailureStore
+
+	// cursorMu guards cursor: the position in the ordered backlog where the
+	// previous capped gather stopped reading past remembered rows. In memory only,
+	// so a fresh Backfiller (every CLI invocation, every serve start) begins at 0;
+	// the serve sweep reuses one Backfiller, so its cycles rotate through the
+	// remembered tail instead of re-reading the same prefix (#1149).
+	cursorMu sync.Mutex
+	cursor   int
 }
 
 // WithFailureStore remembers unsampleable audio so each file version is
@@ -407,13 +416,6 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 	return res, nil
 }
 
-// stampNotInstrumental applies a not-instrumental change: backup record first,
-// then instrumental_result=0 on the still-deferred row, then its outcome.
-//
-// A negative verdict is a MUTATION too: it stamps instrumental_result=0, which
-// removes the row from every future backfill's candidate set. So it gets the
-// same backup-first treatment as a positive one -- otherwise --yes could
-// quietly retire rows with no recoverable record of having done so.
 // maxGatherPages bounds how many Limit-sized pages one Run reads looking for
 // rows worth a detector call (#1149). A skipped row costs a stat and one
 // primary-key lookup, never an ffmpeg run, so reading past them is cheap; the
@@ -437,22 +439,45 @@ type candidate struct {
 // ends, or maxGatherPages is spent. Nothing is mutated while gathering, so
 // offset paging is stable within the run; rows are de-duplicated by id in case
 // a concurrent writer reorders the set between pages.
+//
+// The page cap alone would re-read the same remembered prefix every cycle, so a
+// changed file further back in a large remembered tail would never be reached.
+// Page 0 is therefore always read from offset 0 (never-attempted rows sort
+// first and keep their priority), and later pages resume at b.cursor, where
+// the previous capped gather stopped; on reaching the end of the backlog the
+// tail wraps back to offset Limit and reads up to where this run started. The
+// cursor is a position, not an identity: rows leaving the backlog shift it by
+// at most a few rows, which only delays them until the next wrap. Concurrent
+// Runs on one Backfiller may share a cursor value; that costs duplicate reads,
+// never a missed or double mutation (the store's writes are guarded).
 func (b *Backfiller) gather(ctx context.Context, opts Options, res *Result) ([]candidate, error) {
 	var out []candidate
 	seen := map[int64]bool{}
+	limit := opts.Limit
+	jump := limit
+	if limit > 0 {
+		b.cursorMu.Lock()
+		jump = max(b.cursor, limit)
+		b.cursorMu.Unlock()
+	}
+	wrapped := false
 	for page, offset := 0, 0; ; page++ {
 		items, err := b.store.ListUnclassified(ctx, queue.ListUnclassifiedOptions{
 			LibraryID:           opts.LibraryID,
-			Limit:               opts.Limit,
+			Limit:               limit,
 			Offset:              offset,
 			GlobalDetectDefault: opts.GlobalDetectDefault,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("instrumentalbackfill: list unclassified: %w", err)
 		}
-		offset += len(items)
+		next := offset // position of the first row this page left unexamined
 		for _, item := range items {
-			if seen[item.ID] || (opts.Limit > 0 && len(out) == opts.Limit) {
+			if limit > 0 && len(out) == limit {
+				break
+			}
+			next++
+			if seen[item.ID] {
 				continue
 			}
 			seen[item.ID] = true
@@ -461,10 +486,46 @@ func (b *Backfiller) gather(ctx context.Context, opts Options, res *Result) ([]c
 				out = append(out, c)
 			}
 		}
-		if opts.Limit <= 0 || len(items) < opts.Limit || len(out) == opts.Limit || page+1 >= maxGatherPages {
+		if limit <= 0 {
+			return out, nil
+		}
+		ended := len(items) < limit
+		switch {
+		case len(out) == limit || (page+1 >= maxGatherPages && !ended):
+			// Stopped early. A run that never left page 0 says nothing about the
+			// tail, so it keeps the cursor for the next run.
+			if page > 0 {
+				b.setCursor(next)
+			}
+			return out, nil
+		case page == 0 && !ended:
+			offset = jump
+		case ended && !wrapped && jump > limit:
+			offset, wrapped = limit, true
+		case ended:
+			b.setCursor(0)
+			return out, nil
+		default:
+			offset = next
+		}
+		if wrapped && offset >= jump {
+			// The wrap reached where this run's tail read began: the whole
+			// backlog has been read once.
+			b.setCursor(0)
+			return out, nil
+		}
+		if page+1 >= maxGatherPages {
+			b.setCursor(offset)
 			return out, nil
 		}
 	}
+}
+
+// setCursor records where the next capped gather resumes its tail read.
+func (b *Backfiller) setCursor(pos int) {
+	b.cursorMu.Lock()
+	b.cursor = pos
+	b.cursorMu.Unlock()
 }
 
 // admit applies the per-row skips, counting each in res.
@@ -503,6 +564,13 @@ func (b *Backfiller) admit(ctx context.Context, opts Options, item queue.WorkIte
 	return c, true
 }
 
+// stampNotInstrumental applies a not-instrumental change: backup record first,
+// then instrumental_result=0 on the still-deferred row, then its outcome.
+//
+// A negative verdict is a MUTATION too: it stamps instrumental_result=0, which
+// removes the row from every future backfill's candidate set. So it gets the
+// same backup-first treatment as a positive one -- otherwise --yes could
+// quietly retire rows with no recoverable record of having done so.
 func (b *Backfiller) stampNotInstrumental(ctx context.Context, opts Options, change Change, res *Result) {
 	if opts.Report != nil {
 		if err := opts.Report(change); err != nil {

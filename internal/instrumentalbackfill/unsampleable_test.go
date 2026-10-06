@@ -3,6 +3,7 @@ package instrumentalbackfill
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -81,12 +82,20 @@ func (d *pathDetector) Detect(_ context.Context, p string) (detector.Result, err
 // SQLite database and returns the queue and the detector failure store on it.
 func backlog(t *testing.T, srcs ...string) (*queue.DBQueue, *scanfail.Store) {
 	t.Helper()
-	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "t.db"))
+	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
+	seedDeferred(t, sqlDB, 0, srcs...)
+	return queue.NewDBQueue(sqlDB), scanfail.NewDetector(sqlDB)
+}
+
+// seedDeferred enqueues srcs as deferred, never-scored rows whose created_at
+// seconds start at first, so rows order as seeded.
+func seedDeferred(t *testing.T, sqlDB *sql.DB, first int, srcs ...string) {
+	t.Helper()
+	ctx := context.Background()
 	q := queue.NewDBQueue(sqlDB)
 	for i, src := range srcs {
 		if err := os.WriteFile(src, []byte("audio"), 0o600); err != nil {
@@ -102,12 +111,11 @@ func backlog(t *testing.T, srcs ...string) (*queue.DBQueue, *scanfail.Store) {
 			t.Fatal(err)
 		}
 		// Same priority; created_at then id order the rows as seeded.
-		stamp := fmt.Sprintf("2026-01-01T00:00:%02dZ", i)
+		stamp := time.Date(2026, 1, 1, 0, 0, first+i, 0, time.UTC).Format(time.RFC3339)
 		if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET status='deferred', created_at=? WHERE id=?`, stamp, it.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return q, scanfail.NewDetector(sqlDB)
 }
 
 func remember(t *testing.T, fs *scanfail.Store, src string) {
@@ -254,5 +262,93 @@ func TestRun_UnsampleableWarnNamesQueueID(t *testing.T) {
 	}
 	if strings.Contains(out, src) {
 		t.Errorf("warn leaks the audio path: %q", out)
+	}
+}
+
+// rememberedTail seeds n unchanged remembered rows, then one remembered row
+// whose file changed since its failure, all in the remembered tail.
+func rememberedTail(t *testing.T, n int) (*sql.DB, *scanfail.Store, string) {
+	t.Helper()
+	dir := t.TempDir()
+	srcs := make([]string, 0, n+1)
+	for i := range n {
+		srcs = append(srcs, filepath.Join(dir, fmt.Sprintf("s%03d.flac", i)))
+	}
+	changed := filepath.Join(dir, "changed.flac")
+	srcs = append(srcs, changed)
+	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	seedDeferred(t, sqlDB, 0, srcs...)
+	fs := scanfail.NewDetector(sqlDB)
+	for _, src := range srcs {
+		remember(t, fs, src)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(changed, later, later); err != nil {
+		t.Fatal(err)
+	}
+	return sqlDB, fs, changed
+}
+
+func countPath(paths []string, want string) int {
+	n := 0
+	for _, p := range paths {
+		if p == want {
+			n++
+		}
+	}
+	return n
+}
+
+// A changed file behind more than maxGatherPages*Limit unchanged remembered rows
+// is reached by later cycles of one Backfiller, and the tail wraps so it is
+// reached again after the backlog ends (#1149).
+func TestRun_CursorRotatesPastRememberedPrefix(t *testing.T) {
+	sqlDB, fs, changed := rememberedTail(t, 3*maxGatherPages)
+	det := &pathDetector{}
+	bf := New(queue.NewDBQueue(sqlDB), det, &fakeWriter{}).WithFailureStore(fs)
+	opts := Options{GlobalDetectDefault: true, Limit: 1}
+	firstHit := 0
+	for run := 1; run <= 8; run++ {
+		res, err := bf.Run(context.Background(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Candidates > maxGatherPages*opts.Limit {
+			t.Fatalf("run %d examined %d rows; the per-run page cap is %d", run, res.Candidates, maxGatherPages*opts.Limit)
+		}
+		if firstHit == 0 && countPath(det.paths, changed) > 0 {
+			firstHit = run
+		}
+	}
+	if firstHit == 0 || firstHit > 4 {
+		t.Fatalf("changed file first attempted on run %d; want within 4 runs (detector saw %v)", firstHit, det.paths)
+	}
+	if got := countPath(det.paths, changed); got < 2 {
+		t.Fatalf("changed file attempted %d times in 8 runs; the tail must wrap and reach it again", got)
+	}
+}
+
+// A fresh row arriving at the head while the cursor sits deep in the tail is
+// still attempted on the very next run: page 0 always reads from offset 0.
+func TestRun_CursorKeepsHeadPriority(t *testing.T) {
+	sqlDB, fs, _ := rememberedTail(t, 3*maxGatherPages)
+	det := &pathDetector{}
+	bf := New(queue.NewDBQueue(sqlDB), det, &fakeWriter{}).WithFailureStore(fs)
+	opts := Options{GlobalDetectDefault: true, Limit: 1}
+	if _, err := bf.Run(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(t.TempDir(), "fresh.flac")
+	seedDeferred(t, sqlDB, 100, fresh)
+	det.paths = nil
+	if _, err := bf.Run(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(det.paths) != 1 || det.paths[0] != fresh {
+		t.Fatalf("detector saw %v; want the fresh head row %s", det.paths, fresh)
 	}
 }
