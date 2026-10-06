@@ -147,7 +147,6 @@ func FormatConfigText(cfg Config, envSrc, cliSrc map[string]bool) string {
 	p("[word_sync_generate]\n")
 	p("enabled = %t%s\n", cfg.WordSyncGenerate.Enabled, ann("word_sync_generate.enabled"))
 	p("url = %s%s\n", cfg.WordSyncGenerate.URL, ann("word_sync_generate.url"))
-	p("budget_per_cycle = %d%s\n", cfg.WordSyncGenerate.BudgetPerCycle, ann("word_sync_generate.budget_per_cycle"))
 	p("concurrency = %d%s\n", cfg.WordSyncGenerate.Concurrency, ann("word_sync_generate.concurrency"))
 	p("model = %s%s\n", cfg.WordSyncGenerate.Model, ann("word_sync_generate.model"))
 	p("\n")
@@ -410,7 +409,6 @@ func ConfigToSlogAttrs(cfg Config, envSrc, cliSrc map[string]bool) []slog.Attr {
 		group("word_sync_generate",
 			boolAttr("enabled", "word_sync_generate.enabled", cfg.WordSyncGenerate.Enabled),
 			strAttr("url", "word_sync_generate.url", cfg.WordSyncGenerate.URL),
-			intAttr("budget_per_cycle", "word_sync_generate.budget_per_cycle", cfg.WordSyncGenerate.BudgetPerCycle),
 			intAttr("concurrency", "word_sync_generate.concurrency", cfg.WordSyncGenerate.Concurrency),
 			strAttr("model", "word_sync_generate.model", cfg.WordSyncGenerate.Model),
 		),

@@ -661,14 +661,12 @@ type InstrumentalBackfillConfig struct {
 	CooldownSeconds int `toml:"cooldown_seconds"`
 }
 
-// wordSyncGenerateBudgetDefault was the per-cycle track cap of the removed
-// word-sync-generate background sweep; nothing reads it now. Deliberately small: forced alignment
-// (Demucs vocal separation, then Whisper transcription and wav2vec2 forced
-// alignment) costs one to two orders of magnitude more per item than the
-// timing sweep's file read. The reference sidecar (deploy/aligner) ships a
-// CPU variant and a CUDA variant (#1013); on CPU one call can
-// take minutes -- longer on a cold start while models load lazily (#482).
-const wordSyncGenerateBudgetDefault = 10
+// retiredWordSyncGenerateBudgetEnv is the env var of the retired
+// word_sync_generate.budget_per_cycle key (#1324). The key belonged to the
+// removed #1007 background sweep. It has no struct field, so a leftover in a
+// file decodes to nothing whatever its type (an unknown key is ignored, never
+// a decode error); the loader only warns that it has no effect.
+const retiredWordSyncGenerateBudgetEnv = "MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE"
 
 // wordSyncGenerateConcurrencyDefault serializes aligner calls by default. The
 // reference sidecar (deploy/aligner) processes /align requests one at a time
@@ -677,7 +675,8 @@ const wordSyncGenerateBudgetDefault = 10
 // operator choice once they know their sidecar's capacity and hardware.
 const wordSyncGenerateConcurrencyDefault = 1
 
-// WordSyncGenerateConfig governs the optional word-sync GENERATE lane (#482):
+// WordSyncGenerateConfig holds the keys of the on-demand Auto alignment action
+// in the lyric preview editor (#1008, the word-sync GENERATE lane of #482):
 // forced-aligning already-known lyric lines to a track's own audio via an
 // external sidecar (client: internal/aligner, #1006; the sidecar itself:
 // deploy/aligner, #1005). This is the "generate" counterpart to provider
@@ -695,7 +694,7 @@ const wordSyncGenerateConcurrencyDefault = 1
 // web UI on, serve reads Enabled and URL to attach the aligner client behind the
 // on-demand #1008 Auto alignment action.
 type WordSyncGenerateConfig struct {
-	// Enabled is the master switch. Default false.
+	// Enabled is the Auto action's master switch. Default false.
 	// Override: MXLRC_WORD_SYNC_GENERATE_ENABLED.
 	Enabled bool `toml:"enabled"`
 	// URL is the base URL of the aligner sidecar (internal/aligner). Empty
@@ -703,11 +702,6 @@ type WordSyncGenerateConfig struct {
 	// action off regardless of the Enabled value.
 	// Override: MXLRC_WORD_SYNC_GENERATE_URL.
 	URL string `toml:"url"`
-	// BudgetPerCycle belonged to the removed background sweep and has no
-	// reader now; a later slice retires it. Values below 1 still reset to the
-	// default (10).
-	// Override: MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE.
-	BudgetPerCycle int `toml:"budget_per_cycle"`
 	// Concurrency caps how many Auto alignment runs go at once across tracks
 	// (web.AttachAutoAligner); a start over the cap is refused as busy. Values
 	// below 1 reset to the default (1).
@@ -1137,9 +1131,8 @@ func defaults() Config {
 			},
 		},
 		WordSyncGenerate: WordSyncGenerateConfig{
-			Enabled:        false,
-			BudgetPerCycle: wordSyncGenerateBudgetDefault,
-			Concurrency:    wordSyncGenerateConcurrencyDefault,
+			Enabled:     false,
+			Concurrency: wordSyncGenerateConcurrencyDefault,
 		},
 		Enrichment: EnrichmentConfig{Enabled: true},
 		Realign: RealignConfig{
@@ -1382,16 +1375,16 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			}
 			// WordSyncGenerate. A file is not more trusted than an env var, so
 			// every bound the env path enforces is enforced here too.
-			// BudgetPerCycle/Concurrency < 1 would either drain nothing (a
-			// budget of 0) or divide-by-zero-shaped work distribution (a
-			// concurrency of 0) once a future caller consumes these; reset
+			// Concurrency < 1 would admit no Auto alignment run at all; reset
 			// rather than honored. Enabled/URL/Model are NOT re-defaulted:
 			// Enabled defaults false (explicit false and absent agree), and URL/
 			// Model are plain strings where blank is a valid, meaningful value
 			// (unconfigured / "sidecar's own default"), matching
 			// verification.whisper_url and instrumental_detector.classifier_url.
-			if cfg.WordSyncGenerate.BudgetPerCycle < 1 {
-				cfg.WordSyncGenerate.BudgetPerCycle = d.WordSyncGenerate.BudgetPerCycle
+			// The retired budget_per_cycle (#1324) decodes to nothing; say so
+			// rather than let an operator believe it still does something.
+			if md.IsDefined("word_sync_generate", "budget_per_cycle") {
+				slog.Warn("word_sync_generate.budget_per_cycle is retired and has no effect; remove it (see docs/CONFIGURATION.md)")
 			}
 			if cfg.WordSyncGenerate.Concurrency < 1 {
 				cfg.WordSyncGenerate.Concurrency = d.WordSyncGenerate.Concurrency
@@ -1572,7 +1565,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_OUTPUT_BUMP_AUDIO_MTIME, MXLRC_WORD_SYNC, MXLRC_WORD_SYNC_MODE, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_PREVIEW_FLAC_FALLBACK, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_WORD_SYNC_RECHECK_ENABLED, MXLRC_WORD_SYNC_RECHECK_BATCH, MXLRC_UPGRADE_SWEEP_ENABLED, MXLRC_UPGRADE_SWEEP_BATCH, MXLRC_WORD_SYNC_GENERATE_ENABLED, MXLRC_WORD_SYNC_GENERATE_URL, MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE, MXLRC_WORD_SYNC_GENERATE_CONCURRENCY, MXLRC_WORD_SYNC_GENERATE_MODEL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_OUTPUT_BUMP_AUDIO_MTIME, MXLRC_WORD_SYNC, MXLRC_WORD_SYNC_MODE, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_PREVIEW_FLAC_FALLBACK, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_WORD_SYNC_RECHECK_ENABLED, MXLRC_WORD_SYNC_RECHECK_BATCH, MXLRC_UPGRADE_SWEEP_ENABLED, MXLRC_UPGRADE_SWEEP_BATCH, MXLRC_WORD_SYNC_GENERATE_ENABLED, MXLRC_WORD_SYNC_GENERATE_URL, MXLRC_WORD_SYNC_GENERATE_CONCURRENCY, MXLRC_WORD_SYNC_GENERATE_MODEL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -2265,14 +2258,10 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		cfg.WordSyncGenerate.URL = v
 		applied["word_sync_generate.url"] = true
 	}
-	if v := os.Getenv("MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 {
-			slog.Warn("env var is invalid; using current value", "var", "MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE", "value", v, "current", cfg.WordSyncGenerate.BudgetPerCycle) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
-		} else {
-			cfg.WordSyncGenerate.BudgetPerCycle = n
-			applied["word_sync_generate.budget_per_cycle"] = true
-		}
+	if _, set := os.LookupEnv(retiredWordSyncGenerateBudgetEnv); set {
+		// Retired (#1324): never parsed, so any value boots. No provenance is
+		// recorded, since nothing is applied.
+		slog.Warn(retiredWordSyncGenerateBudgetEnv + " is retired and has no effect; unset it")
 	}
 	if v := os.Getenv("MXLRC_WORD_SYNC_GENERATE_CONCURRENCY"); v != "" {
 		n, err := strconv.Atoi(v)

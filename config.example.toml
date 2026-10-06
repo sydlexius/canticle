@@ -529,6 +529,11 @@ min_similarity = 0.35
 # cooldown_seconds = 0
 
 [word_sync_generate]
+# The keys of the Auto alignment action in the lyric preview editor. The old
+# budget_per_cycle key (from a removed background sweep) is retired: a
+# leftover, in this file or as MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE, is
+# ignored with a warning, so delete it.
+#
 # EXPERIMENTAL and OPT-IN. Forced-aligns lyric lines canticle already believes
 # are correct to a track's own audio, via an external sidecar (deploy/aligner:
 # Demucs vocal separation, then a faster-whisper transcript plus a direct
@@ -550,15 +555,6 @@ min_similarity = 0.35
 
 # Base URL of the aligner sidecar the Auto alignment action calls. Env: MXLRC_WORD_SYNC_GENERATE_URL.
 # url = ""
-
-# Has no effect: it belonged to a background sweep that was removed, and a
-# later release retires it. Default 10. One alignment
-# call can take minutes (decode + separation + transcription + alignment;
-# the sidecar's own decode step alone is capped at
-# ALIGNER_DECODE_TIMEOUT_SECONDS, default 300s, on top of model load time).
-# Values below 1 reset to the default.
-# Env: MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE.
-# budget_per_cycle = 10
 
 # Caps how many Auto alignment runs go at once across tracks; a start over the
 # cap is refused as busy. Default 1 (serialized) -- the reference
