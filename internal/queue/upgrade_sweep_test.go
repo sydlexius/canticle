@@ -445,3 +445,63 @@ func TestUpgradeMissyncedArmUsesPartialIndex(t *testing.T) {
 		t.Fatalf("mis_synced arm plan = %q, want a SEARCH of idx_work_queue_missynced", plans)
 	}
 }
+
+// TestSettleStuckUpgradeTrip (#1119): the cap settle for a trip whose Complete
+// failed. landed re-stamps completed_at; a kept trip leaves it. The lane answer
+// is recorded for a mis_synced row either way, and the row is never settled
+// unless it is a processing upgrade trip.
+func TestSettleStuckUpgradeTrip(t *testing.T) {
+	ctx := context.Background()
+	const oldStamp = "2026-08-01T00:00:00Z"
+	const processing = "status = 'processing', upgrade_queued = 1, attempts = 2, last_error = 'boom'"
+	read := func(dbh *sql.DB, id int64) (status, completed string, attempts, armed int, lastErr string, gen sql.NullInt64) {
+		t.Helper()
+		if err := dbh.QueryRow(`SELECT status, completed_at, attempts, upgrade_queued, last_error, missync_recheck_generation FROM work_queue WHERE id = ?`, id).
+			Scan(&status, &completed, &attempts, &armed, &lastErr, &gen); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	for _, c := range []struct {
+		name   string
+		landed bool
+		set    string
+		want   string // completed_at after
+		gen    bool
+	}{
+		{"landed restamps completed_at", true, processing, formatTime(upgradeNow), false},
+		{"kept leaves completed_at", false, processing, oldStamp, false},
+		{"landed mis_synced records the pass", true, processing + ", timing_outcome = 'mis_synced'", formatTime(upgradeNow), true},
+		{"kept mis_synced records the pass", false, processing + ", timing_outcome = 'mis_synced'", oldStamp, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			q, dbh := upgradeQueue(t)
+			q.SetProvidersVersion(7)
+			id := seedUpgradeRow(t, dbh, "k", c.set)
+			ok, err := q.SettleStuckUpgradeTrip(ctx, id, c.landed)
+			if err != nil || !ok {
+				t.Fatalf("settle = %v, %v", ok, err)
+			}
+			status, completed, attempts, armed, lastErr, gen := read(dbh, id)
+			if status != "done" || attempts != 0 || armed != 0 || lastErr != "" {
+				t.Fatalf("row = %s attempts=%d armed=%d err=%q; want done, reset, disarmed", status, attempts, armed, lastErr)
+			}
+			if completed != c.want {
+				t.Fatalf("completed_at = %q, want %q", completed, c.want)
+			}
+			if gen.Valid != c.gen || (c.gen && gen.Int64 != 7) {
+				t.Fatalf("pass marker = %+v, want recorded=%v at 7", gen, c.gen)
+			}
+		})
+	}
+	t.Run("not a processing upgrade trip", func(t *testing.T) {
+		q, dbh := upgradeQueue(t)
+		plain := seedUpgradeRow(t, dbh, "plain", "status = 'processing'")
+		queued := seedUpgradeRow(t, dbh, "queued", "status = 'pending', upgrade_queued = 1")
+		for _, id := range []int64{plain, queued} {
+			if ok, err := q.SettleStuckUpgradeTrip(ctx, id, true); err != nil || ok {
+				t.Fatalf("settle(%d) = %v, %v; want false", id, ok, err)
+			}
+		}
+	})
+}
