@@ -159,10 +159,14 @@ func tomlValue(ftype FieldType, value string) (parser.Value, error) {
 	case TypeString:
 		lit = strconv.Quote(value)
 	case TypeInt:
-		if _, err := strconv.Atoi(value); err != nil {
+		n, err := strconv.Atoi(value)
+		if err != nil {
 			return parser.Value{}, fmt.Errorf("invalid integer %q", value)
 		}
-		lit = value
+		// Atoi accepts "0100" and "+5". A decimal with leading zeros is not a
+		// valid TOML integer, so the next Load would reject it (#1049); "+5"
+		// loads but is not canonical. Write the canonical form for both.
+		lit = strconv.Itoa(n)
 	case TypeBool:
 		b, err := strconv.ParseBool(value)
 		if err != nil {

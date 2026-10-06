@@ -408,12 +408,8 @@ func validatorFor(f FieldSpec) Validator {
 	case "word_sync_recheck.batch", "upgrade_sweep.batch":
 		// Bounded both ways, by the same predicate the file and env paths
 		// use, so the settings page cannot save a value the next boot
-		// resets FOR RANGE. This does not cover the literal TOML written:
-		// tomlValue writes an integer string verbatim, so a value with a
-		// leading zero ("007") round-trips as invalid TOML the next Load
-		// rejects at boot. That is a pre-existing writer.go gap shared by
-		// every TypeInt field, not specific to this key -- tracked at #1049,
-		// not fixed here.
+		// resets FOR RANGE. The literal TOML is canonicalized by tomlValue
+		// ("007" is written as 7, #1049).
 		return ValidateIntRange(1, wordSyncRecheckBatchMax)
 	case "word_sync_generate.concurrency":
 		// Strictly positive, matching the env and file re-default rules: a
