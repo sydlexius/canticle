@@ -212,7 +212,7 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	song.AudioPath = item.Inputs.SourcePath // opt-in mtime bump (#505)
 	for _, p := range outputPaths(item.Inputs) {
 		if err := w.writer.WriteLRC(song, p.Filename, p.Outdir); err != nil {
-			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, err))
+			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err)))
 		}
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)

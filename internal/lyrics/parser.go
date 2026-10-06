@@ -101,12 +101,12 @@ const utf8BOM = "\uFEFF"
 func parseLRCHeader(path string) ([]lrcTag, []string, error) {
 	f, err := os.Open(path) //nolint:gosec // path comes from caller-controlled file enumeration
 	if err != nil {
-		return nil, nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, nil, fmt.Errorf("open: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 	tags, lyrics, err := parseLRCHeaderFrom(f)
 	if err != nil {
-		return nil, nil, fmt.Errorf("scan %s: %w", path, err)
+		return nil, nil, fmt.Errorf("scan: %w", err)
 	}
 	return tags, lyrics, nil
 }
