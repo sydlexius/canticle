@@ -291,24 +291,31 @@
   var PIN_MAX_VH = 0.7;
 
   // pinFits says whether the phone bar, pinned to the viewport bottom, would
-  // stay clear of the player when the page is scrolled to the top (#1247).
-  // playerBottom is the player's bottom edge in document coordinates; the bar
-  // is as tall as its content, capped like the CSS caps it.
-  function pinFits(playerBottom, barHeight, viewportHeight) {
+  // stay clear of the player AND the By ear banner when it is showing when the
+  // page is scrolled to the top (#1247, #1273). playerBottom is the player's bottom edge in document coordinates; the bar
+  // is as tall as its content, capped like the CSS caps it. bannerBottom is the
+  // By ear banner's bottom edge in document coordinates while it is showing, else
+  // 0 (#1273): the bar must clear it too, or the pinned bar covers the banner.
+  function pinFits(playerBottom, barHeight, viewportHeight, bannerBottom) {
     var bar = Math.min(barHeight, viewportHeight * PIN_MAX_VH);
-    return playerBottom + PIN_GAP <= viewportHeight - bar;
+    return Math.max(playerBottom, bannerBottom || 0) + PIN_GAP <= viewportHeight - bar;
   }
 
   // initPin keeps the phone bar off the player: it toggles .is-unpinned (static,
   // in the flow after the lyrics, see preview.css) whenever the pinned bar would
-  // not fit below the player. The answer depends only on the player's position,
-  // the bar's content height and the viewport, so unpinning cannot flip it back.
+  // not fit below the player. The answer depends on the player's position, the
+  // By ear banner's position when it is showing, the bar's content height and the
+  // viewport; unpinning cannot flip it back.
   // A resize observer covers the status text, the error notice and a wrapping
   // title; render() and More call the returned function directly as well.
-  function initPin(panel, audio) {
+  function initPin(panel, audio, banner) {
+    if (!banner) {
+      console.error("preview: the editor markup is missing the By ear banner (#mx-ear-banner); the pin check cannot account for it");
+    }
     function update() {
       var r = audio.getBoundingClientRect();
-      panel.classList.toggle("is-unpinned", !pinFits(r.bottom + window.scrollY, panel.scrollHeight, window.innerHeight));
+      var b = banner && !banner.hidden ? banner.getBoundingClientRect().bottom + window.scrollY : 0;
+      panel.classList.toggle("is-unpinned", !pinFits(r.bottom + window.scrollY, panel.scrollHeight, window.innerHeight, b));
     }
     window.addEventListener("resize", update);
     if (typeof window.ResizeObserver === "function") {
@@ -374,7 +381,7 @@
     var $ = function (id) {
       return document.getElementById(id);
     };
-    var repin = initPin(panel, audio);
+    var repin = initPin(panel, audio, $("mx-ear-banner"));
     var collapse = initMore(
       panel,
       function () {
@@ -488,6 +495,8 @@
     var earHint = earBtn.parentNode && earBtn.parentNode.querySelector(".mx-edit-hint");
     var earHintText = earHint ? earHint.textContent : "";
     var earWasOn = false;
+    var earJustOn = false;
+    var earWasSticky = false; // the bar was pinned (sticky, not unpinned) when By ear came on
     var moreBtn = $("mx-edit-more");
     function paintEar(isLocked) {
       if ((isLocked || playback.failed) && ear.on()) {
@@ -501,6 +510,11 @@
       earBtn.setAttribute("aria-pressed", String(v.on));
       banner.hidden = !v.on;
       if (v.on && !earWasOn) {
+        earJustOn = true; // render() checks focus once repin() has decided
+        // Read before repin(): only an activation that itself unpins a sticky bar
+        // strands focus. Desktop and landscape layouts are not sticky, and an
+        // already-unpinned bar did not move when the toggle was pressed.
+        earWasSticky = !panel.classList.contains("is-unpinned") && window.getComputedStyle(panel).position === "sticky";
         collapse(); // an open phone panel would cover the banner and the lyrics
       }
       earWasOn = v.on;
@@ -593,6 +607,14 @@
       statusEl.className = "mx-edit-status" + (msg[1] ? " is-" + msg[1] : "") + failedClass;
       paintEar(isLocked);
       repin();
+      if (earJustOn) {
+        earJustOn = false;
+        // An unpinned bar sits after the lyrics, far off-screen; focus left on
+        // the toggle would follow it there. The banner's Cancel is in view.
+        if (earWasSticky && panel.classList.contains("is-unpinned") && document.activeElement === earBtn) {
+          earCancel.focus();
+        }
+      }
       update();
     }
 
