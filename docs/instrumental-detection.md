@@ -38,7 +38,7 @@ failing means "not instrumental", and the track is left as a normal miss.
 |------|-----------|---------|
 | **Music gate** | The **mean** over frames of the summed `instrumental_classes` probabilities is at least `min_confidence`. | `min_confidence = 0.90`, `instrumental_classes = ["Music", "Musical instrument"]` |
 | **Sung-vocal gate** (#384) | The **peak** (max over frames) of *every* `vocal_classes` score stays **below** `vocal_max_confidence`. | `vocal_max_confidence = 0.015`, `vocal_classes` = the singing/vocal set below |
-| **Speech gate** (#403) | The summed frame **mean** of the `speech_classes` stays **below** `speech_max_confidence`. | `speech_max_confidence = 0.20` (provisional), `speech_classes = ["Speech"]` |
+| **Speech gate** (#403) | The summed frame **mean** of the `speech_classes` stays **below** `speech_max_confidence`. | `speech_max_confidence = 0.20`, `speech_classes = ["Speech"]` |
 
 The default `vocal_classes` (sung-vocal) set is:
 
@@ -189,14 +189,11 @@ both directions - there are no scores to re-decide from. Those need a real
 re-scan via `scan reconcile`.
 
 The speech gate's `speech_max_confidence = 0.20` default (#403) is a different
-kind of value: it is a **provisional placeholder**, chosen conservatively low
-(biased toward "not instrumental", preserving lyric protection) pending a
-calibration sweep over the audit set, in the style of #384, to pin the final
-constant. Because
-the key is configurable, that calibration refines the value without a code change.
-The acceptance criterion - that incidental-speech instrumentals get re-confirmed -
-is satisfied by the **post-calibration** validation gate (re-running the audit
-set), not by the placeholder itself.
+kind of value: it was chosen conservatively low (biased toward "not
+instrumental", preserving lyric protection) and has since been measured against
+the audit set (see the music-gate sweep above): it is inert at current levels,
+blocking 2 of 150 labeled instrumentals, so there is nothing to pin. Because the
+key is configurable, it can still be changed without a code change.
 
 ## Sidecar setup
 
@@ -257,7 +254,7 @@ All keys live under `[instrumental_detector]`; each has an
 | `instrumental_classes` | `["Music", "Musical instrument"]` | Classes summed for the music gate. |
 | `vocal_max_confidence` | `0.015` | Sung-vocal-gate threshold (peak). Values outside (0, 1] reset to `0.015`. |
 | `vocal_classes` | (the singing/vocal set above) | Sung-vocal classes whose peak blocks an instrumental marking. |
-| `speech_max_confidence` | `0.20` (provisional) | Speech-gate threshold (summed mean). Values outside (0, 1] reset to `0.20`. |
+| `speech_max_confidence` | `0.20` | Speech-gate threshold (summed mean). Values outside (0, 1] reset to `0.20`. |
 | `speech_classes` | `["Speech"]` | Speech classes gated on sustained mean (not peak). |
 | `cooldown_seconds` | `5` | Minimum gap between inference calls. `0` disables. |
 
@@ -279,10 +276,9 @@ If you do tune:
   direction). **Lowering** it marks fewer tracks instrumental (safer, but you may
   re-query genuine instrumentals).
 - **`speech_max_confidence`** controls the speech gate the same way, on the
-  summed Speech **mean**. Its `0.20` default is provisional (see Calibration
-  evidence): raising it tolerates more sustained speech as instrumental; lowering
-  it blocks instrumental marking on less speech. Pin it from a calibration sweep
-  before relying on the exact value.
+  summed Speech **mean**. Its `0.20` default is measured and inert at current
+  levels (see Calibration evidence): raising it tolerates more sustained speech
+  as instrumental; lowering it blocks instrumental marking on less speech.
 - **`min_confidence`** rarely needs changing; lowering it admits non-music audio
   (field recordings, spoken word) as "instrumental".
 - **`spread_samples`** trades inference cost for coverage. Fewer windows risks
