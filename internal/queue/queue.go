@@ -2151,6 +2151,20 @@ func (q *DBQueue) SetProviderLane(ctx context.Context, id int64, lane string) er
 	return nil
 }
 
+// ClearProviderLane drops a processing row's provider_lane (#1207): a
+// completion served from a laneless cache entry must not keep the lane an
+// earlier attempt stamped (a verify failure stamps the rejected lane before
+// the retry), or the row names a provider its sidecar does not. Guarded on
+// 'processing', like the other pre-Complete stamps' callers.
+func (q *DBQueue) ClearProviderLane(ctx context.Context, id int64) error {
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET provider_lane = NULL WHERE id = ? AND status = 'processing'`, id,
+	); err != nil {
+		return fmt.Errorf("queue: clear provider lane for id %d: %w", id, err)
+	}
+	return nil
+}
+
 // InstrumentalTelemetry carries the five score fields from an audio detection
 // run. All fields are set when detection ran; the zero value (empty struct) is
 // used on the not-ran path, keeping the five DB columns NULL (pre-telemetry /
@@ -2494,7 +2508,8 @@ type CompletionProvenance struct {
 	ISRC string
 	// MBID is the MusicBrainz recording ID from the resolved provider result.
 	MBID string
-	// FetchedAt is when the provider round-trip completed. Zero on a cache hit.
+	// FetchedAt is when the provider round-trip completed; on a cache hit, the
+	// one that stored the entry (#1207), zero for an entry stored before that.
 	FetchedAt time.Time
 	// WriterVersion is the app version that produced the output
 	// (internal/version.Version), matching the .lrc [ve:] tag.
