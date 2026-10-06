@@ -95,39 +95,63 @@ func TestEnqueueReopensCategoricalRowForDifferentRecording(t *testing.T) {
 	}
 }
 
-// TestEnqueueLeavesOtherRowsAlone (#972): only a done + categorical row outside
-// an upgrade trip or word recheck is reopened, and only when asked; any other
-// row collides as before and keeps recording A.
-func TestEnqueueLeavesOtherRowsAlone(t *testing.T) {
+// TestEnqueueReopenCategoricalIsDecidedInTheTransaction (#972): the scan sets
+// ReopenCategorical from a read outside the enqueue transaction, so Enqueue
+// judges the row again. A categorical row it cannot reopen (a worker holds it,
+// it is in a trip, or it is linked to another file's unfinished scan row, which
+// the trip's Complete would write done) refuses with ErrCategoricalNotReopened
+// and links nothing; a settled link does not block. Unasked, or not
+// categorical, the row collides as before and keeps recording A.
+func TestEnqueueReopenCategoricalIsDecidedInTheTransaction(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name, status, outcome string
 		upgrade               int
 		wordState             any
-		reopen                bool
+		otherLink             string // status of another file's linked scan row; "" = none
+		reopen, refused       bool
+		wantRow               string
 	}{
-		{"processing", "processing", "categorical", 0, nil, true},
-		{"upgrade trip", "done", "categorical", 1, nil, true},
-		{"word recheck queued", "done", "categorical", 0, "queued", true},
-		{"not categorical", "done", "mis_synced", 0, nil, true},
-		{"flag unset", "done", "categorical", 0, nil, false},
+		{"processing", "processing", "categorical", 0, nil, "", true, true, "processing|/m/a.flac|categorical"},
+		{"upgrade trip", "done", "categorical", 1, nil, "", true, true, "done|/m/a.flac|categorical"},
+		{"word recheck queued", "done", "categorical", 0, "queued", "", true, true, "done|/m/a.flac|categorical"},
+		{"linked to an unfinished file", "done", "categorical", 0, nil, "processing", true, true, "done|/m/a.flac|categorical"},
+		{"linked to a settled file", "done", "categorical", 0, nil, "done", true, false, "pending|/m/b.flac|"},
+		{"not categorical", "done", "mis_synced", 0, nil, "", true, false, "done|/m/a.flac|mis_synced"},
+		{"flag unset", "done", "categorical", 0, nil, "", false, false, "done|/m/a.flac|categorical"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dbh := openQueueTestDB(t)
 			id := seedCategoricalRow(t, dbh, tc.status, tc.outcome, tc.upgrade, tc.wordState)
-			if _, err := NewDBQueue(dbh).Enqueue(ctx, recordingBInputs(tc.reopen), PriorityScan); err != nil {
-				t.Fatalf("Enqueue: %v", err)
+			libID, other := insertLibraryAndScanResult(t, dbh, "/m", "/m/a.flac")
+			if tc.otherLink != "" {
+				linkScanResult(t, dbh, id, other)
+				if _, err := dbh.Exec(`UPDATE scan_results SET status = ? WHERE id = ?`, tc.otherLink, other); err != nil {
+					t.Fatalf("set other scan row status: %v", err)
+				}
+			}
+			inputs := recordingBInputs(tc.reopen)
+			if err := dbh.QueryRow(`INSERT INTO scan_results (library_id, artist, title, file_path, outdir, filename, status)
+                    VALUES (?, 'A', 'T', '/m/b.flac', '/m', 'b.lrc', 'processing') RETURNING id`, libID).Scan(&inputs.ScanResultID); err != nil {
+				t.Fatalf("insert B scan row: %v", err)
+			}
+
+			_, err := NewDBQueue(dbh).Enqueue(ctx, inputs, PriorityScan)
+			if errors.Is(err, ErrCategoricalNotReopened) != tc.refused || (err != nil && !tc.refused) {
+				t.Fatalf("Enqueue err = %v; want refused = %v", err, tc.refused)
 			}
 			var got string
-			if err := dbh.QueryRow(`SELECT status || '|' || source_path || '|' || COALESCE(timing_outcome, '')
-                    FROM work_queue WHERE id = ?`, id).Scan(&got); err != nil {
+			var links int
+			if err := dbh.QueryRow(`SELECT status || '|' || source_path || '|' || COALESCE(timing_outcome, ''),
+                    (SELECT COUNT(*) FROM work_queue_scan_results WHERE work_queue_id = work_queue.id AND scan_result_id = ?)
+                    FROM work_queue WHERE id = ?`, inputs.ScanResultID, id).Scan(&got, &links); err != nil {
 				t.Fatalf("read: %v", err)
 			}
-			if want := tc.status + "|/m/a.flac|" + tc.outcome; got != want {
-				t.Fatalf("row = %q; want %q untouched", got, want)
+			if got != tc.wantRow {
+				t.Fatalf("row = %q; want %q", got, tc.wantRow)
 			}
-			if _, err := NewDBQueue(dbh).Dequeue(ctx); !errors.Is(err, sql.ErrNoRows) {
-				t.Fatalf("Dequeue err = %v; want sql.ErrNoRows, nothing reopened", err)
+			if wantLinks := map[bool]int{true: 0, false: 1}[tc.refused]; links != wantLinks {
+				t.Fatalf("B's scan row links = %d; want %d (a refused enqueue links nothing)", links, wantLinks)
 			}
 		})
 	}

@@ -340,7 +340,10 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		// that recording (#972), at any provider generation. Skipping the
 		// suppression alone would strand this file (the shared row is done, so
 		// the upsert keeps its paths), so the enqueue asks Enqueue to reopen the
-		// row and move it here.
+		// row and move it here. This read is outside the enqueue transaction and
+		// ignores the row's status, so Enqueue judges the row again and refuses
+		// (queue.ErrCategoricalNotReopened) rather than link this file to a row
+		// it could not reopen.
 		reopenCategorical := false
 		if e.Timing != nil {
 			verdict, found, terr := e.Timing.LookupTiming(ctx, res.Track.ArtistName, res.Track.TrackName)
@@ -376,6 +379,14 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		if _, err := e.Queue.Enqueue(ctx, inputs, e.Priority); err != nil {
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
 				return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)
+			}
+			// The row could not be reopened just now (a worker holds it, or it
+			// is shared with an unfinished file): nothing was linked, so the
+			// result stays pending, suppressed for this pass, and is offered
+			// again on the next scan.
+			if errors.Is(err, queue.ErrCategoricalNotReopened) {
+				suppressed++
+				continue
 			}
 			return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w", res.ID, err)
 		}

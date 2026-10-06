@@ -62,6 +62,12 @@ const timeFormat = time.RFC3339
 // This avoids racing the worker on rows it currently owns.
 var ErrNotRetryable = errors.New("queue: work item is not in failed status")
 
+// ErrCategoricalNotReopened is returned by Enqueue for an
+// Inputs.ReopenCategorical enqueue (#972) whose categorical row could not be
+// reopened and would have kept its paths. Nothing was written or linked: the
+// caller leaves its scan result pending and offers it again on a later scan.
+var ErrCategoricalNotReopened = errors.New("queue: categorical row not reopened for a different recording")
+
 // InputsQueue is a FIFO queue for processing work items.
 type InputsQueue struct {
 	Queue []models.Inputs
@@ -234,6 +240,9 @@ func (q *DBQueue) SetProvidersVersion(v int) {
 // exception (#1262): when the row's source file is gone and the incoming path
 // is the same-stem file that replaced it (a format swap), the row is moved to
 // the incoming path first, telemetry intact. See planGoneSourceMove.
+// A scan enqueue with inputs.ReopenCategorical (#972) is the second: it
+// reopens a done + categorical row and moves it here, or returns
+// ErrCategoricalNotReopened with nothing linked. See reopenCategoricalForScan.
 //
 // Priority update semantics on conflict:
 //   - A webhook-priority (>= PriorityWebhook) enqueue always overrides the
@@ -3869,23 +3878,50 @@ func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 // ReopenDoneRowTx (verdict, lane and outcome cleared, refused_waits reset) plus
 // timing_stamp_source, and the upsert that follows in the same transaction
 // moves its paths to the incoming file with no worker claim able to land in
-// between. A row in an upgrade trip or word recheck, or no longer done +
-// categorical, is left alone and collides as before.
+// between.
+//
+// The scan decided from a read made outside this transaction, so the row is
+// judged again here. No categorical row any more, or one the upsert moves to
+// the incoming file by itself (pending, failed or deferred, outside a trip),
+// is an ordinary enqueue. A row that is still categorical but would keep its
+// paths returns ErrCategoricalNotReopened instead: one a worker holds
+// ('processing', stamped before Complete), a retired one, one in an upgrade
+// trip or word recheck, and one linked to a scan_result for a DIFFERENT file
+// that is not done, since this trip's Complete would write that file done
+// unfetched (a done link is not rewritten, and a categorical row has no
+// sidecar to orphan).
 func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
-	var id int64
+	var (
+		id         int64
+		status     string
+		held, live bool
+	)
 	err := tx.QueryRowContext(ctx,
-		`SELECT id FROM work_queue WHERE artist_key = ? AND title_key = ?
-           AND status = 'done' AND timing_outcome = 'categorical' AND upgrade_queued = 0
-           AND COALESCE(word_timing_state, '') <> 'queued'`,
-		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName)).Scan(&id)
+		`SELECT id, status,
+                upgrade_queued = 1 OR COALESCE(word_timing_state, '') = 'queued',
+                EXISTS (SELECT 1 FROM work_queue_scan_results j
+                        JOIN scan_results sr ON sr.id = j.scan_result_id
+                        WHERE j.work_queue_id = work_queue.id
+                          AND sr.file_path <> ? AND sr.status <> 'done')
+         FROM work_queue
+         WHERE artist_key = ? AND title_key = ? AND timing_outcome = 'categorical'`,
+		inputs.SourcePath,
+		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName),
+	).Scan(&id, &status, &held, &live)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
 	case err != nil:
 		return fmt.Errorf("queue: find categorical row for scan enqueue: %w", err)
 	}
+	if !held && (status == StatusPending || status == StatusFailed || status == StatusDeferred) {
+		return nil
+	}
+	if held || live || status != StatusDone {
+		return ErrCategoricalNotReopened
+	}
 	if reopened, err := ReopenDoneRowTx(ctx, tx, id, now); err != nil || !reopened {
-		return err
+		return errors.Join(err, ErrCategoricalNotReopened)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE work_queue SET timing_stamp_source = NULL WHERE id = ?`, id); err != nil {

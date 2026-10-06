@@ -356,8 +356,9 @@ type Inputs struct {
 	// ReopenCategorical marks a scan-origin enqueue whose file the scan enqueuer
 	// judged a different recording from the one a 'done' + categorical verdict
 	// was judged against (#972: known duration more than timing.Tolerance from
-	// the judged one). Honored only with FromScan, it lets Enqueue reopen that
-	// row and move it to this file. Set ONLY by scan.Enqueuer.EnqueuePending; the
+	// the judged one). Honored only with FromScan, it has Enqueue reopen that
+	// row and move it to this file, or refuse the enqueue (linking nothing) when
+	// the row cannot be reopened. Set ONLY by scan.Enqueuer.EnqueuePending; the
 	// zero value keeps the verdict. Enqueue-time only; never persisted.
 	ReopenCategorical bool `json:"-"`
 	// DetectInstrumental carries the per-item instrumental-detection decision
