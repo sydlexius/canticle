@@ -41,10 +41,10 @@ const (
 
 // Namespaces are the URL parameter prefixes of tables that share a page with
 // another sortable table or fragment (#1260): "ro" Recent outcomes, "in"
-// Instrumentals, "rq" Review queue. A namespaced
+// Instrumentals, "rq" Review queue, "fg" a failure group's rows. A namespaced
 // table reads <ns>_sort / <ns>_dir, so sorting one never resets another. The
 // request-log validators accept exactly these names.
-var Namespaces = []string{"ro", "in", "rq"}
+var Namespaces = []string{"ro", "in", "rq", "fg"}
 
 // ParamNames are the sort and dir parameter names of namespace ns ("" is the
 // plain sort/dir pair the Work Queue uses).

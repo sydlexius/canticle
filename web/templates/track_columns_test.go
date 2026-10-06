@@ -84,6 +84,7 @@ var (
 	recentLabels = []string{"Artist", "Album", "Title", "Result", "Detail", "Source", "Completed"}
 	instrLabels  = []string{"Artist", "Album", "Title", "ID", "File", "Detect requested"}
 	reviewLabels = []string{"Artist", "Album", "Title", "Outcome", "Overrun (s)", "Ratio", "Evaluated", "Lyrics"}
+	groupLabels  = []string{"Artist", "Album", "Title", "Next attempt", "Misses", "Attempts", "Updated"}
 )
 
 // plainCols is an unsorted header row of the given labels.
@@ -114,7 +115,7 @@ func TestTrackTablesArtistAlbumTitle(t *testing.T) {
 		{"up next", dashUpNext(nil, []UpNextRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "h", "e")},
 		{"reports recent", tableRecentOutcomes(plainCols(recentLabels...), []RecentOutcomeRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
 		{"reports instrumentals", tableInstrumentals(plainCols(instrLabels...), []InstrumentalRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
-		{"failure group", FailureGroupRows(FailureGroupView{Rows: []FailureItemRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}})},
+		{"failure group", FailureGroupRows(FailureGroupView{Columns: plainCols(groupLabels...), Rows: []FailureItemRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}})},
 		{"review queue", tableReviewQueue(plainCols(reviewLabels...), []ReviewQueueRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "")},
 	}
 	for _, tt := range tests {
@@ -165,7 +166,7 @@ func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
 		{"up next", dashUpNext(nil, []UpNextRow{{Artist: tcArtist, Title: tcTitle}}, "h", "e")},
 		{"reports recent", tableRecentOutcomes(plainCols(recentLabels...), []RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"reports instrumentals", tableInstrumentals(plainCols(instrLabels...), []InstrumentalRow{{Artist: tcArtist, Title: tcTitle}})},
-		{"failure group", FailureGroupRows(FailureGroupView{Rows: []FailureItemRow{{Artist: tcArtist, Title: tcTitle}}})},
+		{"failure group", FailureGroupRows(FailureGroupView{Columns: plainCols(groupLabels...), Rows: []FailureItemRow{{Artist: tcArtist, Title: tcTitle}}})},
 		{"review queue", tableReviewQueue(plainCols(reviewLabels...), []ReviewQueueRow{{Artist: tcArtist, Title: tcTitle}}, "")},
 	}
 	for _, tt := range tests {

@@ -14,6 +14,7 @@ const (
 	nsRecentOutcomes = "ro"
 	nsInstrumentals  = "in"
 	nsReviewQueue    = "rq"
+	nsFailureGroup   = "fg"
 )
 
 // reportSortSpecs maps each namespace to its table's spec, so a sort link can
@@ -22,6 +23,7 @@ var reportSortSpecs = map[string]tablesort.Spec{
 	nsRecentOutcomes: reports.RecentOutcomesSpec,
 	nsInstrumentals:  reports.InstrumentalSpec,
 	nsReviewQueue:    reports.ReviewQueueSpec,
+	nsFailureGroup:   reports.FailureItemSpec,
 }
 
 // sortCol is one header: its label and sort key ("" = not sortable).
@@ -43,6 +45,11 @@ var (
 		{"Artist", tablesort.KeyArtist}, {"Album", tablesort.KeyAlbum}, {"Title", tablesort.KeyTitle},
 		{"Outcome", tablesort.KeyOutcome}, {"Overrun (s)", tablesort.KeyOverrun}, {"Ratio", tablesort.KeyRatio},
 		{"Evaluated", tablesort.KeyEvaluated}, {"Lyrics", ""},
+	}
+	failureItemCols = []sortCol{
+		{"Artist", tablesort.KeyArtist}, {"Album", tablesort.KeyAlbum}, {"Title", tablesort.KeyTitle},
+		{"Next attempt", tablesort.KeyNextAttempt}, {"Misses", tablesort.KeyMisses},
+		{"Attempts", tablesort.KeyAttempts}, {"Updated", tablesort.KeyUpdated},
 	}
 )
 
@@ -97,4 +104,23 @@ func refreshHref(q url.Values, ns, base string) string {
 		return base
 	}
 	return base + "?" + own.Encode()
+}
+
+// failureGroupSort resolves the sort of one failure group's rows and builds its
+// header row. The group is a fragment swapped into its own cell, so each link is
+// an htmx GET into "closest td" and carries the group's status and signature
+// (and the other tables' sorts) so a re-sort addresses the same group.
+func failureGroupSort(q url.Values, status, signature string) (tablesort.Order, []templates.SortHeaderView) {
+	spec := reportSortSpecs[nsFailureGroup]
+	o, _ := tablesort.ParseValuesNS(q, spec, nsFailureGroup)
+	keep := otherSorts(q, nsFailureGroup)
+	keep.Set("status", status)
+	keep.Set("signature", signature)
+	cols := sortHeaders("/reports/failure-group", failureItemCols, spec, o, nsFailureGroup, keep)
+	for i := range cols {
+		if cols[i].Href != "" {
+			cols[i].HxTarget = "closest td"
+		}
+	}
+	return o, cols
 }

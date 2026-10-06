@@ -112,6 +112,8 @@ func TestFailureGroupFragmentTruncates(t *testing.T) {
 	}
 }
 
+// TestFailureGroupFragmentAuthGuarded pins that the failure-group fragment sits
+// behind the same auth guard as the rest of the Reports pages.
 func TestFailureGroupFragmentAuthGuarded(t *testing.T) {
 	a, svc := newTestAuth(t, trustnet.LoopbackOnly())
 	sqlDB := openReportsTestDB(t)
@@ -135,6 +137,7 @@ func TestFailureGroupFragmentAuthGuarded(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, target, nil)
 	req.RemoteAddr = "198.51.100.32:1"
 	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: loginToken(t, svc)})
+	req.Header.Set("HX-Request", "true")
 	rec = httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Guarded Row") {
@@ -195,5 +198,32 @@ func TestFailureReportRendersBadgeLinkAndExpander(t *testing.T) {
 	}
 	if !strings.Contains(deferred, `href="/queue/unavailable"`) {
 		t.Error("deferred-misses must also point at /queue/unavailable")
+	}
+}
+
+// getFailureGroupQuery is getFailureGroup with a prebuilt query string.
+func getFailureGroupQuery(t *testing.T, mux http.Handler, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/reports/failure-group?"+query, nil)
+	req.Header.Set("HX-Request", "true")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestFailureGroupWithoutHtmxRedirectsToParent pins that a plain navigation to
+// the fragment (new tab, copy-link) lands on the parent report, picked by status.
+func TestFailureGroupWithoutHtmxRedirectsToParent(t *testing.T) {
+	mux := newReportsUIServer(t, openReportsTestDB(t))
+	for status, parent := range map[string]string{"failed": "/reports/failure-analysis", "deferred": "/reports/deferred-misses"} {
+		req := httptest.NewRequest(http.MethodGet, "/reports/failure-group?status="+status+"&signature=x", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != parent {
+			t.Errorf("%s: %d -> %q, want 303 to %s", status, rec.Code, rec.Header().Get("Location"), parent)
+		}
+	}
+	if rec := getFailureGroup(t, mux, "failed", "x"); rec.Code != http.StatusOK {
+		t.Errorf("htmx request = %d, want the fragment", rec.Code)
 	}
 }
