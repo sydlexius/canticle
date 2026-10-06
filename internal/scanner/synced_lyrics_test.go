@@ -240,7 +240,11 @@ func TestScanLibrary_RespectMalformedSyncedOnly_Enqueues(t *testing.T) {
 // TestLooksLikeLRC_MinutesPastNinetyNine: the writer emits %02d minutes, so a
 // cue at or past 100:00 has three digits and must still read as LRC.
 func TestLooksLikeLRC_MinutesPastNinetyNine(t *testing.T) {
-	for _, s := range []string{"[100:00.00]a", "[100:00.00]a\n[101:00.00]b", syncedLRC} {
+	for _, s := range []string{
+		"[100:00.00]a", "[100:00.00]a\n[101:00.00]b", syncedLRC,
+		"[999:59.99]a", "[1000:00.00]a",
+		"[1000:00.00]a\n[1001:30.50]b\n[1002:00.00]c",
+	} {
 		if !looksLikeLRC(s) {
 			t.Errorf("looksLikeLRC(%q) = false; want true", s)
 		}
