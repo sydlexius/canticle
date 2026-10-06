@@ -206,6 +206,14 @@ Composition across lanes:
   the current behavior where a benign miss resets the circuit ramp.
 - A rate-limit or auth error (`ErrRateLimited`, `ErrUnauthorized`,
   `ErrTokenRenewalRequired`) trips only the lane that saw it.
+- A provider refusal (HTTP 403, for example a blocked egress address) also
+  trips only its own lane, and is reported as refused rather than throttled
+  (log line and dashboard tile). It is not an auth or throttle outcome.
+- A lane's transport-class failure does not feed the worker's global failure
+  backoff when another lyrics lane answered the same dispatch with a clean miss
+  (#1372): the row is failed and retried on its own schedule, with no miss
+  charged, and the worker moves on. With no lane answering, the global backoff
+  applies as before.
 - If every available lane has its breaker open, the orchestrator reports that
   the whole dispatch is unavailable, and the worker releases the item back to
   `pending` with no failure increment (the existing `Release` semantics), rather
