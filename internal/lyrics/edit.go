@@ -321,6 +321,58 @@ func editLines(path string, roots []string, current bool, expect time.Time) ([]T
 	return doc.Lines, tags, nil
 }
 
+// lyricIdentityKeys are the tags that say WHICH fetch of which lyric a sidecar
+// holds ([fetched:] differs after a re-fetch); the rest ([re:], [ve:], [by:], [timing:]) canticle may add in place.
+var lyricIdentityKeys = map[string]bool{"source": true, "upstream": true, "isrc": true, "mbid": true, "fetched": true}
+
+// ReadEditable reads the sidecar (or .orig backup) at path the way SameLyric
+// expects it read: no-follow, regular-checked on the handle, and capped at
+// maxEditFileSize. It also returns that handle's FileInfo, so a caller that
+// later acts on the path can check that the entry is still the file it read:
+// a regular file with the same size and mtime as well as os.SameFile, since a
+// freed inode number can be reused by the entry created next. An unreadable
+// or non-regular entry is an error.
+func ReadEditable(path string) ([]byte, os.FileInfo, error) {
+	b, fi, err := readRegularNoFollowInfo(path, maxEditFileSize)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return b, fi, nil
+}
+
+// SameLyric reports whether the sidecar bodies a and b hold the same words: as
+// many cues (at least one), the same text in order, and no identity tag both carry with
+// different values. Stamps are not compared. ParseTimedLRC makes a BOM, CRLF,
+// stacked stamps and word marks no difference, and an empty cue equals the "♪"
+// ApplyEdit writes for it. It judges bytes, not paths, so a caller that read
+// them through ReadEditable acts on exactly the bytes that were judged.
+func SameLyric(a, b []byte) bool {
+	docs := [2]TimedLRC{ParseTimedLRC(string(a)), ParseTimedLRC(string(b))}
+	if len(docs[0].Lines) != len(docs[1].Lines) || len(docs[0].Lines) == 0 {
+		return false
+	}
+	empty := map[string]bool{"": true, "♪": true}
+	for i, l := range docs[0].Lines {
+		o := docs[1].Lines[i].Text //nolint:gosec // reason: the lengths were compared equal just above
+		if l.Text != o && (!empty[l.Text] || !empty[o]) {
+			return false
+		}
+	}
+	seen := map[string]string{}
+	for i, d := range docs {
+		for _, tg := range d.Tags {
+			k, v := strings.ToLower(strings.TrimSpace(tg.Key)), strings.TrimSpace(tg.Value)
+			if w, ok := seen[k]; i == 1 && ok && !strings.EqualFold(v, w) {
+				return false
+			}
+			if i == 0 && lyricIdentityKeys[k] {
+				seen[k] = v
+			}
+		}
+	}
+	return true
+}
+
 func refuseOrWrap(err error) error {
 	if errors.Is(err, ErrEditRefused) || errors.Is(err, fs.ErrNotExist) {
 		return ErrEditRefused

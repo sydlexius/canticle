@@ -53,7 +53,8 @@ const purgeProvenanceMaxBackupBytes = 4 << 20 // 4 MiB
 // filter (--source or --no-source) and requeues their coupled work_queue /
 // scan_results rows so the next scan re-fetches (issue #474). Dry-run by
 // default; --yes applies and writes a JSONL backup of every deleted sidecar,
-// fsynced before its delete.
+// fsynced before its delete. --generated (#1008) instead restores each
+// aligner-retimed .lrc from its .orig, with the same backup and no re-fetch.
 func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProvenanceCmd) int {
 	// Trim ONCE and use the trimmed value everywhere. Validating the trimmed
 	// form while filtering on the raw one let `--source " musixmatch"` pass the
@@ -61,8 +62,9 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	// set for a filter the operator believed was valid.
 	source := strings.TrimSpace(args.Source)
 	hasSource := source != ""
-	if hasSource == args.NoSource {
-		_, _ = fmt.Fprintln(out, "purge-provenance: exactly one of --source or --no-source is required")
+	// Exactly one selector: an even count of the three, or all three, is refused.
+	if (hasSource != args.NoSource) == args.Generated || (hasSource && args.NoSource) {
+		_, _ = fmt.Fprintln(out, "purge-provenance: exactly one of --source, --no-source or --generated is required")
 		return 2
 	}
 
@@ -129,11 +131,16 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 		if sidecar.KindOf(rec.Path) == sidecar.KindWordSynced {
 			previewCompanions++
 		}
-		if args.Yes {
-			_, _ = fmt.Fprintf(out, "  deleting: %s\n", rec.Path)
-		} else {
+		// --generated is aggregate-only: a path is the library's private
+		// metadata, and this cohort's detail is in the backup file.
+		switch {
+		case !args.Yes && !args.Generated:
 			_, _ = fmt.Fprintf(out, "  would delete: %s\n", rec.Path)
 			return nil
+		case !args.Yes:
+			return nil
+		case !args.Generated:
+			_, _ = fmt.Fprintf(out, "  deleting: %s\n", rec.Path)
 		}
 		if backupFile == nil {
 			f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: backupPath is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
@@ -145,7 +152,7 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 		return appendPurgeProvenanceBackup(backupFile, rec)
 	}
 
-	filter := purgeprovenance.Filter{Source: source, NoSource: args.NoSource}
+	filter := purgeprovenance.Filter{Source: source, NoSource: args.NoSource, Generated: args.Generated}
 	res, err := purgeprovenance.New(sqlDB).Run(ctx, purgeprovenance.Options{
 		Roots:     roots,
 		LibraryID: libID,
@@ -180,6 +187,27 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	companionNote := ""
 	if companions > 0 {
 		companionNote = fmt.Sprintf(" (+%d word-synced companion(s))", companions)
+	}
+	if args.Generated {
+		// A restore, not a delete: nothing is requeued, reset or invalidated,
+		// so the summary has no such columns. Counts only.
+		verb, restored := "would restore up to", res.Matched-res.SkippedProcessing-res.SkippedNoOriginal-res.SkippedOriginalDiffers-res.SkippedOtherLibrary
+		if args.Yes {
+			verb, restored = "restored", res.Restored
+		}
+		_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d generated retiming(s)%s (%d without a queue row; %d skipped original differs, %d skipped without an original, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
+			res.Scanned, verb, restored, companionNote, res.RestoredNoRow, res.SkippedOriginalDiffers, res.SkippedNoOriginal, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
+		if res.SkippedOtherLibrary > 0 {
+			_, _ = fmt.Fprintf(out, "note: %d generated retiming(s) were left alone because --library cannot show their queue row belongs to that library; rerun without --library to restore them\n",
+				res.SkippedOtherLibrary)
+		}
+		if backupFile != nil {
+			_, _ = fmt.Fprintf(out, "backup of replaced files written to %s\n", backupPath)
+		}
+		if err != nil || res.Errors > 0 {
+			return 1
+		}
+		return 0
 	}
 	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d%s, requeued %d (%d scan_results reset, %d cache entries invalidated, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
 		res.Scanned, verb, deleted, companionNote, res.WorkItemsRequeued, res.ScanResultsReset, res.CacheInvalidated, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
