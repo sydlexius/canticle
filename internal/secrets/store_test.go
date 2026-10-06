@@ -709,3 +709,53 @@ func canceledCtx() context.Context {
 	cancel()
 	return ctx
 }
+
+// failingGetter fails Get for the names in fail, so each read arm of
+// ReadMusixmatchTokenState can be reached.
+type failingGetter struct{ fail map[string]bool }
+
+func (g failingGetter) Get(_ context.Context, name string) (string, bool, error) {
+	if g.fail[name] {
+		return "", false, errors.New("get refused")
+	}
+	return "v", true, nil
+}
+
+// TestReadMusixmatchTokenStateErrors pins that a failed read of any of the
+// three names fails the whole read with a zero state, so a caller never acts
+// on a partial snapshot.
+func TestReadMusixmatchTokenStateErrors(t *testing.T) {
+	ctx := context.Background()
+	for _, name := range []string{NameMusixmatchToken, NameMusixmatchClientIdentity, NameMusixmatchTokenStamp} {
+		st, err := ReadMusixmatchTokenState(ctx, failingGetter{fail: map[string]bool{name: true}})
+		if err == nil {
+			t.Errorf("%s: err = nil, want the read error", name)
+		}
+		if st != (MusixmatchTokenState{}) {
+			t.Errorf("%s: state = %+v on error, want zero", name, st)
+		}
+	}
+}
+
+// TestSQLStoreIfUnchangedUnreadableState pins that a stored value the store
+// cannot decrypt makes the compare-and-set fail with a read error (not
+// ErrMusixmatchTokenChanged) and leaves the stored pair untouched.
+func TestSQLStoreIfUnchangedUnreadableState(t *testing.T) {
+	ctx := context.Background()
+	store, sqlDB := newTestStore(t)
+	if err := store.SetTokenWithIdentity(ctx, "tok", "host|app"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := ReadMusixmatchTokenState(ctx, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongKey := NewSQLStore(sqlDB, testKey(t))
+	err = wrongKey.SetTokenWithIdentityIfUnchanged(ctx, "tok2", "", state)
+	if err == nil || errors.Is(err, ErrMusixmatchTokenChanged) {
+		t.Fatalf("err = %v, want a read error distinct from ErrMusixmatchTokenChanged", err)
+	}
+	if v, _, _ := store.Get(ctx, NameMusixmatchToken); v != "tok" {
+		t.Errorf("token = %q after a failed compare, want tok", v)
+	}
+}
