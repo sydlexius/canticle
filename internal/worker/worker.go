@@ -64,7 +64,7 @@ type Queue interface {
 	// licensor (lyrics.RecordedUpstream of the same result) onto a work_queue row
 	// in one statement, for per-track provenance. Call at completion time before
 	// Complete so the row permanently records which provider served it. An empty
-	// lane is a no-op; an empty upstream clears one a prior attempt left.
+	// lane is a no-op; an empty upstream clears one that a prior attempt left.
 	//
 	// NOT used for a detector-sourced instrumental settle: that goes through
 	// SettleInstrumental, which stamps the lane inside the settle transaction. This
@@ -978,19 +978,20 @@ func (w *Worker) recordHit(ctx context.Context, id int64, lane string) {
 		return
 	}
 	w.recordHitCounter(ctx, lane)
-	// No result in hand: recordHit names no licensor, so the row's is cleared.
+	// No result in hand: recordHit names no licensor, so the row's licensor is cleared.
 	w.stampLane(ctx, id, models.Song{WinningLane: lane})
 }
 
 // stampLane is recordHit's per-track half: it stamps song's lane and its
 // RecordedUpstream onto the row in one write, non-fatally. A rejected result
 // (verify or guard exit) records its own licensor with its lane, so the pair
-// always describes one result. RunOnce calls it only once the lane's result has a standing to
-// be named on the row -- after a write landed, or on a verify/guard exit that
-// records which lane was rejected -- and never for a result the writer refused
-// as a downgrade (#553): purgeprovenance.provenanceAgrees compares a sidecar's
-// [source:] against this column, so naming the refused lane on a row whose
-// kept file came from another lane would misattribute that file.
+// always describes one result. RunOnce calls it only once the lane's result
+// has a standing to be named on the row -- after a write landed, or on a
+// verify/guard exit that records which lane was rejected -- and never for a
+// result the writer refused as a downgrade (#553):
+// purgeprovenance.provenanceAgrees compares a sidecar's [source:] against this
+// column, so naming the refused lane on a row whose kept file came from
+// another lane would misattribute that file.
 func (w *Worker) stampLane(ctx context.Context, id int64, song models.Song) {
 	lane := song.WinningLane
 	if lane == "" {
