@@ -54,18 +54,19 @@ func TestHandleDashboard_FinishedSplitTiles(t *testing.T) {
 	}
 }
 
-// TestReportFragmentQueueSummaryFinishedSplit asserts the Reports queue-summary
-// table carries the same split, so the two surfaces agree.
-func TestReportFragmentQueueSummaryFinishedSplit(t *testing.T) {
+// TestQueueIndexFinishedSplit asserts the Queue page carries the Finished /
+// Settled split, so it agrees with the dashboard (retargeted from the retired
+// queue-summary report, #1248).
+func TestQueueIndexFinishedSplit(t *testing.T) {
 	sqlDB := openReportsTestDB(t)
 	seedFinishedSplitRows(t, sqlDB)
 	mux := newReportsUIServer(t, sqlDB)
-	body := getFragment(t, mux, "queue-summary").Body.String()
-	for label, want := range map[string]string{"Finished": "2", "Settled (upgradable)": "3", "Total": "5"} {
-		row := regexp.MustCompile(`<td>` + regexp.QuoteMeta(label) + `</td>\s*<td class="mx-cell-mono">(\d+)</td>`)
+	body := getPath(t, mux, "/queue").Body.String()
+	for label, want := range map[string]string{"Finished": "2", "Settled (upgradable)": "3"} {
+		row := regexp.MustCompile(`<td><a class="mx-text-link" href="/queue/[a-z]+">` + regexp.QuoteMeta(label) + `</a></td>\s*<td class="mx-cell-mono">(\d+)</td>`)
 		m := row.FindStringSubmatch(body)
 		if m == nil {
-			t.Errorf("queue-summary fragment missing %q row; body:\n%s", label, body)
+			t.Errorf("queue page missing %q row; body:\n%s", label, body)
 			continue
 		}
 		if m[1] != want {

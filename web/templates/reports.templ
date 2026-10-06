@@ -81,8 +81,6 @@ templ reportView(v ReportView) {
 		</div>
 	</div>
 	switch v.Key {
-		case "queue-summary":
-			@tableQueueSummary(v.QueueRows)
 		case "recent-outcomes":
 			@tableRecentOutcomes(v.RecentRows)
 		case "needs-attention":
@@ -104,35 +102,6 @@ templ reportView(v ReportView) {
 // so an empty result reads as "nothing to show" rather than a broken table.
 templ reportEmpty(msg string) {
 	<div class="mx-report-empty"><span>{ msg }</span></div>
-}
-
-templ tableQueueSummary(rows []QueueSummaryRow) {
-	if len(rows) == 0 {
-		@reportEmpty("No queue data yet.")
-	} else {
-		<div class="mx-table-wrap">
-			<table class="mx-table">
-				<thead>
-					<tr>
-						<th scope="col">Status</th>
-						<th scope="col">Count</th>
-					</tr>
-				</thead>
-				<tbody>
-					for _, r := range rows {
-						<tr
-							if r.IsTotal {
-								class="mx-row-total"
-							}
-						>
-							<td>{ r.Status }</td>
-							<td class="mx-cell-mono">{ r.Count }</td>
-						</tr>
-					}
-				</tbody>
-			</table>
-		</div>
-	}
 }
 
 templ tableRecentOutcomes(rows []RecentOutcomeRow) {

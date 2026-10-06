@@ -1,10 +1,7 @@
 package web
 
 import (
-	"strconv"
-
 	"github.com/sydlexius/canticle/internal/reports"
-	"github.com/sydlexius/canticle/web/templates"
 )
 
 // queueBucket is one work-queue bucket as the UI names it: the drill-down key,
@@ -18,9 +15,9 @@ type queueBucket struct {
 
 // queueBuckets is the ONE definition of the work-queue buckets (#599). The
 // dashboard tiles (buildQueueTiles), the doughnut's labels and values
-// (buildQueueChart) and the Reports queue-summary rows (queueSummaryRows) are
+// (buildQueueChart) are
 // all derived from it, so a bucket cannot carry one name on a tile and another
-// on its chart segment or Reports row. The chart color map in
+// on its chart segment. The chart color map in
 // web/static/js/chart-init.js (QUEUE_COLOR_VARS) is keyed by Label, so a rename
 // here must rename that key too; TestQueueBucketsHaveChartColors enforces it.
 //
@@ -74,16 +71,6 @@ var queueBuckets = []queueBucket{
 		Tooltip: "Tracks retired after every lyrics source repeatedly found nothing; revived by 'queue recheck --retired'.",
 		Value:   func(s reports.QueueSummary) int64 { return s.Unavailable },
 	},
-}
-
-// queueSummaryRows shapes a QueueSummary into the Reports queue-summary table:
-// one row per queueBuckets entry, in order, then Total.
-func queueSummaryRows(s reports.QueueSummary) []templates.QueueSummaryRow {
-	rows := make([]templates.QueueSummaryRow, 0, len(queueBuckets)+1)
-	for _, b := range queueBuckets {
-		rows = append(rows, templates.QueueSummaryRow{Status: b.Label, Count: strconv.FormatInt(b.Value(s), 10)})
-	}
-	return append(rows, templates.QueueSummaryRow{Status: "Total", Count: strconv.FormatInt(s.Total, 10), IsTotal: true})
 }
 
 // resultBucket is one Results tile: what a COMPLETED track ended up with.

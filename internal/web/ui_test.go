@@ -195,7 +195,6 @@ func TestReportsWorkspaceShell(t *testing.T) {
 	// Rail items in design-doc order: each title must appear, and its left-to-
 	// right position must be monotonic so the order is exactly as specified.
 	wantOrder := []string{
-		"Queue summary",
 		"Recent outcomes",
 		"Provider effectiveness",
 		"Instrumental inventory",
@@ -216,7 +215,7 @@ func TestReportsWorkspaceShell(t *testing.T) {
 
 	// On-demand wiring: each report's htmx GET target must be present.
 	for _, key := range []string{
-		"queue-summary", "recent-outcomes", "provider-effectiveness",
+		"recent-outcomes", "provider-effectiveness",
 		"instrumental-inventory", "failure-analysis",
 	} {
 		if !strings.Contains(body, `hx-get="/reports/`+key+`"`) {
