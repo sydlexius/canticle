@@ -717,13 +717,7 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
 		return err
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return fmt.Errorf("queue: complete scan_results writeback: %w", err)
 	}
 
@@ -886,13 +880,7 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
 		return q.classifyNoSettle(ctx, tx, id)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return SettleFailed, fmt.Errorf("queue: settle instrumental scan_results writeback: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -980,13 +968,7 @@ func (q *DBQueue) settleGuardRejectedOnce(ctx context.Context, id int64, reason 
 		return q.classifyNoSettle(ctx, tx, id)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return SettleFailed, fmt.Errorf("queue: settle guard-rejected scan_results writeback: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1486,13 +1468,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
 		return WorkItem{}, fmt.Errorf("queue: retire miss: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE scan_results
-         SET status = 'done'
-         WHERE id IN (SELECT scan_result_id FROM work_queue_scan_results WHERE work_queue_id = ?)
-           AND status != 'done'`,
-		id,
-	); err != nil {
+	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return WorkItem{}, fmt.Errorf("queue: retire miss scan_results writeback: %w", err)
 	}
 

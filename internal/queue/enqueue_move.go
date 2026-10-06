@@ -262,8 +262,9 @@ func moveGoneSourceTx(ctx context.Context, tx *sql.Tx, m *goneSourceMove, inputs
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE scan_results SET status = 'done' WHERE id = ?
-           AND EXISTS (SELECT 1 FROM work_queue WHERE id = ? AND status IN ('done', 'unavailable'))`,
-		srID, m.id); err != nil {
+           AND EXISTS (SELECT 1 FROM work_queue WHERE id = ? AND status IN ('done', 'unavailable'))`+
+			scanResultNoLiveSibling,
+		srID, m.id, m.id); err != nil {
 		return false, fmt.Errorf("queue: settle scan_result %d for moved row %d: %w", srID, m.id, err)
 	}
 	slog.Debug("queue: moved row to the same-stem file that replaced its vanished source", "id", m.id)
