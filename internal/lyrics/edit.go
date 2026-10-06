@@ -328,8 +328,10 @@ var lyricIdentityKeys = map[string]bool{"source": true, "upstream": true, "isrc"
 // ReadEditable reads the sidecar (or .orig backup) at path the way SameLyric
 // expects it read: no-follow, regular-checked on the handle, and capped at
 // maxEditFileSize. It also returns that handle's FileInfo, so a caller that
-// later acts on the path can check (os.SameFile) that the entry is still the
-// file it read. An unreadable or non-regular entry is an error.
+// later acts on the path can check that the entry is still the file it read:
+// a regular file with the same size and mtime as well as os.SameFile, since a
+// freed inode number can be reused by the entry created next. An unreadable
+// or non-regular entry is an error.
 func ReadEditable(path string) ([]byte, os.FileInfo, error) {
 	b, fi, err := readRegularNoFollowInfo(path, maxEditFileSize)
 	if err != nil {

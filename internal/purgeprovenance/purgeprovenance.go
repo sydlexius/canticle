@@ -608,7 +608,7 @@ func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.Pr
 	}
 	// Consume the .orig only if it is still the file that was read: a swapped
 	// entry is not ours to remove.
-	if cur, lerr := lstatFile(orig); lerr != nil || !os.SameFile(cur, origFI) {
+	if cur, lerr := lstatFile(orig); lerr != nil || !sameEntry(cur, origFI) {
 		res.Errors++
 		slog.Warn("purge-provenance: restored, but the original changed since it was read; leaving it", "path", orig, "error", lerr)
 	} else if rerr := removeFile(orig); rerr != nil && !os.IsNotExist(rerr) {
@@ -626,6 +626,17 @@ func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.Pr
 		res.Errors++
 		slog.Warn("purge-provenance: restored, but the provenance tags were not re-added", "path", path, "error", ierr)
 	}
+}
+
+// sameEntry reports whether cur (an Lstat of the path now) is still the file
+// read, whose handle FileInfo is read. os.SameFile alone is not enough: once
+// the read file is deleted, the filesystem may hand its inode number to the
+// entry created next (ext4 does, at once), so a symlink swapped in at the
+// same name can match it. A non-regular entry is never the file read, and the
+// size and mtime must also be the ones read.
+func sameEntry(cur, read os.FileInfo) bool {
+	return cur.Mode().IsRegular() && os.SameFile(cur, read) &&
+		cur.Size() == read.Size() && cur.ModTime().Equal(read.ModTime())
 }
 
 // installFile atomically replaces path with data: a fresh exclusive temp file
