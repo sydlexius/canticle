@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -429,6 +430,14 @@ func (r *dispatchResult) retain(song models.Song, laneName string, q Quality) bo
 func (r *dispatchResult) rankErr(err error, class OutcomeClass) {
 	if r.topErr == nil || class.precedence() > r.topClass.precedence() {
 		r.topErr, r.topClass = err, class
+		return
+	}
+	// A hollow body is the one benign miss that is not an answer (#1131); on a
+	// tie it must not be masked by another lane's clean miss, or the worker
+	// cannot tell the post-settle pass was never judged.
+	if class == r.topClass && class == OutcomeBenignMiss &&
+		errors.Is(err, musixmatch.ErrTruncatedResponse) && !errors.Is(r.topErr, musixmatch.ErrTruncatedResponse) {
+		r.topErr = err
 	}
 }
 

@@ -124,3 +124,20 @@ func TestRankErr_ProviderTransportBeatsDetectorOutage(t *testing.T) {
 		t.Fatal("a detector outage must not be the surfaced error when a provider also failed")
 	}
 }
+
+// TestRankErr_HollowBodyNotMaskedByCleanMiss (#1131): a hollow musixmatch body
+// ties a clean miss at OutcomeBenignMiss, and the first reporter used to win;
+// the worker needs the hollow sentinel to survive so the pass is not spent.
+func TestRankErr_HollowBodyNotMaskedByCleanMiss(t *testing.T) {
+	hollow := fmt.Errorf("%w: subtitle_body empty", musixmatch.ErrTruncatedResponse)
+	clean := fmt.Errorf("other lane: %w", musixmatch.ErrNotFound)
+	for name, order := range map[string][]error{"hollow first": {hollow, clean}, "clean first": {clean, hollow}} {
+		var r dispatchResult
+		for _, e := range order {
+			r.rankErr(e, ClassifyOutcome(e))
+		}
+		if !errors.Is(r.topErr, musixmatch.ErrTruncatedResponse) {
+			t.Errorf("%s: topErr = %v, want the hollow sentinel kept", name, r.topErr)
+		}
+	}
+}
