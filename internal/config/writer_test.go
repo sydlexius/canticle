@@ -222,8 +222,9 @@ func TestApplyChanges_CreatesConfigWhenAbsent(t *testing.T) {
 }
 
 // TestApplyChanges_WritesIntegersCanonically pins #1049: Atoi accepts "0100"
-// and "+5", which are not valid TOML integers, so the writer must emit the
-// canonical decimal or the next Load rejects the file.
+// and "+5". "0100" is not a valid TOML integer (the next Load would reject the
+// file), while "+5" loads but is not canonical; the writer must emit the
+// canonical decimal for both.
 func TestApplyChanges_WritesIntegersCanonically(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"0100", "100"},
