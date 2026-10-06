@@ -34,13 +34,20 @@ const (
 	autoRunning   = "running"
 	autoDone      = "done"
 	autoFailed    = "failed"
+	// autoNoSuggestion: the aligner answered, but no word it returned could
+	// be used (aligner.Suggest returned false). Not a failure: nothing to offer.
+	autoNoSuggestion = "no_suggestion"
 )
 
-// errAutoTooLarge: a file grew past its size cap after its stat.
-var errAutoTooLarge = errors.New("auto alignment: file grew past the size cap")
+var (
+	// errAutoTooLarge: a file grew past its size cap after its stat.
+	errAutoTooLarge = errors.New("auto alignment: file grew past the size cap")
+	// errAutoPanic: the aligner call or the suggestion mapping panicked.
+	errAutoPanic = errors.New("auto alignment: the run panicked")
+)
 
-// autoRun is one alignment of one row. state, code, retryAfter and result are
-// guarded by autoRuns.mu and written once, by finish.
+// autoRun is one alignment of one row. state, code, retryAfter, result and
+// suggestion are guarded by autoRuns.mu and written once, by finish.
 type autoRun struct {
 	state      string
 	code       string // machine code of a failed run
@@ -49,8 +56,10 @@ type autoRun struct {
 	// seen is the start or last poll of a running run, then its finish time.
 	seen   time.Time
 	result aligner.Result
-	cancel context.CancelFunc
-	done   chan struct{} // closed when the run's goroutine has returned
+	// suggestion is aligner.Suggest's answer for a done run, nil otherwise.
+	suggestion *aligner.Suggestion
+	cancel     context.CancelFunc
+	done       chan struct{} // closed when the run's goroutine has returned
 }
 
 // autoRuns is the in-memory registry of runs, keyed by work_queue id: at most
@@ -218,18 +227,23 @@ func (s *autoRuns) drop(id int64, r autoRun) {
 }
 
 // finish records the run's outcome, frees its place under the cap (its audio
-// is closed by then) and returns its log class.
-func (s *autoRuns) finish(r *autoRun, res aligner.Result, err error, now time.Time) string {
+// is closed by then) and returns its log class. A run that did not fail is
+// done with sug, or no_suggestion when sug is nil.
+func (s *autoRuns) finish(r *autoRun, res aligner.Result, sug *aligner.Suggestion, err error, now time.Time) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active--
 	r.state, r.result, r.seen = autoDone, res, now
-	if err != nil {
+	switch {
+	case err != nil:
 		r.state = autoFailed
 		r.code, r.retryAfter = autoRunCode(err)
 		return r.code
+	case sug == nil:
+		r.state = autoNoSuggestion
 	}
-	return autoDone
+	r.suggestion = sug
+	return r.state
 }
 
 // autoRunCode is a failed run's machine code. The error's text is never used
@@ -337,6 +351,10 @@ func (u *UI) handleAutoStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lines, any := autoLines(cues)
+	starts := make([]int, len(cues))
+	for i, c := range cues {
+		starts[i] = c.StartMS
+	}
 	if !any {
 		writeEditJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "no_lines"})
 		return
@@ -376,14 +394,16 @@ func (u *UI) handleAutoStart(w http.ResponseWriter, r *http.Request) {
 		// done closes last: by then the run holds nothing and has logged.
 		defer close(run.done)
 		// A panic must still finish the run; its value (a path?) is not logged.
-		res, err := aligner.Result{}, errors.New("auto alignment: the aligner call panicked")
+		res, err := aligner.Result{}, errAutoPanic
+		var sug *aligner.Suggestion
 		defer func() {
 			if recover() != nil {
-				slog.Error("auto alignment: the aligner call panicked", "id", id)
+				slog.Error("auto alignment: the run panicked", "id", id)
+				res, sug, err = aligner.Result{}, nil, errAutoPanic
 			}
 			_ = audio.Close()
 			cancel()
-			slog.Info("auto alignment: run finished", "id", id, "result", runs.finish(run, res, err, u.auto.now()),
+			slog.Info("auto alignment: run finished", "id", id, "result", runs.finish(run, res, sug, err, u.auto.now()),
 				"duration_ms", u.auto.now().Sub(started).Milliseconds())
 		}()
 		// One byte past the cap is readable: a file grown since the stat fails,
@@ -392,6 +412,13 @@ func (u *UI) handleAutoStart(w http.ResponseWriter, r *http.Request) {
 		res, err = u.auto.aligner.AlignFile(ctx, bounded, lines)
 		if bounded.N <= 0 {
 			res, err = aligner.Result{}, errAutoTooLarge
+		}
+		if err == nil {
+			// Mapped against the cues the run started on: the poll drops the
+			// run once the .lrc mtime moves, so they are the current ones.
+			if s, ok := aligner.Suggest(lines, starts, res); ok {
+				sug = &s
+			}
 		}
 	}()
 	slog.Info("auto alignment: run started", "id", id)
@@ -439,8 +466,9 @@ func (u *UI) handleAutoCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAutoPoll reports the row's run: running, failed with a machine code,
-// or done with the .lrc mtime it was started against, which the accept route
-// takes as its ExpectMTime. A .lrc whose mtime moved since the start makes the
+// no_suggestion (the aligner answered, but no word was usable), or done with
+// the suggestion (autoSuggestionJSON) and the .lrc mtime it was started
+// against, which the accept route takes as its ExpectMTime. A .lrc whose mtime moved since the start makes the
 // run worthless: it is canceled and dropped, and the poll answers 409.
 func (u *UI) handleAutoPoll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -464,6 +492,9 @@ func (u *UI) handleAutoPoll(w http.ResponseWriter, r *http.Request) {
 		// Unix nanoseconds, a JSON number as the save route answers it.
 		body["mtime"] = run.mtime
 		body["aligned_words"] = len(run.result.Words)
+		autoSuggestionJSON(body, run.suggestion)
+	case autoNoSuggestion:
+		body["aligned_words"] = len(run.result.Words)
 	case autoFailed:
 		body["error"] = run.code
 		if run.retryAfter > 0 {
@@ -471,4 +502,43 @@ func (u *UI) handleAutoPoll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeEditJSON(w, http.StatusOK, body)
+}
+
+// autoWord is one word unit of a suggested line: the strings.Fields token
+// index it starts at, and its start in ms from the start of the audio.
+type autoWord struct {
+	Token   int `json:"token"`
+	StartMS int `json:"start_ms"`
+}
+
+// autoQuality is aligner.Quality as the poll answers it; similarity is
+// undefined (0) when has_transcript is false.
+type autoQuality struct {
+	Similarity     float64 `json:"similarity"`
+	HasTranscript  bool    `json:"has_transcript"`
+	MeanConfidence float64 `json:"mean_confidence"`
+	Coverage       float64 `json:"coverage"`
+	Tokens         int     `json:"tokens"`
+	AlignedTokens  int     `json:"aligned_tokens"`
+	Merged         int     `json:"merged"`
+}
+
+// autoSuggestionJSON adds a done run's suggestion to the poll body: lines, one
+// start (ms) per cue of the .lrc in file order; words, per cue its word units
+// or null; quality; and warnings, the codes below threshold in the fixed order
+// similarity, confidence, coverage, merged (an array, never null).
+func autoSuggestionJSON(body map[string]any, s *aligner.Suggestion) {
+	words := make([][]autoWord, len(s.Words))
+	for i, ws := range s.Words {
+		for _, w := range ws {
+			words[i] = append(words[i], autoWord{Token: w.Token, StartMS: w.StartMS})
+		}
+	}
+	q := s.Quality
+	body["lines"] = s.LineMS
+	body["words"] = words
+	body["quality"] = autoQuality{Similarity: q.Similarity, HasTranscript: q.HasTranscript,
+		MeanConfidence: q.MeanConfidence, Coverage: q.Coverage, Tokens: q.Tokens,
+		AlignedTokens: q.AlignedTokens, Merged: q.Merged}
+	body["warnings"] = q.Warnings()
 }
