@@ -615,3 +615,42 @@ func TestSetMusixmatchTokenWithIdentityFallbackTokenFailure(t *testing.T) {
 		t.Errorf("vals = %v, want new-tok + new|id", w.vals)
 	}
 }
+
+func (w *nameWriter) Get(_ context.Context, name string) (string, bool, error) {
+	v, ok := w.vals[name]
+	return v, ok, nil
+}
+
+func (w *nameWriter) List(context.Context) ([]SecretInfo, error) { return nil, nil }
+
+// TestSetMusixmatchTokenWithIdentityIfUnchangedFallback pins the compare-and-set
+// on a store with no atomic pair method (#942): a matching state writes (with a
+// fresh stamp), a changed one writes nothing, and a failed stamp write stops
+// the token write.
+func TestSetMusixmatchTokenWithIdentityIfUnchangedFallback(t *testing.T) {
+	ctx := context.Background()
+	w := &nameWriter{vals: map[string]string{NameMusixmatchToken: "old-tok"}}
+	snap, err := ReadMusixmatchTokenState(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetMusixmatchTokenWithIdentityIfUnchanged(ctx, w, "new-tok", "new|id", snap); err != nil {
+		t.Fatalf("matching state: err = %v, want nil", err)
+	}
+	if w.vals[NameMusixmatchToken] != "new-tok" || w.vals[NameMusixmatchTokenStamp] == "" {
+		t.Fatalf("matching state not written with a stamp: %v", w.vals)
+	}
+	if err := SetMusixmatchTokenWithIdentityIfUnchanged(ctx, w, "other-tok", "new|id", snap); !errors.Is(err, ErrMusixmatchTokenChanged) {
+		t.Fatalf("changed state: err = %v, want ErrMusixmatchTokenChanged", err)
+	}
+	if w.vals[NameMusixmatchToken] != "new-tok" {
+		t.Errorf("changed state wrote the token: %q", w.vals[NameMusixmatchToken])
+	}
+	w = &nameWriter{failSet: map[string]bool{NameMusixmatchTokenStamp: true}, vals: map[string]string{}}
+	if err := SetOperatorMusixmatchToken(ctx, w, "op"); err == nil {
+		t.Fatal("stamp write failure: err = nil, want an error")
+	}
+	if _, ok := w.vals[NameMusixmatchToken]; ok {
+		t.Error("token written although its stamp write failed")
+	}
+}

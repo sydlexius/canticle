@@ -1048,10 +1048,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if !operatorSupplied && store != nil {
 		r := &persistingRenewer{minter: tokenMinterImpl, store: store}
 		if tokenFromDB {
-			// A DB token with no identity record is the pre-#934 legacy shape
-			// and stays renewable; see persistingRenewer.legacyToken.
-			if _, ok, err := store.Get(ctx, secrets.NameMusixmatchClientIdentity); err == nil && !ok {
-				r.legacyToken = token
+			// A DB token with no identity record and no write stamp is the
+			// legacy shape and stays renewable; see persistingRenewer.legacy.
+			st, err := secrets.ReadMusixmatchTokenState(ctx, store)
+			if err == nil && st.HasToken && st.Token == token && !st.HasIdentity && !st.HasStamp {
+				r.legacy = &st
 			}
 		}
 		tokenRenewer = r

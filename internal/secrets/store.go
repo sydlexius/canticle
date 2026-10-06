@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -21,6 +22,13 @@ const (
 	// NameMusixmatchToken goes through SetOperatorMusixmatchToken, which deletes
 	// it. Absence therefore means "operator-set or pre-upgrade", never "minted".
 	NameMusixmatchClientIdentity = "musixmatch_client_identity"
+	// NameMusixmatchTokenStamp is a random value rewritten by EVERY write of
+	// NameMusixmatchToken through SetMusixmatchTokenWithIdentity (operator save
+	// and mint alike), so two writes of a byte-identical token still differ
+	// (#942). It means only "the token row was written again"; the renewal
+	// compare-and-set (SetMusixmatchTokenWithIdentityIfUnchanged) keys on it.
+	// A token stored before it existed has none.
+	NameMusixmatchTokenStamp = "musixmatch_token_stamp"
 	// NameWebhookAPIKey is the secret name for the serve-mode webhook API key.
 	NameWebhookAPIKey = "webhook_api_key" //nolint:gosec // G101: this is a stable secret-store row name (a lookup key), not a hardcoded credential value
 )
@@ -63,6 +71,75 @@ type TokenPairWriter interface {
 	SetTokenWithIdentity(ctx context.Context, token, identity string) error
 }
 
+// MusixmatchTokenState is one read of the Musixmatch token, its client-identity
+// record and its write stamp. It is comparable: two states are equal only when
+// every name is equally present with an equal value.
+type MusixmatchTokenState struct {
+	Token, Identity, Stamp          string
+	HasToken, HasIdentity, HasStamp bool
+}
+
+// ErrMusixmatchTokenChanged is returned by
+// SetMusixmatchTokenWithIdentityIfUnchanged when the stored state no longer
+// equals the expected one; nothing was written.
+var ErrMusixmatchTokenChanged = errors.New("secrets: musixmatch token changed since it was read")
+
+// TokenStateGetter is the subset of Store ReadMusixmatchTokenState needs.
+type TokenStateGetter interface {
+	Get(ctx context.Context, name string) (plaintext string, ok bool, err error)
+}
+
+// ReadMusixmatchTokenState reads the token, identity and stamp with three Gets.
+// The reads are not one snapshot; a caller that acts on the result commits
+// through SetMusixmatchTokenWithIdentityIfUnchanged, which re-reads all three
+// inside its write and refuses unless they still equal this state, so a
+// decision taken on a torn read can never commit.
+func ReadMusixmatchTokenState(ctx context.Context, s TokenStateGetter) (MusixmatchTokenState, error) {
+	var st MusixmatchTokenState
+	var err error
+	if st.Token, st.HasToken, err = s.Get(ctx, NameMusixmatchToken); err != nil {
+		return MusixmatchTokenState{}, err
+	}
+	if st.Identity, st.HasIdentity, err = s.Get(ctx, NameMusixmatchClientIdentity); err != nil {
+		return MusixmatchTokenState{}, err
+	}
+	if st.Stamp, st.HasStamp, err = s.Get(ctx, NameMusixmatchTokenStamp); err != nil {
+		return MusixmatchTokenState{}, err
+	}
+	return st, nil
+}
+
+// TokenPairCASWriter is implemented by a store that can write the token pair
+// only if the stored state still equals expect, as ONE atomic operation.
+type TokenPairCASWriter interface {
+	SetTokenWithIdentityIfUnchanged(ctx context.Context, token, identity string, expect MusixmatchTokenState) error
+}
+
+// SetMusixmatchTokenWithIdentityIfUnchanged is SetMusixmatchTokenWithIdentity
+// guarded by a compare-and-set (#942): it writes only if the stored token,
+// identity record and stamp still equal expect, else it returns
+// ErrMusixmatchTokenChanged and writes nothing. Every token write changes the
+// stamp, so any write between the read of expect and this call (an operator
+// save of even the same token value) fails the compare. A TokenPairCASWriter
+// compares and writes atomically; any other store compares then writes
+// sequentially, with a window between the two.
+func SetMusixmatchTokenWithIdentityIfUnchanged(ctx context.Context, s Store, token, identity string, expect MusixmatchTokenState) error {
+	if cw, ok := s.(TokenPairCASWriter); ok {
+		return cw.SetTokenWithIdentityIfUnchanged(ctx, token, identity, expect)
+	}
+	cur, err := ReadMusixmatchTokenState(ctx, s)
+	if err != nil {
+		return err
+	}
+	if cur != expect {
+		return ErrMusixmatchTokenChanged
+	}
+	return SetMusixmatchTokenWithIdentity(ctx, s, token, identity)
+}
+
+// newTokenStamp returns a fresh random NameMusixmatchTokenStamp value.
+func newTokenStamp() string { return rand.Text() }
+
 // SetOperatorMusixmatchToken stores an OPERATOR-supplied Musixmatch token (web
 // settings, onboarding, `secrets import`, `secrets set`) and clears the
 // client-identity record, so the pair cannot drift: the identity record only
@@ -85,11 +162,17 @@ func SetOperatorMusixmatchToken(ctx context.Context, s TokenWriter, token string
 //     that fails, the record is deleted instead (best effort) so the new token
 //     reads as absent-identity and is kept, rather than paired with a previous
 //     record it was not minted for. Only the token write's error is returned.
+//
+// Every path also rewrites NameMusixmatchTokenStamp; the fallback writes it
+// first and does not write the token if that fails.
 func SetMusixmatchTokenWithIdentity(ctx context.Context, s TokenWriter, token, identity string) error {
 	if pw, ok := s.(TokenPairWriter); ok {
 		return pw.SetTokenWithIdentity(ctx, token, identity)
 	}
 	slog.Warn("secret store cannot write the musixmatch token and its client identity atomically; writing them sequentially")
+	if err := s.Set(ctx, NameMusixmatchTokenStamp, newTokenStamp()); err != nil {
+		return fmt.Errorf("secrets: stamp musixmatch token write: %w", err)
+	}
 	if identity == "" {
 		if err := s.Delete(ctx, NameMusixmatchClientIdentity); err != nil {
 			return fmt.Errorf("secrets: clear musixmatch client identity: %w", err)
@@ -154,10 +237,36 @@ func (s *SQLStore) Set(ctx context.Context, name, plaintext string) error {
 }
 
 // SetTokenWithIdentity writes the Musixmatch token and its client-identity
-// record in ONE transaction (identity "" deletes the record). Either both
-// changes commit or neither does.
-func (s *SQLStore) SetTokenWithIdentity(ctx context.Context, token, identity string) (err error) {
+// record in ONE transaction (identity "" deletes the record), rewriting the
+// stamp. Either every change commits or none does.
+func (s *SQLStore) SetTokenWithIdentity(ctx context.Context, token, identity string) error {
+	return s.writeTokenPair(ctx, token, identity, nil)
+}
+
+// SetTokenWithIdentityIfUnchanged is SQLStore's TokenPairCASWriter: the state
+// is re-read and compared inside the same transaction as the write.
+func (s *SQLStore) SetTokenWithIdentityIfUnchanged(ctx context.Context, token, identity string, expect MusixmatchTokenState) error {
+	return s.writeTokenPair(ctx, token, identity, &expect)
+}
+
+// txGetter reads secrets through one transaction.
+type txGetter struct {
+	s  *SQLStore
+	tx *sql.Tx
+}
+
+func (g txGetter) Get(ctx context.Context, name string) (string, bool, error) {
+	return g.s.get(ctx, g.tx, name)
+}
+
+// writeTokenPair is the body of both SQLStore pair writes; a nil expect skips
+// the compare.
+func (s *SQLStore) writeTokenPair(ctx context.Context, token, identity string, expect *MusixmatchTokenState) (err error) {
 	tokBlob, err := Encrypt(s.key, []byte(token), NameMusixmatchToken)
+	if err != nil {
+		return err
+	}
+	stampBlob, err := Encrypt(s.key, []byte(newTokenStamp()), NameMusixmatchTokenStamp)
 	if err != nil {
 		return err
 	}
@@ -176,6 +285,15 @@ func (s *SQLStore) SetTokenWithIdentity(ctx context.Context, token, identity str
 			_ = tx.Rollback()
 		}
 	}()
+	if expect != nil {
+		cur, rerr := ReadMusixmatchTokenState(ctx, txGetter{s: s, tx: tx})
+		if rerr != nil {
+			return fmt.Errorf("secrets: read musixmatch token for compare: %w", rerr)
+		}
+		if cur != *expect {
+			return ErrMusixmatchTokenChanged
+		}
+	}
 	if identity == "" {
 		_, err = tx.ExecContext(ctx, `DELETE FROM secrets WHERE name = ?`, NameMusixmatchClientIdentity)
 	} else {
@@ -183,6 +301,9 @@ func (s *SQLStore) SetTokenWithIdentity(ctx context.Context, token, identity str
 	}
 	if err != nil {
 		return fmt.Errorf("secrets: write musixmatch client identity: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, upsertSecretSQL, NameMusixmatchTokenStamp, stampBlob); err != nil {
+		return fmt.Errorf("secrets: set %q: %w", NameMusixmatchTokenStamp, err)
 	}
 	if _, err = tx.ExecContext(ctx, upsertSecretSQL, NameMusixmatchToken, tokBlob); err != nil {
 		return fmt.Errorf("secrets: set %q: %w", NameMusixmatchToken, err)
@@ -193,14 +314,33 @@ func (s *SQLStore) SetTokenWithIdentity(ctx context.Context, token, identity str
 	return nil
 }
 
-// SetTokenWithIdentity is MemoryStore's TokenPairWriter: both names change
+// SetTokenWithIdentity is MemoryStore's TokenPairWriter: every name changes
 // under one lock, so no reader or writer observes half the pair.
 func (s *MemoryStore) SetTokenWithIdentity(ctx context.Context, token, identity string) error {
+	return s.writeTokenPair(ctx, token, identity, nil)
+}
+
+// SetTokenWithIdentityIfUnchanged is MemoryStore's TokenPairCASWriter: the
+// compare and the write happen under the same lock.
+func (s *MemoryStore) SetTokenWithIdentityIfUnchanged(ctx context.Context, token, identity string, expect MusixmatchTokenState) error {
+	return s.writeTokenPair(ctx, token, identity, &expect)
+}
+
+func (s *MemoryStore) writeTokenPair(ctx context.Context, token, identity string, expect *MusixmatchTokenState) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if expect != nil {
+		var cur MusixmatchTokenState
+		cur.Token, cur.HasToken = s.secrets[NameMusixmatchToken]
+		cur.Identity, cur.HasIdentity = s.secrets[NameMusixmatchClientIdentity]
+		cur.Stamp, cur.HasStamp = s.secrets[NameMusixmatchTokenStamp]
+		if cur != *expect {
+			return ErrMusixmatchTokenChanged
+		}
+	}
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	if identity == "" {
 		delete(s.secrets, NameMusixmatchClientIdentity)
@@ -209,6 +349,8 @@ func (s *MemoryStore) SetTokenWithIdentity(ctx context.Context, token, identity 
 		s.secrets[NameMusixmatchClientIdentity] = identity
 		s.updatedAt[NameMusixmatchClientIdentity] = now
 	}
+	s.secrets[NameMusixmatchTokenStamp] = newTokenStamp()
+	s.updatedAt[NameMusixmatchTokenStamp] = now
 	s.secrets[NameMusixmatchToken] = token
 	s.updatedAt[NameMusixmatchToken] = now
 	return nil
@@ -217,8 +359,17 @@ func (s *MemoryStore) SetTokenWithIdentity(ctx context.Context, token, identity 
 // Get returns the decrypted plaintext for name. ok is false when no such secret
 // exists; a decryption failure (tampering, wrong key) is returned as an error.
 func (s *SQLStore) Get(ctx context.Context, name string) (string, bool, error) {
+	return s.get(ctx, s.db, name)
+}
+
+// rowQuerier is satisfied by *sql.DB and *sql.Tx.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func (s *SQLStore) get(ctx context.Context, q rowQuerier, name string) (string, bool, error) {
 	var blob []byte
-	err := s.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT ciphertext FROM secrets WHERE name = ?`, name,
 	).Scan(&blob)
 	if errors.Is(err, sql.ErrNoRows) {
