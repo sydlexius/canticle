@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/reports"
@@ -111,6 +112,61 @@ func TestInstrumentalInventoryFileTieBreak(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("order %+v = %v, want %v", o, got, want)
+		}
+	}
+}
+
+// TestRecentOutcomesSourceSortsByDisplayedLabel pins #1260: the Source header
+// orders by the label the cell shows, not the stored lane key. By key the
+// order would be detector, innertube, musixmatch, petitlyrics; by label it is
+// Instrumental Detector, Musixmatch, PetitLyrics, YouTube Music. The blank
+// Source row (unknown result, no timing verdict) is NULL and sorts last both ways.
+func TestRecentOutcomesSourceSortsByDisplayedLabel(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	lanes := map[string]string{
+		"T-yt": "innertube", "T-mx": "musixmatch", "T-pl": "petitlyrics", "T-det": "detector",
+	}
+	i := 0
+	for title, lane := range lanes {
+		i++
+		insertWorkItem(t, sqlDB, workItem{artist: "A", title: title, status: "done",
+			completedAt: fmt.Sprintf("2026-08-0%dT00:00:00Z", i), outcomeType: "synced", providerLane: lane})
+	}
+	// Unknown result and no timing verdict: the cell is blank.
+	insertWorkItem(t, sqlDB, workItem{artist: "A", title: "T-blank", status: "done",
+		completedAt: "2026-08-09T00:00:00Z", providerLane: "musixmatch"})
+
+	order := func(desc bool) []string {
+		t.Helper()
+		rows, err := repo.RecentOutcomesSorted(ctx, 10, tablesort.Order{Key: tablesort.KeySource, Desc: desc})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, o := range rows {
+			got = append(got, o.Title)
+		}
+		return got
+	}
+	if got, want := order(false), []string{"T-det", "T-mx", "T-pl", "T-yt", "T-blank"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("source asc = %v, want %v", got, want)
+	}
+	if got, want := order(true), []string{"T-yt", "T-pl", "T-mx", "T-det", "T-blank"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("source desc = %v, want %v", got, want)
+	}
+}
+
+// TestSourceLabelCaseCoversEveryLane keeps a new lane from being forgotten:
+// each known lane (and the detector lane) must appear, with its label, in the
+// generated CASE.
+func TestSourceLabelCaseCoversEveryLane(t *testing.T) {
+	expr := reports.SourceLabelExprForTest()
+	for _, l := range append(reports.Lanes(), "detector") {
+		want := "WHEN '" + l + "' THEN '" + reports.LaneLabel(l) + "'"
+		if !strings.Contains(expr, want) {
+			t.Errorf("CASE lacks %q:\n%s", want, expr)
 		}
 	}
 }

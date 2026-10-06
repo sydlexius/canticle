@@ -469,8 +469,11 @@ const recentTimingVerdictExpr = `COALESCE(timing_outcome, '') IN ('categorical',
 // recentLaneExpr is the Source cell's value: NULL exactly when
 // scanRecentOutcomes blanks the lane (an unknown result with no timing
 // verdict), so the Source sort orders what the cell shows.
-const recentLaneExpr = `CASE WHEN (` + recentResultExpr + `) = 'unknown' AND NOT (` + recentTimingVerdictExpr + `)
-                THEN NULL ELSE provider_lane END`
+//
+// Non-NULL values are the lane's display label (sourceLabelExpr), compared
+// NOCASE like the Album text sort.
+var recentLaneExpr = `CASE WHEN (` + recentResultExpr + `) = 'unknown' AND NOT (` + recentTimingVerdictExpr + `)
+                THEN NULL ELSE (` + sourceLabelExpr + `) END COLLATE NOCASE`
 
 // recentResultExpr classifies a row into its ResultClass key; RecentOutcomes
 // selects it and the Result header of the Reports table sorts on it.
