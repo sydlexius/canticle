@@ -54,6 +54,10 @@ func TestSuggestLines(t *testing.T) {
 		// Shift 0: 400 is raised to aa's 500, then out of its hundredth; bb trails at 900.
 		{"unsorted current start is raised, non-decreasing", three, []int{500, 400, 900},
 			[]Word{sw(0, "aa", 500)}, []int{500, 510, 900}},
+		// 500 is 100 from bb's 400 and 500 from aa's 1000: carried by bb (+1700) to
+		// 2200, then pulled to 2099, below bb's hundredth. Carried by aa: 2010.
+		{"unsorted start below both anchors takes the nearer", three, []int{1000, 500, 400},
+			[]Word{sw(0, "aa", 2000), sw(2, "bb", 2100)}, []int{2000, 2099, 2100}},
 		// Only the last word is used: shift 1100-1000 carries the blank line to 2100.
 		{"unusable words are ignored", []string{"aa", ""}, []int{1000, 2000}, []Word{
 			sw(0, "aa", -5),                                     // negative start

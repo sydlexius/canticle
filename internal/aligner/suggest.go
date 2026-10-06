@@ -183,11 +183,20 @@ func carry(starts, anchor, aligned []int, k, i int) int {
 				return int(ap + (s-sp)*(an-ap)/(sn-sp))
 			}
 		}
-		if from < 0 || starts[after]-starts[i] < starts[i]-starts[from] {
+		// Absolute distances: an unsorted start can lie below or above both.
+		if from < 0 || dist(starts[after], starts[i]) < dist(starts[i], starts[from]) {
 			from = after
 		}
 	}
 	return min(max(starts[i]+anchor[from]-starts[from], 0), maxStartMS)
+}
+
+// dist is the absolute difference of two starts.
+func dist(a, b int) int {
+	if a < b {
+		return b - a
+	}
+	return a - b
 }
 
 // units matches one line's used words to its tokens, in order, and returns the
