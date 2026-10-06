@@ -3692,6 +3692,64 @@ func TestDBQueue_SetProviderLane(t *testing.T) {
 	}
 }
 
+// TestDBQueue_ClearProviderLane verifies ClearProviderLane nulls the lane of a
+// processing row (a laneless cache hit settling a retry, #1207) and leaves a
+// row that is no longer processing untouched.
+func TestDBQueue_ClearProviderLane(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	q.now = func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	laneOf := func() *string {
+		t.Helper()
+		var lane *string
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT provider_lane FROM work_queue WHERE id = ?`, item.ID,
+		).Scan(&lane); err != nil {
+			t.Fatalf("read provider_lane: %v", err)
+		}
+		return lane
+	}
+
+	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics"); err != nil {
+		t.Fatalf("SetProviderLane: %v", err)
+	}
+	if err := q.ClearProviderLane(ctx, item.ID); err != nil {
+		t.Fatalf("ClearProviderLane: %v", err)
+	}
+	if lane := laneOf(); lane != nil {
+		t.Errorf("provider_lane = %q after clear on a processing row; want NULL", *lane)
+	}
+
+	// Outside processing the clear must not touch the row.
+	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics"); err != nil {
+		t.Fatalf("SetProviderLane: %v", err)
+	}
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done' WHERE id = ?`, item.ID); err != nil {
+		t.Fatalf("settle row: %v", err)
+	}
+	if err := q.ClearProviderLane(ctx, item.ID); err != nil {
+		t.Fatalf("ClearProviderLane on done row: %v", err)
+	}
+	if lane := laneOf(); lane == nil || *lane != "petitlyrics" {
+		t.Errorf("provider_lane = %v after clear on a done row; want petitlyrics untouched", lane)
+	}
+
+	closed := NewDBQueue(openQueueTestDB(t))
+	_ = closed.db.Close()
+	if err := closed.ClearProviderLane(ctx, 1); err == nil {
+		t.Error("ClearProviderLane on a closed database returned nil error")
+	}
+}
+
 // TestDBQueue_SetOutcomeType verifies SetOutcomeType persists the recorded
 // outcome on a work_queue row through a real SQLite DB (#379).
 func TestDBQueue_SetOutcomeType(t *testing.T) {
