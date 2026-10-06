@@ -30,6 +30,44 @@
 
   var MAX_OFFSET_MS = 600000;
   var SKIP_KEY = "mx-offset-confirm-skip";
+  // Auto alignment: the poll interval the server's 20 s orphan window assumes,
+  // how often a dropped run is restarted before the page says so, and how
+  // often a start refused as busy (every run slot taken) is retried.
+  var AUTO_POLL_MS = 2000;
+  var AUTO_MAX_RESTARTS = 2;
+  var AUTO_BUSY_RETRIES = 3;
+  // A suggested start under 50 ms from the current one counts as unmoved.
+  var AUTO_MOVED_MS = 50;
+  // autoSummary says what a suggestion changed: how many of the lines moved
+  // and the mean signed shift of those (sumMS is in ms, negative = earlier).
+  function autoSummary(n, sumMS, total) {
+    if (n === 0) {
+      return "Suggested timing matches the current timing. ";
+    }
+    var avg = Math.round(Math.abs(sumMS / n) / 100) / 10;
+    var dir = sumMS < 0 ? "earlier" : "later";
+    return "Suggested timing: " + n + " of " + total + " lines moved, average " + avg.toFixed(1) + " s " + dir + ". ";
+  }
+  // AUTO_MESSAGES words each Auto outcome for the status line: [text, tone].
+  // "running" and a busy answer with a retry time are worded in render().
+  var AUTO_MESSAGES = {
+    suggested: ["Suggested timing shown. Play to check it; Discard suggestion (or Esc) puts the previous timing back. Nothing has been written.", ""],
+    canceled: ["Alignment canceled. Nothing changed.", ""],
+    discarded: ["Suggestion discarded. The previous timing is back.", ""],
+    none: ["The aligner found no usable timing for these lyrics. Nothing changed.", "warn"],
+    dropped: ["The server dropped the alignment, likely because this tab was in the background. Click Auto to run it again.", "warn"],
+    busy: ["The aligner is busy. Try Auto again shortly.", "warn"],
+    unavailable: ["The aligner is not available right now. Try again later.", "error"],
+    timeout: ["The alignment took too long and was stopped. Nothing changed.", "error"],
+    rejected: ["The aligner could not use this track's audio or lyrics.", "error"],
+    too_large: ["The audio file is too large to align.", "error"],
+    no_lines: ["No lyric line has words to align.", "warn"],
+    aligner: ["The aligner failed on this track. Nothing changed.", "error"],
+    changed: ["The lyrics file changed on disk, so the suggestion was discarded. Reload to align the current file.", "error"],
+    session: ["Your session has expired. Reload the page and sign in again.", "error"],
+    gone: ["Auto alignment is no longer offered for this track. Reload the page.", "error"],
+    error: ["The server could not run the alignment. Try again, or reload the page.", "error"],
+  };
 
   // parseOffset reads a typed offset in seconds ("-7.25", "+0.6", "1,5") and
   // returns ms rounded to 10, or null for anything else or |ms| > 600000.
@@ -441,6 +479,10 @@
       phase: "idle",
       byEar: false,
     };
+    // Auto alignment (#1008 S8). phase: off, running (started or polling) or
+    // suggested; starts holds the suggested line starts while suggested; msg is
+    // the AUTO_MESSAGES key shown in the status line; gen drops a late answer.
+    var au = { phase: "off", starts: null, msg: "", gen: 0, timer: 0, since: 0, restarts: 0, busy: 0, netErrors: 0, retry: 0 };
     var earBtn = $("mx-ear-toggle");
     var banner = $("mx-ear-banner");
     var earCancel = $("mx-ear-cancel");
@@ -530,7 +572,7 @@
         li.classList.toggle("is-ear-playing", v.playing && i === v.played);
         li.classList.toggle("is-ear-played", !v.playing && i === v.played);
       });
-      var esc = ear.pending() ? "cancel test" : "discard";
+      var esc = au.phase === "running" ? "cancel alignment" : au.phase === "suggested" ? "discard suggestion" : ear.pending() ? "cancel test" : "discard";
       if (escEntry && escEntry.label !== esc) {
         escEntry.label = esc;
         window.mxKeyboard.renderLegend(legend);
@@ -557,15 +599,29 @@
 
     function render() {
       var starts = [];
+      var sug = au.starts;
+      var movedN = 0;
+      var movedSum = 0;
       lines.forEach(function (li, i) {
-        lineStarts[i] = Math.max(0, base[i] + st.offset);
+        var before = Math.max(0, base[i] + st.offset);
+        lineStarts[i] = sug ? sug[i] : before;
         times[i].textContent = fmtTime(lineStarts[i]);
+        // A moved line's time is also underlined and bold, so the change
+        // does not rest on the accent color alone (#1326).
+        var shift = sug ? sug[i] - before : 0;
+        var moved = Math.abs(shift) >= AUTO_MOVED_MS;
+        times[i].classList.toggle("is-auto-moved", moved);
+        if (moved) {
+          movedN++;
+          movedSum += shift;
+        }
         if (live[i]) {
           starts.push(base[i]);
         }
-        li.classList.toggle("is-past-end", live[i] && duration > 0 && lineStarts[i] > duration + tolerance);
+        li.classList.toggle("is-past-end", !sug && live[i] && duration > 0 && lineStarts[i] > duration + tolerance);
       });
-      var past = pastEnd(starts, st.offset, duration, tolerance);
+      lines[0].parentNode.classList.toggle("is-auto-suggested", !!sug);
+      var past = sug ? 0 : pastEnd(starts, st.offset, duration, tolerance);
       var dirty = st.offset !== st.saved;
       var busy = st.phase === "saving";
       var isLocked = locked();
@@ -578,11 +634,28 @@
       save.textContent = busy ? "Saving" : "Save";
       discard.disabled = !dirty || isLocked;
       revert.hidden = !(st.edited && !dirty) || isLocked;
-      var tone = busy ? "blue" : dirty ? "amber" : st.edited ? "green" : "grey";
-      chip.textContent = busy ? "Saving" : dirty ? "Unsaved" : st.edited ? "Edited" : "Original";
+      var tone = busy || au.phase === "running" ? "blue" : sug || dirty ? "amber" : st.edited ? "green" : "grey";
+      chip.textContent = busy ? "Saving" : au.phase === "running" ? "Aligning" : sug ? "Suggested" : dirty ? "Unsaved" : st.edited ? "Edited" : "Original";
       chip.className = "mx-edit-chip is-" + tone;
+      if (autoBtn) {
+        autoBtn.hidden = au.phase !== "off";
+        autoBtn.disabled = st.phase === "saving" || st.phase === "refused-changed";
+        autoStop.hidden = au.phase === "off";
+        autoStop.textContent = sug ? "Discard suggestion" : "Cancel";
+        autoProgress.hidden = au.phase !== "running";
+      }
       var msg;
-      if (past > 0) {
+      if (au.msg) {
+        msg = AUTO_MESSAGES[au.msg];
+        if (au.msg === "suggested") {
+          msg = [autoSummary(movedN, movedSum, lines.length) + msg[0].replace(/^Suggested timing shown\. /, ""), msg[1]];
+        }
+        if (au.msg === "running") {
+          msg = ["Aligning the lyrics to the audio (" + Math.round((Date.now() - au.since) / 1000) + " s). Nothing is written. Cancel or Esc stops it.", ""];
+        } else if (au.msg === "busy" && au.retry > 0) {
+          msg = ["The aligner is busy. Try Auto again in " + au.retry + " s.", "warn"];
+        }
+      } else if (past > 0) {
         msg = [past + (past === 1 ? " line would" : " lines would") + " start more than " + tolerance / 1000 + " s after the track ends (" + fmtTime(duration).replace(/\.\d+$/, "") + "). Save is off until they fit.", "warn"];
       } else if (MESSAGES[st.phase]) {
         msg = MESSAGES[st.phase];
@@ -624,6 +697,7 @@
       }
       st.offset = Math.max(-MAX_OFFSET_MS, Math.min(MAX_OFFSET_MS, ms));
       st.phase = "idle";
+      au.msg = "";
       render();
     }
 
@@ -650,9 +724,10 @@
       }
     });
     // A "changed" refusal locks the editor for good: the page's mtime and
-    // original are stale, so only a reload may edit again.
+    // original are stale, so only a reload may edit again. An Auto run or a
+    // shown suggestion holds the offset controls until it is stopped.
     function locked() {
-      return st.phase === "saving" || st.phase === "refused-changed";
+      return st.phase === "saving" || st.phase === "refused-changed" || au.phase !== "off";
     }
 
     discard.addEventListener("click", function () {
@@ -660,6 +735,7 @@
         st.offset = st.saved;
         st.phase = "idle";
         st.byEar = false;
+        au.msg = "";
         render();
       }
     });
@@ -746,6 +822,172 @@
       post(panel.getAttribute("data-save-url"), st.offset, false);
     });
 
+    // Auto alignment (#1008 S8): POST starts a run (202), GET polls it every
+    // AUTO_POLL_MS, POST .../cancel stops it. The suggestion is shown as unsaved
+    // line starts; stopping restores what was shown before. Nothing is written.
+    var autoURL = panel.getAttribute("data-auto-url");
+    var autoBtn = autoURL ? $("mx-auto-run") : null;
+    var autoStop = $("mx-auto-stop");
+    var autoProgress = $("mx-auto-progress");
+    if (autoURL && !(autoBtn && autoStop && autoProgress)) {
+      console.error("preview.js: data-auto-url is set but the Auto controls are missing; Auto is off");
+      autoBtn = null;
+    }
+    // Failed-run codes (auto_run.go autoRunCode) to message keys. "canceled"
+    // is a run the server stopped (replaced, reaped, shutdown), never the
+    // aligner's failure, so it reads as dropped.
+    var AUTO_FAILED = { busy: "busy", unavailable: "unavailable", timeout: "timeout", canceled: "dropped", rejected: "rejected", too_large: "too_large" };
+    var AUTO_START = { 401: "session", 403: "session", 404: "gone", 409: "changed", 413: "too_large", 422: "no_lines", 429: "busy", 503: "unavailable" };
+
+    // autoFetch resolves to {status, data, text}; status 0 when the request
+    // failed. X-Requested-With makes an expired session answer 401, not a
+    // redirect to the login page that fetch would follow and report as 200.
+    function autoFetch(url, method) {
+      var opts = { method: method, credentials: "same-origin", cache: "no-store", headers: { "X-Requested-With": "XMLHttpRequest" } };
+      if (method === "POST") {
+        opts.body = new window.URLSearchParams({ mtime: st.mtime, csrf_token: token ? token.value : "" });
+      }
+      // One catch for the request AND the body read: a body stream that fails
+      // in text() is a transport failure too, never a stuck run.
+      return window
+        .fetch(url, opts)
+        .then(function (res) {
+          return res.text().then(function (text) {
+            var data = {};
+            try {
+              data = JSON.parse(text) || {};
+            } catch (e) {
+              // a non-JSON body (a bare 404, a proxy page) carries no code
+            }
+            return { status: res.status, data: data, text: text };
+          });
+        })
+        .catch(function (e) {
+          console.error("preview.js: auto alignment request failed", e && e.message);
+          return { status: 0, data: {}, text: "" };
+        });
+    }
+    function autoLater(fn) {
+      window.clearTimeout(au.timer);
+      au.timer = window.setTimeout(fn, AUTO_POLL_MS);
+    }
+    function pollLater(gen) {
+      autoLater(function () {
+        autoPoll(gen);
+      });
+    }
+    // autoEnd leaves the run or suggestion: the shown starts go back to what
+    // they were before Auto, and a late answer to anything in flight is dropped.
+    function autoEnd(msg, retry) {
+      au.gen++;
+      window.clearTimeout(au.timer);
+      au.phase = "off";
+      au.starts = null;
+      au.msg = msg;
+      au.retry = retry > 0 ? retry : 0;
+      if (msg === "changed") {
+        st.phase = "refused-changed"; // the page's mtime is stale: reload to edit
+      }
+      render();
+    }
+    function autoStart(restart) {
+      if (!autoBtn || (!restart && (au.phase !== "off" || locked()))) {
+        return;
+      }
+      var gen = ++au.gen;
+      if (!restart) {
+        au.since = Date.now();
+        au.restarts = au.busy = 0;
+      }
+      au.phase = au.msg = "running";
+      au.netErrors = 0;
+      render();
+      autoFetch(autoURL, "POST").then(function (r) {
+        if (gen !== au.gen) {
+          return;
+        } else if (r.status === 202) {
+          pollLater(gen);
+        } else if (r.status === 429 && au.busy++ < AUTO_BUSY_RETRIES) {
+          // Every run slot is taken; the server expects the client to retry.
+          autoLater(function () {
+            autoStart(true);
+          });
+        } else {
+          autoEnd(AUTO_START[r.status] || "error");
+        }
+      });
+    }
+    function autoPoll(gen) {
+      autoFetch(autoURL, "GET").then(function (r) {
+        var d = r.data;
+        var code = AUTO_START[r.status];
+        if (gen !== au.gen) {
+          return;
+        } else if (r.status === 404) {
+          // The server forgot the run: a background or sleeping tab missed
+          // the orphan window. Not an aligner failure: start again, then say so.
+          if (au.restarts++ < AUTO_MAX_RESTARTS) {
+            autoStart(true);
+          } else {
+            autoEnd("dropped");
+          }
+        } else if ((r.status === 0 && ++au.netErrors <= AUTO_MAX_RESTARTS) || (r.status === 200 && d.state === "running")) {
+          au.netErrors = r.status ? 0 : au.netErrors; // only consecutive failures count
+          render(); // the elapsed time
+          pollLater(gen);
+        } else if (r.status !== 200) {
+          autoEnd(code === "changed" || code === "session" ? code : "error");
+        } else if (d.state === "done") {
+          autoShow(d, r.text);
+        } else if (d.state === "no_suggestion" || d.state === "failed") {
+          autoEnd(d.state === "failed" ? AUTO_FAILED[d.error] || "aligner" : "none", d.retry_after);
+        } else {
+          console.error("preview.js: unknown auto alignment state", d.state);
+          autoEnd("error");
+        }
+      });
+    }
+    // autoShow loads a done run's line starts. The mtime is unix nanoseconds,
+    // beyond 2^53, so it is compared as text: a run of another file version
+    // is discarded, never shown.
+    function autoShow(d, text) {
+      var m = /"mtime"\s*:\s*(\d+)/.exec(text);
+      var ok = Array.isArray(d.lines) && d.lines.length === lines.length && d.lines.every(function (v) {
+        return typeof v === "number" && v >= 0 && isFinite(v);
+      });
+      if (!m || m[1] !== st.mtime) {
+        autoEnd("changed");
+      } else if (!ok) {
+        console.error("preview.js: auto suggestion does not match the lyric lines");
+        autoEnd("error");
+      } else {
+        au.gen++;
+        au.phase = au.msg = "suggested";
+        au.starts = d.lines.slice();
+        render();
+      }
+    }
+    // autoCancel stops a run (telling the server, best effort) or discards a
+    // shown suggestion; either way the previous starts come back.
+    function autoCancel() {
+      if (au.phase === "off") {
+        return;
+      } else if (au.phase === "running") {
+        autoFetch(autoURL + "/cancel", "POST").then(function (r) {
+          if (r.status !== 200) {
+            console.error("preview.js: auto alignment cancel answered", r.status);
+          }
+        });
+      }
+      autoEnd(au.phase === "running" ? "canceled" : "discarded");
+    }
+    if (autoBtn) {
+      autoBtn.addEventListener("click", function () {
+        autoStart(false);
+      });
+      autoStop.addEventListener("click", autoCancel);
+    }
+
     var kb = window.mxKeyboard;
     if (!kb) {
       console.error("preview.js: keyboard.js did not load; editor shortcuts are off");
@@ -793,6 +1035,8 @@
         handler: function () {
           if (dialog.open) {
             dialog.close();
+          } else if (au.phase !== "off") {
+            autoCancel(); // a run is canceled, a suggestion discarded; the offset stays
           } else if (ear.pending()) {
             ear.cancel(); // a pending test is dropped first; the offset stays
           } else {

@@ -129,6 +129,17 @@ templ previewEditor(view PreviewView) {
 		</div>
 		<div id="mx-edit-lyric-scale" class="mx-edit-scale"><span>Lyrics earlier</span><span>Lyrics later</span></div>
 		<div class="mx-edit-foot">
+			// Auto alignment (#1008 S8): offered only with data-auto-url, which the
+			// server sets for an eligible row with an available aligner. The
+			// suggestion is unsaved editor state; nothing here writes.
+			if view.AutoURL != "" {
+				<div class="mx-auto-row">
+					<button type="button" id="mx-auto-run" class="mx-edit-btn">Auto</button>
+					<button type="button" id="mx-auto-stop" class="mx-edit-btn" hidden>Cancel</button>
+					<span id="mx-auto-progress" class="mx-auto-progress" role="progressbar" aria-label="Aligning" hidden></span>
+					<span class="mx-edit-hint">Suggest line timing from the audio. Nothing is written.</span>
+				</div>
+			}
 			<div class="mx-ear-row">
 				// data-ear-unit names the timed unit in the find-by-ear copy (#1222).
 				<button type="button" id="mx-ear-toggle" class="mx-edit-btn mx-ear-toggle" aria-pressed="false" data-ear-unit="line">
