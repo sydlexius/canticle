@@ -386,9 +386,9 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
 				return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)
 			}
-			// The row could not be reopened just now (a worker holds it, or it
-			// is shared with an unfinished file): nothing was linked, so the
-			// result stays pending and is offered again on the next scan.
+			// The row was not reopened (queue.reopenCategoricalForScan owns
+			// the refusal rules): nothing was linked, so the result stays
+			// pending and is offered again on the next scan.
 			if errors.Is(err, queue.ErrCategoricalNotReopened) {
 				refused++
 				continue
@@ -405,7 +405,7 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			"library_id", libraryID, "reopened", reopened)
 	}
 	if refused > 0 {
-		slog.Info("scan: left different-length recordings pending; the shared categorical row could not be reopened yet",
+		slog.Info("scan: left different-length recordings pending; the shared categorical row could not be reopened",
 			"library_id", libraryID, "refused", refused)
 	}
 	// Never leave the suppression silent: a track skipped here produces no work
