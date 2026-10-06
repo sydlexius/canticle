@@ -352,3 +352,111 @@ func TestRun_CursorKeepsHeadPriority(t *testing.T) {
 		t.Fatalf("detector saw %v; want the fresh head row %s", det.paths, fresh)
 	}
 }
+
+// Opted-out rows never produce a candidate, so a capped gather over a long run
+// of them must still walk the whole backlog across cycles, wrap at its end, and
+// settle the cursor back to the start (#1149).
+func TestRun_CursorWalksWholeBacklogAndWraps(t *testing.T) {
+	off := false
+	items := make([]queue.WorkItem, 0, 3*maxGatherPages)
+	for i := range 3 * maxGatherPages {
+		items = append(items, queue.WorkItem{ID: int64(i + 1), DetectInstrumental: &off})
+	}
+	examined := map[int]bool{}
+	bf := New(&offsetProbe{fakeStore: newFakeStore(t, items...), seen: examined}, &fakeDetector{}, &fakeWriter{})
+	opts := Options{GlobalDetectDefault: true, Limit: 1}
+	for run := 0; run < 12; run++ {
+		res, err := bf.Run(context.Background(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Candidates > maxGatherPages*opts.Limit {
+			t.Fatalf("run %d examined %d rows; cap is %d", run, res.Candidates, maxGatherPages*opts.Limit)
+		}
+	}
+	for off := range items {
+		if !examined[off] {
+			t.Fatalf("offset %d never read across 12 capped runs; the cursor skipped it", off)
+		}
+	}
+}
+
+// A tail read that starts mid-backlog and runs off the end wraps to the start
+// of the tail, stops where it began, and resets the cursor.
+func TestRun_CursorWrapStopsWhereTailReadBegan(t *testing.T) {
+	off := false
+	items := make([]queue.WorkItem, 0, 6)
+	for i := range 6 {
+		items = append(items, queue.WorkItem{ID: int64(i + 1), DetectInstrumental: &off})
+	}
+	probe := &offsetProbe{fakeStore: newFakeStore(t, items...), seen: map[int]bool{}}
+	bf := New(probe, &fakeDetector{}, &fakeWriter{})
+	bf.setCursor(3)
+	if _, err := bf.Run(context.Background(), Options{GlobalDetectDefault: true, Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for o := range items {
+		if !probe.seen[o] {
+			t.Fatalf("offset %d not read; the wrap must cover the skipped middle (seen %v)", o, probe.seen)
+		}
+	}
+	bf.cursorMu.Lock()
+	defer bf.cursorMu.Unlock()
+	if bf.cursor != 0 {
+		t.Fatalf("cursor = %d after a completed wrap; want 0", bf.cursor)
+	}
+}
+
+// offsetProbe records every offset a gather reads.
+type offsetProbe struct {
+	*fakeStore
+	seen map[int]bool
+}
+
+func (p *offsetProbe) ListUnclassified(ctx context.Context, opts queue.ListUnclassifiedOptions) ([]queue.WorkItem, error) {
+	p.seen[opts.Offset] = true
+	return p.fakeStore.ListUnclassified(ctx, opts)
+}
+
+// A row repeated across pages (a concurrent writer reordered the set) is
+// examined once, not twice.
+func TestRun_GatherDeduplicatesRowsByID(t *testing.T) {
+	off := false
+	fs := newFakeStore(t,
+		queue.WorkItem{ID: 1, DetectInstrumental: &off},
+		queue.WorkItem{ID: 1, DetectInstrumental: &off},
+	)
+	bf := New(fs, &fakeDetector{}, &fakeWriter{})
+	res, err := bf.Run(context.Background(), Options{GlobalDetectDefault: true, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Candidates != 1 {
+		t.Fatalf("Candidates = %d; want 1 (duplicate id examined once)", res.Candidates)
+	}
+}
+
+// A listing failure on a capped gather is returned wrapped, not swallowed.
+func TestRun_GatherListErrorIsReturned(t *testing.T) {
+	fs := newFakeStore(t)
+	fs.listErr = fmt.Errorf("boom")
+	bf := New(fs, &fakeDetector{}, &fakeWriter{})
+	if _, err := bf.Run(context.Background(), Options{GlobalDetectDefault: true, Limit: 2}); err == nil || !strings.Contains(err.Error(), "list unclassified") {
+		t.Fatalf("err = %v; want a wrapped list error", err)
+	}
+}
+
+// A failing backup-trail callback degrades the trail only: the row still lands.
+func TestRun_OutcomeCallbackErrorDoesNotUndoSettle(t *testing.T) {
+	store := newFakeStore(t, item(1, "/music/a.flac"))
+	res, err := New(store, fakeDetector{res: instrumentalVerdict()}, &fakeWriter{}).Run(context.Background(), Options{
+		GlobalDetectDefault: true,
+		Outcome:             func(Outcome) error { return fmt.Errorf("trail full") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.settleCalls != 1 || res.MarkersWritten != 1 {
+		t.Fatalf("settleCalls=%d markers=%d; want the row settled despite the callback error", store.settleCalls, res.MarkersWritten)
+	}
+}
