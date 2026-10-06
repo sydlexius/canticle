@@ -1,9 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,6 +276,43 @@ func TestRunKeepsBetterSidecarIsNotAFailure(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(lrc); string(got) != "[00:01.00]settled\n" { //nolint:gosec // reason: test path from t.TempDir
 		t.Errorf(".lrc changed: %q", got)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) WriteLRC(models.Song, string, string) error { return errors.New("disk on fire") }
+
+// TestRunFailedSaveLogCarriesTheTrack: the writer's error no longer names the
+// track (#1164), so the failed-save log line must carry it as attributes.
+// Not parallel: it swaps the process-wide default logger.
+func TestRunFailedSaveLogCarriesTheTrack(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	track := models.Track{ArtistName: "Placeholder Artist", TrackName: "Placeholder Track"}
+	inputs := queue.NewInputsQueue()
+	inputs.Push(models.Inputs{Track: track, Outdir: t.TempDir(), Filename: "x.lrc"})
+	fetcher := &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "plain"}}}
+	a := NewApp(fetcher, failingWriter{}, inputs, 0, "dir")
+	if err := a.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	var line string
+	for _, l := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(l, "failed to save lyrics") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no failed-save log line in %q", buf.String())
+	}
+	for _, want := range []string{`artist="Placeholder Artist"`, `track="Placeholder Track"`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("failed-save log line %q lacks %s", line, want)
+		}
 	}
 }
 

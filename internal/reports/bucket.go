@@ -515,7 +515,7 @@ var reasonDefs = []reasonDef{
 	{ReasonCategory{ReasonNone, "No reason recorded"}, nil},
 	{ReasonCategory{ReasonWrite, "Write or file error"}, []string{
 		"write item", "refusing to write", "permission denied", "no space left",
-		"read-only file system", "nothing to save for"}},
+		"read-only file system", "nothing to save"}},
 	{ReasonCategory{ReasonThrottle, "Rate limited or refused"}, append([]string{
 		"rate limited", "unauthorized", "forbidden", "token renewal", "throttled",
 		"circuit open", "lane unavailable", "lane not ready",
