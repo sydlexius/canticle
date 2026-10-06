@@ -11,10 +11,8 @@ import (
 // word-recheck is re-litigating its tier). Shared by ResultsBreakdown and
 // ListBucket's previewability expression, so the two cannot disagree. No
 // leading AND/WHERE.
-const lineTierPredicate = `sync_tier = 'line'
-                      AND NOT ` + retiredPredicate + `
-                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
-                      AND COALESCE(word_timing_state, '') <> 'queued'`
+const lineTierPredicate = lineTierFilePredicate + `
+                      AND ` + timingVerdictExclusion
 
 // ResultsBreakdown is the complete split of the completed population
 // (work_queue rows with status='done', the same rows QueueSummary.Done counts)

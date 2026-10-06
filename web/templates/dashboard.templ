@@ -132,8 +132,15 @@ templ dashResultsTiles(tiles []StatTile) {
 		<div class="mx-dash-tiles" role="list">
 			for _, t := range tiles {
 				<div class="mx-dash-tile" role="listitem" title={ t.Tooltip }>
-					<span class="mx-dash-tile-label">{ t.Label }</span>
-					<span class="mx-dash-tile-value">{ t.Value }</span>
+					if t.Href != "" {
+						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title={ t.Tooltip }>
+							<span class="mx-dash-tile-label">{ t.Label }</span>
+							<span class="mx-dash-tile-value">{ t.Value }</span>
+						</a>
+					} else {
+						<span class="mx-dash-tile-label">{ t.Label }</span>
+						<span class="mx-dash-tile-value">{ t.Value }</span>
+					}
 				</div>
 			}
 		</div>

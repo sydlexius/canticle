@@ -501,8 +501,10 @@ func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 	}
 	body := rec.Body.String()
 	matches := dashTileAnchorRE.FindAllStringSubmatch(body, -1)
-	if want := len(reports.Buckets()) - 1; len(matches) != want {
-		t.Fatalf("tile anchors = %d, want %d (one per bucket except processing)", len(matches), want)
+	// Plus the two Results tiles with an exact filtered view under the default
+	// word rung (Word-synced, Line-synced; #1237).
+	if want := len(reports.Buckets()) - 1 + 2; len(matches) != want {
+		t.Fatalf("tile anchors = %d, want %d (one per bucket except processing, plus two Results tiles)", len(matches), want)
 	}
 	seen := map[string]bool{}
 	for _, m := range matches {
@@ -519,7 +521,7 @@ func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 			t.Errorf("no tile links to bucket %q", b)
 		}
 	}
-	// Results tiles (Instrumental among them) have no bucket: never links.
+	// Instrumental has no bucket + chip combination that yields it: never links.
 	if dashInstrAnchorRE.MatchString(body) {
 		t.Error("Instrumental Results tile must not be a link")
 	}

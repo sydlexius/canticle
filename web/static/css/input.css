@@ -586,6 +586,23 @@ body {
   margin: 0;
 }
 
+/* Links out of a report into the Work Queue / player (#1237); the same token
+   and underline behavior as the queue's own .mx-queue-link. */
+.mx-report-link {
+  color: var(--mx-sidebar-active-text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.mx-report-link:hover,
+.mx-report-link:focus-visible {
+  text-decoration: underline;
+}
+
+.mx-report-links {
+  margin: 0 0 0.75rem;
+}
+
 .mx-report-actions {
   display: flex;
   flex-direction: column;

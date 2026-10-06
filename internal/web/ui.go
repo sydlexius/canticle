@@ -576,9 +576,11 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 		if err != nil {
 			return templates.ReportView{}, err
 		}
+		v.ReviewQueueWrongTimingHref = wrongTimingQueueHref()
 		v.ReviewQueueRows = make([]templates.ReviewQueueRow, 0, len(rows))
 		for _, q := range rows {
 			v.ReviewQueueRows = append(v.ReviewQueueRows, templates.ReviewQueueRow{
+				PreviewHref:    reviewPreviewHref(q),
 				Artist:         q.Artist,
 				Title:          q.Title,
 				Album:          q.Album,
