@@ -233,6 +233,10 @@ type Result struct {
 	// PruneSkipped counts the Pruned (planned) sources an apply did not fully
 	// delete: a row in flight, or moved since it was read. 0 in a dry run.
 	PruneSkipped int
+	// SkippedMalformed counts work_queue rows left out of the sweep because
+	// their output_paths is not valid JSON (#937). They are neither pruned,
+	// relinked nor retired; the rest of the sweep proceeds.
+	SkippedMalformed int
 }
 
 // SweepOptions controls a whole-scope reconciliation sweep.
@@ -430,6 +434,11 @@ type candidate struct {
 	// processing is true when any linked work_queue row is still 'processing',
 	// so the whole source is deferred (the worker owns it) to avoid a half-prune.
 	processing bool
+	// malformed is true when a linked work_queue row's output_paths is not valid
+	// JSON (#937). The source is deferred like a processing one: the row cannot
+	// be read, so deleting or relinking the source could detach it, and the
+	// processing hold would be blind to its status.
+	malformed bool
 	// settled is true when EVERY linked work_queue row has reached a terminal
 	// state -- 'done' OR 'unavailable' (#477) -- so the source is no longer
 	// work, and there is nothing to retire. Distinct from processing: a
@@ -736,7 +745,7 @@ func (p *Pruner) tryNameRelink(ctx context.Context, idx *presentIndex, policy Po
 // ds non-nil selects Directory granularity (see dirMtimes); nil stats every
 // candidate source exactly.
 func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *dirMtimes, dryRun bool, fullPolicy Policy, hooks reportHooks) (Result, error) {
-	bySource, err := p.gatherCandidates(ctx, sc, libraryID)
+	bySource, malformed, err := p.gatherCandidates(ctx, sc, libraryID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -763,6 +772,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		}
 	}
 	var res Result
+	res.SkippedMalformed = malformed
 	var toPrune, aged []PrunedRow
 	listings := map[string][]os.DirEntry{}
 	var toRelink []classifiedRelink
@@ -790,7 +800,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		} else if inFolder {
 			policy = policyInFolder
 		}
-		if c.processing {
+		if c.processing || c.malformed {
 			ds.retry(src) // not recorded: looked at again once the worker lets go
 			// The worker still owns this source; deleting its scan_results row now
 			// would null work_queue.scan_result_id (migration 009, ON DELETE SET
@@ -2274,8 +2284,11 @@ func underAvailableRoot(src string, roots []string) bool {
 // work_queue rows to consider, plus whether any linked work_queue row is
 // 'processing'. Candidates come from scan_results (the library-file authority,
 // library-scoped when requested) and, when unscoped, also from work_queue
-// source paths so link-less rows are covered.
-func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int64) (map[string]*candidate, error) {
+// source paths so link-less rows are covered. The int result counts work_queue
+// rows skipped because their output_paths is not valid JSON (#937): such a row
+// is left untouched rather than aborting the sweep for every other row.
+func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int64) (map[string]*candidate, int, error) {
+	malformed := 0
 	bySource := make(map[string]*candidate)
 
 	srQuery := `SELECT id, library_id, file_path, isrc, recording_mbid FROM scan_results WHERE file_path != ''`
@@ -2313,7 +2326,7 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("prune: gather scan_results: %w", err)
+		return nil, 0, fmt.Errorf("prune: gather scan_results: %w", err)
 	}
 
 	const stateCols = `, COALESCE(wq.outcome_type, ''), COALESCE(wq.sync_tier, ''), COALESCE(wq.timing_outcome, ''), COALESCE(wq.lyric_edited_at, '')` // for the backup record
@@ -2346,6 +2359,15 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		if !sc.matches(source) {
 			return nil
 		}
+		var paths []models.OutputPath
+		if outputPaths != "" {
+			if err := json.Unmarshal([]byte(outputPaths), &paths); err != nil {
+				malformed++
+				slog.Warn("prune: skipping work_queue row with malformed output_paths", "work_queue_id", id, "error", err)
+				ensureCandidate(bySource, source).malformed = true
+				return nil
+			}
+		}
 		c := ensureCandidate(bySource, source)
 		if st.Status = status; status == "processing" {
 			c.processing = true
@@ -2367,12 +2389,6 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		// counts; see markSettled.
 		if status == queue.StatusDone || status == queue.StatusUnavailable {
 			c.doneWorkItems++
-		}
-		var paths []models.OutputPath
-		if outputPaths != "" {
-			if err := json.Unmarshal([]byte(outputPaths), &paths); err != nil {
-				return fmt.Errorf("unmarshal output_paths for work_queue %d: %w", id, err)
-			}
 		}
 		c.workItems = append(c.workItems, workRow{
 			id: id,
@@ -2401,10 +2417,10 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("prune: gather work_queue: %w", err)
+		return nil, 0, fmt.Errorf("prune: gather work_queue: %w", err)
 	}
 	markSettled(bySource)
-	return bySource, nil
+	return bySource, malformed, nil
 }
 
 // markSettled derives candidate.settled once the whole gather is complete.

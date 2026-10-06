@@ -2412,6 +2412,9 @@ func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg
 		if res.PruneSkipped > 0 {
 			slog.Info("path-reconciliation sweep left sources it had planned to prune: a row was in flight or had moved to another file since it was read", "sources", res.PruneSkipped)
 		}
+		if res.SkippedMalformed > 0 {
+			slog.Warn("path-reconciliation sweep skipped work_queue rows whose output_paths is not valid JSON; they were left untouched", "rows", res.SkippedMalformed)
+		}
 		if len(res.Relinked) > 0 {
 			slog.Info("path-reconciliation sweep relinked moved sources", "sources", len(res.Relinked),
 				"first_old_path", res.Relinked[0].OldPath, "first_new_path", res.Relinked[0].NewPath)

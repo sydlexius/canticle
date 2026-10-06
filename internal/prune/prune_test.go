@@ -716,7 +716,7 @@ func TestSweep_SiblingWorkItemIsNotAnOwnershipConflict(t *testing.T) {
 	firstID := mustWorkQueueIDExcept(t, ctx, sqlDB, siblingID)
 
 	// PRECONDITION 1: the candidate aggregation really produces >1 work item.
-	bySource, err := New(sqlDB).gatherCandidates(ctx, scope{}, nil)
+	bySource, _, err := New(sqlDB).gatherCandidates(ctx, scope{}, nil)
 	if err != nil {
 		t.Fatalf("gatherCandidates: %v", err)
 	}
@@ -798,7 +798,7 @@ func TestSweep_RelinkDeclinedWhenWorkItemRacesIntoProcessing(t *testing.T) {
 
 	p := New(sqlDB)
 	// Snapshot the candidate exactly as reconcile would, BEFORE the race.
-	bySource, err := p.gatherCandidates(ctx, scope{}, nil)
+	bySource, _, err := p.gatherCandidates(ctx, scope{}, nil)
 	if err != nil {
 		t.Fatalf("gatherCandidates: %v", err)
 	}
@@ -887,5 +887,65 @@ func TestSetIdentityKeys_IgnoresEmptyOrInvalidOverride(t *testing.T) {
 	}
 	if len(res.Relinked) != 1 {
 		t.Fatalf("Relinked = %d rows, want 1 (default mbid/isrc order preserved)", len(res.Relinked))
+	}
+}
+
+// TestSweep_MalformedOutputPathsSkippedNotFatal (#937): one work_queue row with
+// an unparsable output_paths must not abort the sweep. It is counted and left
+// untouched while a good gone row beside it is still pruned.
+func TestSweep_MalformedOutputPathsSkippedNotFatal(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	good := filepath.Join(root, "ArtistGood", "01. good.flac")
+	bad := filepath.Join(root, "ArtistBad", "01. bad.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, good, "done", "done", "mbid-nomatch", "")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, bad, "done", "done", "mbid-nomatch-2", "")
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET output_paths = ? WHERE source_path = ?`, "{not json", bad); err != nil {
+		t.Fatalf("corrupt output_paths: %v", err)
+	}
+	if err := os.Remove(good); err != nil {
+		t.Fatalf("remove good source: %v", err)
+	}
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep aborted on a malformed row: %v", err)
+	}
+	if res.SkippedMalformed != 1 {
+		t.Fatalf("SkippedMalformed = %d, want 1", res.SkippedMalformed)
+	}
+	if res.WorkItems != 1 {
+		t.Fatalf("pruned work_items = %d, want 1 (the good gone row)", res.WorkItems)
+	}
+	var n int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE source_path = ?`, bad).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("malformed row count = %d (err %v), want 1 (left untouched)", n, err)
+	}
+}
+
+// TestSweep_MalformedGoneSourceIsHeld (#937 review): a malformed row whose source
+// is gone must keep its scan_results row too. Pruning the source would detach
+// the malformed work_queue row it claims to leave untouched.
+func TestSweep_MalformedGoneSourceIsHeld(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	bad := filepath.Join(root, "ArtistBad", "01. bad.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, bad, "done", "done", "mbid-nomatch-3", "")
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET output_paths = ? WHERE source_path = ?`, "{not json", bad); err != nil {
+		t.Fatalf("corrupt output_paths: %v", err)
+	}
+	if err := os.Remove(bad); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.SkippedMalformed != 1 {
+		t.Fatalf("SkippedMalformed = %d, want 1", res.SkippedMalformed)
+	}
+	var wq, sr int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE source_path = ?`, bad).Scan(&wq); err != nil || wq != 1 {
+		t.Fatalf("malformed row count = %d (err %v), want 1", wq, err)
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_results WHERE file_path = ?`, bad).Scan(&sr); err != nil || sr != 1 {
+		t.Fatalf("scan_results count for the malformed source = %d (err %v), want 1 (held)", sr, err)
 	}
 }

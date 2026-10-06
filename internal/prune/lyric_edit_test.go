@@ -115,7 +115,7 @@ func TestApplyRelinks_RolledBackCandidateCountsNoEditHeld(t *testing.T) {
 	presentSRID := seedNamedPresent(t, ctx, sqlDB, libID, moved, "New Artist", goneTitle)
 
 	p := New(sqlDB)
-	bySource, err := p.gatherCandidates(ctx, scope{}, nil)
+	bySource, _, err := p.gatherCandidates(ctx, scope{}, nil)
 	if err != nil {
 		t.Fatalf("gatherCandidates: %v", err)
 	}
