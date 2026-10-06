@@ -430,13 +430,16 @@ func requireOrigBacksCurrent(root *os.Root, rel string, cur fs.FileInfo, orig []
 		return err
 	}
 	c, o := skeletonOf(cb), skeletonOf(orig)
-	inOrig := map[string]bool{}
+	// A multiset: a line the current file repeats more often than the .orig
+	// holds it would lose the extra occurrences with no copy.
+	inOrig := map[string]int{}
 	for _, l := range o.orphans {
-		inOrig[l] = true
+		inOrig[l]++
 	}
 	same := orphansOnly || (reflect.DeepEqual(c.tags, o.tags) && reflect.DeepEqual(c.cues, o.cues))
 	for _, l := range c.orphans {
-		same = same && inOrig[l]
+		inOrig[l]--
+		same = same && inOrig[l] >= 0
 	}
 	if !same {
 		return ErrEditStaleOrig

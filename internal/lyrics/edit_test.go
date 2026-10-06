@@ -593,6 +593,8 @@ func TestApplyEditRefusesStaleOrig(t *testing.T) {
 		{name: "different tags", current: cur, orig: "[ar:a]\n[source:old]\n[00:01.00]one\n[00:05.00]two\n", want: true},
 		{name: "unstamped line only in current", current: cur + "Credit line\n", orig: cur, want: true},
 		{name: "unstamped line in both", current: cur + "Credit line\n", orig: "Credit line\n" + cur},
+		{name: "repeated unstamped line, more in current", current: cur + "Credit line\nCredit line\n", orig: cur + "Credit line\n", want: true},
+		{name: "repeated unstamped line, equal counts", current: cur + "Credit line\nCredit line\n", orig: "Credit line\nCredit line\n" + cur},
 		{name: "generated: stale text is not lost", current: cur, orig: "[00:01.00]uno\n[00:05.00]dos\n", generated: true},
 		{name: "generated: unstamped line is lost", current: cur + "Credit line\n", orig: cur, generated: true, want: true},
 	} {
