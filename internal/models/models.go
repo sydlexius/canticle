@@ -353,6 +353,13 @@ type Inputs struct {
 	// value is the safe side: an unmarked enqueue never reopens a word-recheck
 	// row (#1039). Enqueue-time only; never persisted or serialized.
 	FromScan bool `json:"-"`
+	// ReopenCategorical marks a scan-origin enqueue whose file the scan enqueuer
+	// judged a different recording from the one a 'done' + categorical verdict
+	// was judged against (#972: known duration more than timing.Tolerance from
+	// the judged one). Honored only with FromScan, it lets Enqueue reopen that
+	// row and move it to this file. Set ONLY by scan.Enqueuer.EnqueuePending; the
+	// zero value keeps the verdict. Enqueue-time only; never persisted.
+	ReopenCategorical bool `json:"-"`
 	// DetectInstrumental carries the per-item instrumental-detection decision
 	// resolved at enqueue time (CLI > per-library > global). It is stamped onto the
 	// work_queue row on initial insert. nil means "no decision" -> the worker falls

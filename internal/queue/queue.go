@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -284,6 +285,11 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 	if inputs.FromScan {
 		if err := reopenWordRecheckForScan(ctx, tx, inputs, q.now()); err != nil {
 			return WorkItem{}, err
+		}
+		if inputs.ReopenCategorical {
+			if err := reopenCategoricalForScan(ctx, tx, inputs, q.now()); err != nil {
+				return WorkItem{}, err
+			}
 		}
 	}
 
@@ -2495,28 +2501,39 @@ func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec Timi
 // them keeps the caller from having to distinguish two states it treats alike.
 // providers_version is returned alongside so the caller can decide whether the
 // verdict still speaks for the current provider set.
-func (q *DBQueue) LookupTiming(ctx context.Context, artist, title string) (outcome string, providersVersion int, found bool, err error) {
+//
+// judgedSeconds is the audio duration the verdict was judged against (#972),
+// derived rather than stored: a measured stamp records overrun_magnitude =
+// maxTS - d and overrun_ratio = maxTS / d, so d = magnitude / (ratio - 1). It is
+// 0 (not derivable) when either column is NULL or the ratio is not above 1,
+// which a categorical verdict (ratio >= timing.CategoricalRatio) never is.
+func (q *DBQueue) LookupTiming(ctx context.Context, artist, title string) (outcome string, providersVersion, judgedSeconds int, found bool, err error) {
 	var (
-		storedOutcome sql.NullString
-		storedVersion sql.NullInt64
+		storedOutcome   sql.NullString
+		storedVersion   sql.NullInt64
+		storedMagnitude sql.NullFloat64
+		storedRatio     sql.NullFloat64
 	)
 	row := q.db.QueryRowContext(ctx,
-		`SELECT timing_outcome, providers_version
+		`SELECT timing_outcome, providers_version, overrun_magnitude, overrun_ratio
          FROM work_queue
          WHERE artist_key = ? AND title_key = ?`,
 		normalize.NormalizeKey(artist),
 		normalize.NormalizeKey(title),
 	)
-	switch err := row.Scan(&storedOutcome, &storedVersion); {
+	switch err := row.Scan(&storedOutcome, &storedVersion, &storedMagnitude, &storedRatio); {
 	case errors.Is(err, sql.ErrNoRows):
-		return "", 0, false, nil
+		return "", 0, 0, false, nil
 	case err != nil:
-		return "", 0, false, fmt.Errorf("queue: lookup timing verdict: %w", err)
+		return "", 0, 0, false, fmt.Errorf("queue: lookup timing verdict: %w", err)
 	}
 	if !storedOutcome.Valid || storedOutcome.String == "" {
-		return "", 0, false, nil
+		return "", 0, 0, false, nil
 	}
-	return storedOutcome.String, int(storedVersion.Int64), true, nil
+	if storedMagnitude.Valid && storedRatio.Valid && storedRatio.Float64 > 1 {
+		judgedSeconds = max(0, int(math.Round(storedMagnitude.Float64/(storedRatio.Float64-1))))
+	}
+	return storedOutcome.String, int(storedVersion.Int64), judgedSeconds, true, nil
 }
 
 // CompletionProvenance carries the identifiers and writer version a work_queue
@@ -3841,6 +3858,38 @@ func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 	}
 	if _, err := ReopenDoneRowTx(ctx, tx, id, now); err != nil {
 		return err
+	}
+	return nil
+}
+
+// reopenCategoricalForScan reopens the 'done' + categorical row a scan-origin
+// enqueue collides with when the scan judged the incoming file a different
+// recording (#972, inputs.ReopenCategorical). The verdict spoke for the other
+// recording only and wrote no file, so the row is reopened through
+// ReopenDoneRowTx (verdict, lane and outcome cleared, refused_waits reset) plus
+// timing_stamp_source, and the upsert that follows in the same transaction
+// moves its paths to the incoming file with no worker claim able to land in
+// between. A row in an upgrade trip or word recheck, or no longer done +
+// categorical, is left alone and collides as before.
+func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
+	var id int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT id FROM work_queue WHERE artist_key = ? AND title_key = ?
+           AND status = 'done' AND timing_outcome = 'categorical' AND upgrade_queued = 0
+           AND COALESCE(word_timing_state, '') <> 'queued'`,
+		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName)).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("queue: find categorical row for scan enqueue: %w", err)
+	}
+	if reopened, err := ReopenDoneRowTx(ctx, tx, id, now); err != nil || !reopened {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE work_queue SET timing_stamp_source = NULL WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("queue: clear timing source of reopened row %d: %w", id, err)
 	}
 	return nil
 }

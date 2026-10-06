@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,9 @@ type TimingVerdict struct {
 	// ProvidersVersion is the provider-set generation in effect when the verdict
 	// was reached. It is what makes the suppression expire: see shouldSuppress.
 	ProvidersVersion int
+	// JudgedSeconds is the audio duration the verdict was judged against,
+	// derived from the stored overrun (#972); 0 means not derivable.
+	JudgedSeconds int
 }
 
 // TimingVerdictStore reads the durable timing verdict recorded for a track.
@@ -84,7 +88,7 @@ type TimingVerdictStore interface {
 // scan-package type preserves the existing dependency direction (scan imports
 // queue, never the reverse); TimingVerdicts bridges the two shapes.
 type TimingVerdictReader interface {
-	LookupTiming(ctx context.Context, artist, title string) (outcome string, providersVersion int, found bool, err error)
+	LookupTiming(ctx context.Context, artist, title string) (outcome string, providersVersion, judgedSeconds int, found bool, err error)
 }
 
 // TimingVerdicts adapts a TimingVerdictReader to TimingVerdictStore.
@@ -100,13 +104,14 @@ func (t TimingVerdicts) LookupTiming(ctx context.Context, artist, title string) 
 	if t.Reader == nil {
 		return TimingVerdict{}, false, nil
 	}
-	outcome, version, found, err := t.Reader.LookupTiming(ctx, artist, title)
+	outcome, version, judged, found, err := t.Reader.LookupTiming(ctx, artist, title)
 	if err != nil || !found {
 		return TimingVerdict{}, false, err
 	}
 	return TimingVerdict{
 		Outcome:          timing.TimingOutcome(outcome),
 		ProvidersVersion: version,
+		JudgedSeconds:    judged,
 	}, true, nil
 }
 
@@ -178,6 +183,24 @@ func (e *Enqueuer) shouldSuppress(v TimingVerdict) bool {
 	return v.ProvidersVersion == e.ProvidersVersion
 }
 
+// differentRecording reports whether filePath is provably a different recording
+// from the one a Categorical verdict was judged against (#972): the work_queue
+// row is keyed by artist and title only, so a second copy of the song shares
+// the verdict. Different means both durations are known and differ by MORE than
+// timing.Tolerance, the slack the predicate itself grants. A file whose
+// duration is unknown, or a verdict whose judged duration is not derivable,
+// reads as the same recording, which keeps today's suppression.
+func (e *Enqueuer) differentRecording(ctx context.Context, v TimingVerdict, filePath string) bool {
+	if v.Outcome != timing.Categorical || v.JudgedSeconds <= 0 {
+		return false
+	}
+	seconds, found := e.resolveFileDuration(ctx, filePath)
+	if !found || seconds <= 0 {
+		return false
+	}
+	return math.Abs(float64(seconds-v.JudgedSeconds)) > timing.Tolerance
+}
+
 // resolveFileDuration looks up the exact, independently-measured audio
 // duration for filePath via e.Durations, keyed exactly as the worker records
 // it (recordDuration, internal/worker/worker.go): the canonical
@@ -246,6 +269,9 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 	// operator surface (listing and re-examining quarantined tracks) belongs to
 	// #629 rather than a second mechanism built here.
 	suppressed := 0
+	// Rows enqueued to reopen a categorical verdict judged against a
+	// different-length recording of the same song (#972).
+	reopened := 0
 
 	for _, res := range results {
 		if err := ctx.Err(); err != nil {
@@ -309,12 +335,21 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		// FAILS OPEN by construction: a lookup error is logged and ignored, since
 		// suppression is an optimization and a failed read must never silently
 		// drop work. Losing a track looks identical to having fetched it.
+		//
+		// A verdict judged against a different-length recording speaks only for
+		// that recording (#972), at any provider generation. Skipping the
+		// suppression alone would strand this file (the shared row is done, so
+		// the upsert keeps its paths), so the enqueue asks Enqueue to reopen the
+		// row and move it here.
+		reopenCategorical := false
 		if e.Timing != nil {
 			verdict, found, terr := e.Timing.LookupTiming(ctx, res.Track.ArtistName, res.Track.TrackName)
 			switch {
 			case terr != nil:
 				slog.Debug("scan: timing verdict lookup failed; enqueueing anyway",
 					"result_id", res.ID, "error", terr)
+			case found && e.differentRecording(ctx, verdict, res.FilePath):
+				reopenCategorical = true
 			case found && e.shouldSuppress(verdict):
 				slog.Debug("scan: skipping track quarantined by a categorical timing verdict",
 					"result_id", res.ID, "providers_version", verdict.ProvidersVersion)
@@ -337,6 +372,7 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		// Only this path marks scan origin: ResultInputs (the webhook's
 		// inventory path) also sets ScanResultID but must keep recheck mode.
 		inputs.FromScan = true
+		inputs.ReopenCategorical = reopenCategorical
 		if _, err := e.Queue.Enqueue(ctx, inputs, e.Priority); err != nil {
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
 				return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)
@@ -344,6 +380,13 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w", res.ID, err)
 		}
 		enqueued++
+		if reopenCategorical {
+			reopened++
+		}
+	}
+	if reopened > 0 {
+		slog.Info("scan: reopened categorical verdicts for a different-length recording",
+			"library_id", libraryID, "reopened", reopened)
 	}
 	// Never leave the suppression silent: a track skipped here produces no work
 	// item, no sidecar and no queue row, so without this line an operator has no

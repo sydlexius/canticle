@@ -29,7 +29,7 @@ func TestLookupTimingReturnsStoredVerdict(t *testing.T) {
 		t.Fatalf("SetTimingOutcome: %v", err)
 	}
 
-	outcome, version, found, err := q.LookupTiming(ctx, "Artist", "Song")
+	outcome, version, _, found, err := q.LookupTiming(ctx, "Artist", "Song")
 	if err != nil {
 		t.Fatalf("LookupTiming: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestLookupTimingNormalizesTheKey(t *testing.T) {
 	}
 
 	// Same track, differently spelled by the caller.
-	outcome, _, found, err := q.LookupTiming(ctx, "  HELLO  ", " world ")
+	outcome, _, _, found, err := q.LookupTiming(ctx, "  HELLO  ", " world ")
 	if err != nil {
 		t.Fatalf("LookupTiming: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestLookupTimingRowWithoutVerdictIsNotFound(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
-	_, _, found, err := q.LookupTiming(ctx, "Artist", "Unjudged")
+	_, _, _, found, err := q.LookupTiming(ctx, "Artist", "Unjudged")
 	if err != nil {
 		t.Fatalf("LookupTiming: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestLookupTimingAbsentTrackIsNotAnError(t *testing.T) {
 	ctx := context.Background()
 	q := NewDBQueue(openQueueTestDB(t))
 
-	_, _, found, err := q.LookupTiming(ctx, "Nobody", "Nothing")
+	_, _, _, found, err := q.LookupTiming(ctx, "Nobody", "Nothing")
 	if err != nil {
 		t.Fatalf("LookupTiming on an absent track returned an error: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestSetTimingOutcomeIfIdleSkipsProcessingRow(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("processing row: ok=%v err=%v, want false, nil", ok, err)
 	}
-	if outcome, _, _, _ := q.LookupTiming(ctx, "Artist", "Song"); outcome != "" {
+	if outcome, _, _, _, _ := q.LookupTiming(ctx, "Artist", "Song"); outcome != "" {
 		t.Errorf("processing row was stamped: %q", outcome)
 	}
 	if err := q.Complete(ctx, item.ID); err != nil {
@@ -145,7 +145,7 @@ func TestSetTimingOutcomeIfIdleSkipsProcessingRow(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("idle row: ok=%v err=%v, want true, nil", ok, err)
 	}
-	if outcome, _, _, _ := q.LookupTiming(ctx, "Artist", "Song"); outcome != "categorical" {
+	if outcome, _, _, _, _ := q.LookupTiming(ctx, "Artist", "Song"); outcome != "categorical" {
 		t.Errorf("idle row not stamped: %q", outcome)
 	}
 }

@@ -170,6 +170,7 @@ func TestEnqueuePendingFailsOpenOnTimingLookupError(t *testing.T) {
 type fakeVerdictReader struct {
 	outcome string
 	version int
+	judged  int
 	found   bool
 	err     error
 	artist  string
@@ -177,17 +178,17 @@ type fakeVerdictReader struct {
 	lookups int
 }
 
-func (f *fakeVerdictReader) LookupTiming(_ context.Context, artist, title string) (string, int, bool, error) {
+func (f *fakeVerdictReader) LookupTiming(_ context.Context, artist, title string) (string, int, int, bool, error) {
 	f.lookups++
 	f.artist, f.title = artist, title
-	return f.outcome, f.version, f.found, f.err
+	return f.outcome, f.version, f.judged, f.found, f.err
 }
 
 // The adapter exists so internal/queue never has to import internal/scan (scan
 // imports queue, and reversing that would be a cycle). It must convert the
 // stored outcome STRING into the typed verdict without losing the generation.
 func TestTimingVerdictsAdaptsStoredOutcome(t *testing.T) {
-	r := &fakeVerdictReader{outcome: string(timing.Categorical), version: 9, found: true}
+	r := &fakeVerdictReader{outcome: string(timing.Categorical), version: 9, judged: 200, found: true}
 
 	v, found, err := scan.TimingVerdicts{Reader: r}.LookupTiming(context.Background(), "A", "T")
 	if err != nil {
@@ -201,6 +202,9 @@ func TestTimingVerdictsAdaptsStoredOutcome(t *testing.T) {
 	}
 	if v.ProvidersVersion != 9 {
 		t.Errorf("ProvidersVersion = %d; want 9 -- losing it would break expiry", v.ProvidersVersion)
+	}
+	if v.JudgedSeconds != 200 {
+		t.Errorf("JudgedSeconds = %d; want 200 -- losing it disables the #972 reopen", v.JudgedSeconds)
 	}
 	if r.artist != "A" || r.title != "T" {
 		t.Errorf("reader saw (%q,%q); want the caller's artist/title verbatim", r.artist, r.title)
