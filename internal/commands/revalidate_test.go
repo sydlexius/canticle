@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
@@ -782,5 +784,54 @@ func TestRevalidateApplyLookupFailureExitsNonZero(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "1 work-queue lookup/stamp operation(s) FAILED") {
 		t.Errorf("no aggregate failure line: %s", out.String())
+	}
+}
+
+// failFirstStamps fails the first n stamp writes against the real queue, then
+// delegates, modeling a transient database error after a remediation applied.
+type failFirstStamps struct {
+	*queue.DBQueue
+	n     int
+	calls int
+}
+
+func (f *failFirstStamps) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec queue.TimingRecord) (bool, error) {
+	f.calls++
+	if f.calls <= f.n {
+		return false, errors.New("injected stamp failure")
+	}
+	return f.DBQueue.SetTimingOutcomeIfIdle(ctx, id, rec)
+}
+
+// TestStampRemediatedRowsRetriesATransientStampFailure (#1136): a stamp write
+// that fails after the remediation applied is retried and lands; one that never
+// succeeds is counted failed.
+func TestStampRemediatedRowsRetriesATransientStampFailure(t *testing.T) {
+	old := stampBackoff
+	stampBackoff = time.Millisecond
+	t.Cleanup(func() { stampBackoff = old })
+	for _, tc := range []struct {
+		name       string
+		failures   int
+		wantStamp  int
+		wantFailed int
+		wantRow    string
+	}{
+		{"transient", 2, 1, 0, "categorical"},
+		{"permanent", stampAttempts, 0, 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath, _, lrc := revalidateFixture(t, "[00:10.00]alpha\n")
+			audio := strings.TrimSuffix(lrc, ".lrc") + ".mp3"
+			q := seedRevalidateRow(t, cfgPath, audio)
+			findings := []revalidate.Finding{{Path: "/x/Track.lrc", AudioPath: audio, Outcome: timing.Categorical, Action: "quarantine"}}
+			stamped, _, failed := stampRemediatedRows(t.Context(), &failFirstStamps{DBQueue: q, n: tc.failures}, findings, map[string]struct{}{})
+			if stamped != tc.wantStamp || failed != tc.wantFailed {
+				t.Errorf("stamped=%d failed=%d, want %d and %d", stamped, failed, tc.wantStamp, tc.wantFailed)
+			}
+			if got := revalidateRowOutcome(t, q); got != tc.wantRow {
+				t.Errorf("timing_outcome = %q, want %q", got, tc.wantRow)
+			}
+		})
 	}
 }

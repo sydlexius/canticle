@@ -104,6 +104,9 @@ type timingSweepJob struct {
 	// edit lock. A test seam only: it lets a test order a concurrent edit
 	// against the per-move re-check deterministically.
 	beforeEditLock func(sidecar string)
+	// setTiming, when set, replaces q.SetTimingOutcome for the row stamp. A test
+	// seam only: it injects a write failure without a second queue type.
+	setTiming func(ctx context.Context, id int64, rec queue.TimingRecord) error
 }
 
 // newTimingSweepJob validates the config and builds the cycle's dependencies,
@@ -390,9 +393,16 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 		rec := timingRecordFor(f)
 		rec.Source = queue.TimingSourceSweep // post-settle stamp (#1120): the upgrade sweep gives it one provider pass
 		rec.FileState = fileStateFor(f)      // same UPDATE as the verdict (#1130): both land or neither
-		if serr := j.q.SetTimingOutcome(ctx, f.ID, rec); serr != nil {
-			// Non-fatal per row: the file is already remediated, and an unstamped
-			// row is merely re-judged next cycle, which is idempotent.
+		set := j.q.SetTimingOutcome
+		if j.setTiming != nil {
+			set = j.setTiming
+		}
+		if serr := retryStamp(ctx, func() error { return set(ctx, f.ID, rec) }); serr != nil {
+			// Non-fatal per row, but the retries are exhausted: the file is already
+			// remediated, so the next cycle re-judges it as no_sidecar rather than
+			// recording this verdict (#1136). The window is one failed write that
+			// outlasts stampAttempts tries; a transient busy/locked error clears
+			// well inside it.
 			slog.Warn("timing validation sweep: could not stamp a judged row", "id", f.ID, "error", serr)
 			continue
 		}
@@ -408,6 +418,38 @@ func (j *timingSweepJob) runCycle(ctx context.Context) (timingSweepResult, error
 		res.Remaining = remaining
 	}
 	return res, nil
+}
+
+// stampAttempts and stampBackoff bound the in-process retry of a row stamp that
+// follows an already-applied remediation (#1136). The filesystem change cannot
+// be redone and a later pass cannot rediscover it (the sidecar is gone), so a
+// transient write failure (a busy or locked database) is retried before the
+// stamp is given up on. Variables, not constants, so a test can shrink them.
+var (
+	stampAttempts = 4
+	stampBackoff  = 250 * time.Millisecond
+)
+
+// retryStamp runs op up to stampAttempts times, doubling stampBackoff between
+// tries, and returns the last error. A canceled context stops it at once.
+func retryStamp(ctx context.Context, op func() error) error {
+	var err error
+	delay := stampBackoff
+	for i := 0; i < stampAttempts; i++ {
+		if err = op(); err == nil {
+			return nil
+		}
+		if i == stampAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return err
 }
 
 // holdEditedRows strips the planned remediation from every sidecar that ANY
