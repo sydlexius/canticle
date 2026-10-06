@@ -3499,18 +3499,8 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 			slog.Error("failed to create config directory", "error", err)
 			return 1
 		}
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600) //nolint:gosec // user-selected config path
-		if err != nil {
-			slog.Error("failed to open config file", "error", err)
-			return 1
-		}
-		if err := toml.NewEncoder(f).Encode(cfg); err != nil {
-			_ = f.Close()
+		if err := writeFileAtomic(path, func(w io.Writer) error { return toml.NewEncoder(w).Encode(cfg) }); err != nil {
 			slog.Error("failed to write config", "error", err)
-			return 1
-		}
-		if err := f.Close(); err != nil {
-			slog.Error("failed to close config", "error", err)
 			return 1
 		}
 		// Echo the SAVED value, not the raw input: setConfigValue may normalize
@@ -4035,6 +4025,42 @@ func defaultConfigPath() string {
 		return p
 	}
 	return "config.toml"
+}
+
+// writeFileAtomic writes via a temp file in the destination directory, fsyncs
+// it, and renames over path, so a failed encode or a crash never leaves a
+// truncated config. An existing file's mode is kept; a new file gets 0600.
+func writeFileAtomic(path string, encode func(io.Writer) error) (err error) {
+	mode := os.FileMode(0600)
+	if st, statErr := os.Stat(path); statErr == nil {
+		mode = st.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if err = encode(tmp); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err = tmp.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod temp config: %w", err)
+	}
+	if err = tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temp config: %w", err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err = os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
 }
 
 func splitCSV(s string) []string {
