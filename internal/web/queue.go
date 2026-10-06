@@ -53,10 +53,10 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
 }
 
-// lineTopBucketInfo overrides Finished and Settled when word sync is off
-// (reports.TopRungLine, #1275): line-synced is the best result there.
+// lineTopBucketInfo overrides Finished and Settled when no word tier is reachable
+// (reports.TopRungLine, #1275, #1350: word sync off or no word-capable lane): line-synced is the best result there.
 var lineTopBucketInfo = map[reports.Bucket][2]string{
-	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, the best result with word sync off."},
+	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, the best result available here."},
 	reports.BucketSettled:  {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to line sync."},
 }
 

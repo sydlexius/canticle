@@ -1350,7 +1350,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			server.WithWebUIAuth(bannerCfg, version, webAuth),
 			// Line is the top rung when no enabled lane can serve words (#1350):
 			// read once here from the lane list the worker was built from.
-			server.WithNoWordLane(lyricsDisabled || !providers.AnyWordCapable(laneNames(fetcher, fallbacks))),
+			server.WithNoWordLane(noWordLane(fetcher, lyricsDisabled, fallbacks)),
 			server.WithOnboarding(onboarding),
 			// Back the Reports workspace with the same DB the rest of serve mode
 			// uses; the handler builds a read-only reports.Repo from it (#211).
@@ -2127,6 +2127,20 @@ func providerGeneration(primaryName string, fallbacks []providers.LyricsProvider
 type namedLane string
 
 func (n namedLane) Name() string { return string(n) }
+
+// noWordLane reports whether no enabled lane can serve word timing, which makes
+// line the web UI's top rung (#1350). The lanes are the fallbacks plus the
+// primary, except that the primary is skipped when lyricsDisabled: that is the
+// no-op placeholder still NAMED musixmatch (resolveServeProvider), not a lane
+// that serves anything. fallbackProviders already omits a token-less Musixmatch
+// fallback and every disabled lane, so this reads configuration, never health.
+func noWordLane(primary providers.LyricsProvider, lyricsDisabled bool, fallbacks []providers.LyricsProvider) bool {
+	names := laneNames(primary, fallbacks)
+	if lyricsDisabled {
+		names = names[1:]
+	}
+	return !providers.AnyWordCapable(names)
+}
 
 // laneNames is the primary's name followed by each fallback's.
 func laneNames(primary interface{ Name() string }, fallbacks []providers.LyricsProvider) []string {

@@ -3967,3 +3967,64 @@ func TestAutoAlignerOptionsBuildsClientOnlyWhenEnabledAndURLValid(t *testing.T) 
 		}
 	}
 }
+
+// TestNoWordLane pins the web UI's top-rung derivation (#1350): line is the top
+// rung exactly when no enabled lane can serve word timing. The lane set is built
+// the way runServe builds it (selectedProvider/resolveServeProvider, then
+// fallbackProviders), so a token-less Musixmatch primary or fallback and a
+// disabled lane are judged as production judges them.
+func TestNoWordLane(t *testing.T) {
+	newFetcher := func(string) musixmatch.Fetcher { return fakeFetcher{} }
+	for _, tc := range []struct {
+		name     string
+		primary  string
+		token    string
+		fallback []string
+		disabled []string
+		want     bool
+	}{
+		{"innertube primary, no fallbacks", providers.InnerTube, "", nil, nil, true},
+		{"petitlyrics primary", providers.PetitLyrics, "", nil, nil, false},
+		{"musixmatch primary with token", providers.Musixmatch, "tok", nil, nil, false},
+		{"musixmatch primary no token, no fallback", providers.Musixmatch, "", nil, nil, true},
+		{"musixmatch primary no token, innertube fallback", providers.Musixmatch, "", []string{providers.InnerTube}, nil, true},
+		{"musixmatch primary no token, petitlyrics fallback", providers.Musixmatch, "", []string{providers.PetitLyrics}, nil, false},
+		{"innertube primary, musixmatch fallback no token", providers.InnerTube, "", []string{providers.Musixmatch}, nil, true},
+		{"innertube primary, musixmatch fallback with token", providers.InnerTube, "tok", []string{providers.Musixmatch}, nil, false},
+		{"innertube primary, petitlyrics fallback disabled", providers.InnerTube, "", []string{providers.PetitLyrics}, []string{providers.PetitLyrics}, true},
+		{"innertube primary, petitlyrics fallback", providers.InnerTube, "", []string{providers.PetitLyrics}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{}
+			cfg.Providers.Primary = tc.primary
+			cfg.Providers.FallbackOrder = tc.fallback
+			cfg.Providers.Disabled = tc.disabled
+			primary, selErr := selectedProvider(cfg, tc.token, newFetcher)
+			fetcher, _, lyricsDisabled, err := resolveServeProvider(primary, selErr)
+			if err != nil {
+				t.Fatalf("resolveServeProvider: %v", err)
+			}
+			fallbacks := fallbackProviders(cfg, tc.token, fetcher.Name(), newFetcher)
+			if got := noWordLane(fetcher, lyricsDisabled, fallbacks); got != tc.want {
+				t.Errorf("noWordLane = %v, want %v (lanes %v, lyricsDisabled=%v)",
+					got, tc.want, laneNames(fetcher, fallbacks), lyricsDisabled)
+			}
+		})
+	}
+}
+
+// TestRunServeWiresNoWordLane pins the call site of the #1350 derivation: runServe
+// builds the whole server, so no test can observe the option it passes, and
+// hardcoding WithNoWordLane(false) would otherwise redden nothing. A source-level
+// assertion is the cheapest guard that the derived value, not a constant, is what
+// reaches the handler.
+func TestRunServeWiresNoWordLane(t *testing.T) {
+	src, err := os.ReadFile("commands.go")
+	if err != nil {
+		t.Fatalf("read commands.go: %v", err)
+	}
+	const want = "server.WithNoWordLane(noWordLane(fetcher, lyricsDisabled, fallbacks))"
+	if !strings.Contains(string(src), want) {
+		t.Errorf("runServe must pass %q to the handler options (#1350)", want)
+	}
+}
