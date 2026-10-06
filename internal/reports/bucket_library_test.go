@@ -255,6 +255,7 @@ var reasonShapes = []struct{ err, want string }{
 	{`lyrics: refusing to write: output dir "/mnt/a" does not exist`, ReasonWrite},
 	{`open /mnt/a/b.lrc.tmp: read-only file system`, ReasonWrite},
 	{`nothing to save for "Some Band" - "Some Song"`, ReasonWrite},
+	{`nothing to save`, ReasonWrite},
 	{`worker: write item 5 output x: disk quota exceeded`, ReasonWrite},
 	{`open /mnt/a/b.lrc: permission denied`, ReasonWrite},
 	{`write /mnt/a/b.lrc: no space left on device`, ReasonWrite},

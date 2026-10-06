@@ -29,6 +29,14 @@ func TestWriteLRC_NothingToSave(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error 'nothing to save', got nil")
 	}
+	// #1164: the message lands in work_queue.last_error and from there in a
+	// /metrics label, so it must carry no library metadata.
+	if msg := err.Error(); strings.Contains(msg, "Test Artist") || strings.Contains(msg, "Test Track") {
+		t.Fatalf("error leaks track metadata: %q", msg)
+	}
+	if !strings.Contains(err.Error(), "nothing to save") {
+		t.Fatalf("error lost its stable prefix: %q", err.Error())
+	}
 
 	// No file should have been created on disk
 	entries, err := os.ReadDir(tmpDir)
