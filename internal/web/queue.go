@@ -266,13 +266,13 @@ var queueChipLabels = map[reports.Chip]string{
 // position would hide rows). Line-synced and Mis-synced are mutually exclusive:
 // turning one on turns the other off in the link.
 //
-// No chip shows a count. tier and edited read unindexed columns, so a count is a
-// scan of the done partition per page view. The Settled mis-synced count looks
-// cheap (idx_work_queue_word_generate_missynced) but is not once composed with
-// the Settled bucket clause, which also reads outcome_type, sync_tier and
-// last_error: EXPLAIN QUERY PLAN gives "SEARCH work_queue USING INDEX
-// idx_work_queue_word_generate_missynced (timing_outcome=? AND status=?)", a
-// partial-index search with a table lookup per row, not a COVERING INDEX read.
+// No chip shows a count, and nothing issues one. tier and edited read unindexed
+// columns, so a count is a scan of the done partition per page view. A Settled
+// mis-synced count (hypothetical) would look cheap (idx_work_queue_missynced) but
+// is not once composed with the Settled bucket clause, which also reads
+// outcome_type, sync_tier and last_error: EXPLAIN QUERY PLAN gives "SEARCH
+// work_queue USING INDEX idx_work_queue_missynced (timing_outcome=? AND status=?)",
+// a partial-index search with a table lookup per row, not a COVERING INDEX read.
 func buildQueueChips(bucket reports.Bucket, state queueViewState) []templates.QueueChip {
 	offered := reports.BucketChips(bucket)
 	if len(offered) == 0 {
