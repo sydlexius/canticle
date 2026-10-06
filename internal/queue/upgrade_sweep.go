@@ -30,8 +30,8 @@ const UpgradeMaxHoldDoublings = 3
 // upgradeHoldArgs are the three bound values of the first arm's hold term, in
 // predicate order: the base cut (holdBefore), the base hold in whole seconds
 // (clamped at zero for a future cut, which only ever disables escalation), and the cap.
-func (q *DBQueue) upgradeHoldArgs(holdBefore time.Time) []any {
-	base := int64(q.now().Sub(holdBefore) / time.Second)
+func (q *DBQueue) upgradeHoldArgs(now, holdBefore time.Time) []any {
+	base := int64(now.Sub(holdBefore) / time.Second)
 	return []any{formatTime(holdBefore), max(base, 0), UpgradeMaxHoldDoublings}
 }
 
@@ -69,7 +69,7 @@ func (q *DBQueue) ListUpgradeCandidates(ctx context.Context, holdBefore time.Tim
 	const cols = `SELECT id, upgrade_checked_at, completed_at FROM work_queue WHERE`
 	return q.queryIDs(ctx, "list upgrade candidates", `SELECT id FROM (`+cols+upgradeCandidatePredicate+ //nolint:gosec // reason: G202 -- package-constant fragments, bound parameters only
 		` UNION ALL `+cols+upgradeMissyncedPredicate+`) ORDER BY upgrade_checked_at ASC, completed_at ASC, id ASC LIMIT ?`,
-		append(append([]any{cut}, q.upgradeHoldArgs(holdBefore)...), q.providersVersion, cut, limit)...)
+		append(append([]any{cut}, q.upgradeHoldArgs(q.now(), holdBefore)...), q.providersVersion, cut, limit)...)
 }
 
 // CountUpgradeInFlight counts upgrade trips not yet settled. The 053 trigger
@@ -93,7 +93,6 @@ func (q *DBQueue) CountUpgradeInFlight(ctx context.Context) (int, error) {
 // a pass. A landed trip re-stamps the row at fetch, which leaves the arm.
 func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore time.Time) ([]int64, error) {
 	var flipped []int64
-	holdArgs := q.upgradeHoldArgs(holdBefore)
 	err := db.RetryBatchTx(ctx, "upgrade flip", func() error {
 		flipped = flipped[:0]
 		tx, err := q.db.BeginTx(ctx, nil)
@@ -101,7 +100,11 @@ func (q *DBQueue) MarkUpgradeQueued(ctx context.Context, ids []int64, holdBefore
 			return fmt.Errorf("queue: begin upgrade flip tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		now, cut := formatTime(q.now()), formatTime(holdBefore)
+		// One clock snapshot per attempt feeds the stamps AND the hold args, so a
+		// SQLITE_BUSY retry never reuses a stale escalation cutoff.
+		nowT := q.now()
+		holdArgs := q.upgradeHoldArgs(nowT, holdBefore)
+		now, cut := formatTime(nowT), formatTime(holdBefore)
 		for _, id := range ids {
 			res, err := tx.ExecContext(ctx, `UPDATE work_queue SET status = 'pending', priority = ?, next_attempt_at = ?, attempts = 0,
                  last_error = '', refused_waits = 0, upgrade_queued = 1, upgrade_checked_at = ?

@@ -528,12 +528,13 @@ func TestUpgradeMissCountSettleAndReset(t *testing.T) {
 
 func TestUpgradeCandidateArmUsesDequeueIndex(t *testing.T) {
 	q, dbh := upgradeQueue(t)
-	args := append([]any{"2026-09-22T12:00:00Z"}, q.upgradeHoldArgs(upgradeNow.Add(-7*24*time.Hour))...)
+	args := append([]any{"2026-09-22T12:00:00Z"}, q.upgradeHoldArgs(upgradeNow, upgradeNow.Add(-7*24*time.Hour))...)
 	rows, err := dbh.Query(`EXPLAIN QUERY PLAN SELECT id FROM work_queue WHERE`+upgradeCandidatePredicate, args...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = rows.Close() }()
+	var details []string
 	for rows.Next() {
 		var id, parent, unused int
 		var detail string
@@ -541,8 +542,34 @@ func TestUpgradeCandidateArmUsesDequeueIndex(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("plan: %s", detail)
-		if strings.HasPrefix(detail, "SCAN work_queue") && !strings.Contains(detail, "USING") {
-			t.Fatalf("candidate arm full-scans work_queue: %s", detail)
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	const want = "SEARCH work_queue USING INDEX idx_work_queue_status_next_attempt"
+	if !slices.ContainsFunc(details, func(d string) bool { return strings.HasPrefix(d, want) }) {
+		t.Fatalf("candidate arm plan lacks %q: %v", want, details)
+	}
+	for _, d := range details {
+		if strings.HasPrefix(d, "SCAN work_queue") {
+			t.Fatalf("candidate arm scans work_queue: %s", d)
 		}
+	}
+}
+
+// TestMarkUpgradeQueuedTakesOneClockSnapshotPerAttempt pins that the hold args
+// and the stamps share one q.now() read inside the retry closure, so a retry
+// re-reads the clock instead of reusing a stale escalation cutoff.
+func TestMarkUpgradeQueuedTakesOneClockSnapshotPerAttempt(t *testing.T) {
+	q, dbh := upgradeQueue(t)
+	id := seedUpgradeRow(t, dbh, "snap", "")
+	calls := 0
+	q.now = func() time.Time { calls++; return upgradeNow }
+	if _, err := q.MarkUpgradeQueued(context.Background(), []int64{id}, upgradeNow.Add(-7*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("q.now called %d times in one attempt, want 1", calls)
 	}
 }
