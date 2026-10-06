@@ -33,6 +33,7 @@ import (
 	"github.com/sydlexius/canticle/internal/cache"
 	dbpkg "github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/revalidate"
 	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
@@ -46,8 +47,8 @@ func formatNow() string {
 }
 
 // Filter selects which sidecars are in scope for a purge run. Exactly one of
-// Source (non-empty) or NoSource should be set by the caller; matches checks
-// whichever is configured.
+// Source (non-empty), NoSource or Generated should be set by the caller;
+// selects checks whichever is configured.
 type Filter struct {
 	// Source, when non-empty, matches sidecars whose [source:] tag equals this
 	// value exactly.
@@ -55,6 +56,20 @@ type Filter struct {
 	// NoSource matches sidecars carrying no [source:] tag at all -- the
 	// inherited/foreign cohort canticle never wrote.
 	NoSource bool
+	// Generated matches .lrc files whose header carries
+	// [timing:canticle-aligner], an accepted aligner retiming (#1008). This
+	// cohort is RESTORED from its .orig backup, never deleted or re-fetched
+	// (see restoreGenerated).
+	Generated bool
+}
+
+// selects reports whether a sidecar is in scope: by its [timing:] tag for the
+// generated cohort (line-synced files only), else by its [source:] tag.
+func (f Filter) selects(path string, pt lyrics.ProvenanceTags) bool {
+	if f.Generated {
+		return sidecar.KindOf(path) == sidecar.KindLineSynced && pt.Timing == lyrics.TimingAligner
+	}
+	return f.matches(pt.Source)
 }
 
 // matches reports whether a sidecar's read [source:] value is in scope.
@@ -133,6 +148,8 @@ type Result struct {
 	Scanned           int // .lrc/.txt sidecars examined (symlinks excluded)
 	Matched           int // sidecars whose provenance matched the filter
 	Deleted           int // sidecars actually removed from disk (apply only)
+	Restored          int // generated .lrc files replaced by their .orig backup (apply only; #1008)
+	SkippedNoOriginal int // generated .lrc files left untouched: no regular .orig beside them
 	CompanionsDeleted int // owned word-synced companions removed with their .lrc (apply only; #986)
 	ScanResultsReset  int // scan_results rows reset to 'pending'
 	WorkItemsRequeued int // work_queue rows reset to 'deferred' for re-fetch
@@ -149,6 +166,9 @@ type Result struct {
 	// scan that rediscovers the track could still be served from cache.
 	UnlinkedNoCacheKey int
 	Errors             int // per-file failures (read, report, invalidate, delete, or reset); the run continues past them
+
+	SkippedOriginalDiffers int // generated .lrc files left untouched: the .orig is another lyric (lyrics.SameLyric)
+	RestoredNoRow          int // restores (planned ones, in a dry run) of a file with no work_queue row to unmark
 }
 
 // Purger locates and purges provenance-matched sidecars against db.
@@ -286,7 +306,7 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		return
 	}
 	res.Scanned++
-	if !opts.Filter.matches(pt.Source) {
+	if !opts.Filter.selects(path, pt) {
 		return
 	}
 	res.Matched++
@@ -312,7 +332,9 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 			if link.status == "processing" {
 				processing = true
 			}
-			if !provenanceAgrees(pt.Source, link.lane) {
+			// A restore puts the provider's own bytes back whichever lane the
+			// row credits, so the #827 deletion guard does not apply to it.
+			if !opts.Filter.Generated && !provenanceAgrees(pt.Source, link.lane) {
 				mismatched = append(mismatched, link.id)
 			}
 			if !seenWQ[link.id] {
@@ -353,6 +375,10 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	}
 	if processing {
 		res.SkippedProcessing++
+		return
+	}
+	if opts.Filter.Generated {
+		p.restoreGenerated(ctx, path, pt, scanResultIDs, workItemIDs, opts, res)
 		return
 	}
 
@@ -451,6 +477,194 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	res.Deleted++
 }
 
+// restoreGenerated undoes one accepted aligner retiming (#1008): the .orig the
+// first edit saved is renamed back over the .lrc, a generated companion is
+// removed, and the row's edit mark is cleared. Nothing is re-fetched, so the
+// row's status, scan_results and lyrics_cache are not touched. A file with no
+// regular .orig is counted and left alone: deleting it would lose the lyric.
+// A .orig is saved once and a re-fetch does not refresh it, so one that is not
+// lyrics.SameLyric with the .lrc is counted and nothing is touched or recorded.
+// Order under apply: backup record, edit mark, companion, rename. The mark
+// goes first so a failure after it leaves the marker and the .orig for the
+// next run to finish; the reverse could strand a mark on a restored file no
+// selector finds again. The rename restores the .lrc and consumes the .orig.
+func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.ProvenanceTags, scanResultIDs, workItemIDs []int64, opts Options, res *Result) {
+	orig := path + ".orig"
+	fi, err := lstatFile(orig)
+	if err != nil && !os.IsNotExist(err) {
+		res.Errors++
+		slog.Warn("purge-provenance: stat original failed; skipping", "path", orig, "error", err)
+		return
+	}
+	if err != nil || !fi.Mode().IsRegular() {
+		res.SkippedNoOriginal++
+		return
+	}
+	same, err := lyrics.SameLyric(path, orig)
+	// No scan_results link: find the row by the audio beside the file (#1082).
+	var busy bool
+	if err == nil && same && len(workItemIDs) == 0 {
+		workItemIDs, busy, err = p.rowsBySource(ctx, path)
+	}
+	if err != nil {
+		res.Errors++
+		slog.Warn("purge-provenance: comparing the original or resolving the queue row failed; skipping", "path", path, "error", err)
+		return
+	}
+	if !same {
+		res.SkippedOriginalDiffers++
+		return
+	}
+	if busy {
+		res.SkippedProcessing++
+		return
+	}
+
+	// Only a companion that is both owned and generated goes. Any other one
+	// was not written by the accept, so it stays, and so does the row's tier.
+	companion, keepTier := lyrics.OwnedCompanionOf(path), false
+	recs := []Record{{Path: path, ScanResultIDs: scanResultIDs, WorkItemIDs: workItemIDs}}
+	if companion != "" {
+		if ct, cerr := lyrics.ReadProvenanceTags(companion); cerr != nil || ct.Timing != lyrics.TimingAligner {
+			companion, keepTier = "", true
+		} else {
+			recs = append(recs, Record{Path: companion})
+		}
+	}
+	// Backup-first, as for a delete: the caller's Report fsyncs the generated
+	// bytes before anything changes, and a failure leaves the pair untouched.
+	if opts.Report != nil {
+		for _, rec := range recs {
+			if rerr := opts.Report(rec); rerr != nil {
+				res.Errors++
+				slog.Warn("purge-provenance: report failed; leaving the generated file untouched", "path", rec.Path, "error", rerr)
+				if !opts.DryRun {
+					return
+				}
+			}
+		}
+	}
+	if opts.DryRun {
+		if len(workItemIDs) == 0 {
+			res.RestoredNoRow++
+		}
+		return
+	}
+
+	if len(workItemIDs) > 0 {
+		busy, cerr := p.clearEditMarks(ctx, workItemIDs, keepTier)
+		if cerr != nil {
+			res.Errors++
+			slog.Warn("purge-provenance: clear edit mark failed; leaving the generated file in place", "path", path, "error", cerr)
+			return
+		}
+		if busy {
+			res.SkippedProcessing++
+			return
+		}
+	}
+	if companion != "" {
+		if rerr := removeFile(companion); rerr != nil && !os.IsNotExist(rerr) {
+			res.Errors++
+			slog.Warn("purge-provenance: companion delete failed; leaving the generated file too", "path", companion, "error", rerr)
+			return
+		}
+		res.CompanionsDeleted++
+	}
+	// The .orig was checked by name (Lstat, SameLyric) and is renamed by name:
+	// an entry swapped in between, by a writer to this directory, is installed.
+	if rerr := renameFile(orig, path); rerr != nil {
+		res.Errors++
+		slog.Warn("purge-provenance: restore failed; the edit mark is already cleared, rerun to finish", "path", path, "error", rerr)
+		return
+	}
+	res.Restored++
+	if len(workItemIDs) == 0 {
+		res.RestoredNoRow++
+	}
+	// A .orig saved before the [re:canticle] (#483) or provenance backfill lacks tags the replaced
+	// file had; put them back. Both helpers add absent keys only, and neither adds [upstream:].
+	if _, ierr := lyrics.InjectEditorTag(path); ierr != nil {
+		slog.Warn("purge-provenance: restored, but the editor tag was not re-added", "path", path, "error", ierr)
+	}
+	if _, _, ierr := lyrics.InjectProvenance(path, pt); ierr != nil {
+		slog.Warn("purge-provenance: restored, but the provenance tags were not re-added", "path", path, "error", ierr)
+	}
+}
+
+// rowsBySource returns the rows whose source_path is audio of lrc's stem.
+func (p *Purger) rowsBySource(ctx context.Context, lrc string) (ids []int64, busy bool, retErr error) {
+	var args []any
+	for _, sp := range revalidate.SiblingAudioPaths(lrc) {
+		args = append(args, sp)
+	}
+	//nolint:gosec // reason: G202 - only "?" placeholders are built; every path is a bound parameter
+	rows, err := p.db.QueryContext(ctx, `SELECT id, status FROM work_queue WHERE source_path IN (?`+
+		strings.Repeat(",?", len(args)-1)+`) ORDER BY id`, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("purgeprovenance: rows by source path: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // reason: read-only cursor; rows.Err() below reports any failure
+	for rows.Next() {
+		var id int64
+		var status string
+		if serr := rows.Scan(&id, &status); serr != nil {
+			return nil, false, fmt.Errorf("purgeprovenance: scan row by source path: %w", serr)
+		}
+		ids, busy = append(ids, id), busy || status == "processing"
+	}
+	return ids, busy, rows.Err()
+}
+
+// clearEditMarks forgets the edit mark on the rows of a file about to be
+// restored and records the restored file's tier (line: the editor only ever
+// retimes a line-tier file) unless keepTier. It re-reads each row's status in
+// the transaction and reports busy, changing nothing, if a worker claimed one
+// since the pre-walk index. Retried whole on SQLITE_BUSY like resetRows.
+// The timing verdict may have judged the generated stamps (the serve sweep
+// judges edited rows), so it is cleared in the same statement, with the columns
+// queue.ApplyRemediated's reset clears, and ListTimingBacklog re-judges the file.
+func (p *Purger) clearEditMarks(ctx context.Context, workItemIDs []int64, keepTier bool) (busy bool, retErr error) {
+	retErr = dbpkg.RetryBatchTx(ctx, "purgeprovenance restore", func() error {
+		busy = false
+		tx, err := p.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("purgeprovenance: begin restore tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		for _, id := range workItemIDs {
+			var status string
+			serr := tx.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status)
+			if errors.Is(serr, sql.ErrNoRows) {
+				continue
+			}
+			if serr != nil {
+				return fmt.Errorf("purgeprovenance: re-read work_queue %d: %w", id, serr)
+			}
+			if status == "processing" {
+				busy = true
+				return nil
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE work_queue
+                 SET lyric_offset_ms = NULL,
+                     lyric_edited_at = NULL,
+                     timing_outcome = NULL, overrun_magnitude = NULL, overrun_ratio = NULL, evaluated_at = NULL,
+                     timing_stamp_source = NULL, missync_recheck_generation = NULL,
+                     sync_tier = CASE WHEN ? THEN sync_tier ELSE 'line' END
+                 WHERE id = ?`,
+				keepTier, id); err != nil {
+				return fmt.Errorf("purgeprovenance: clear edit mark %d: %w", id, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("purgeprovenance: commit restore tx: %w", err)
+		}
+		return nil
+	})
+	return busy, retErr
+}
+
 // resetRows resets the coupled scan_results and work_queue rows so the track
 // re-fetches. Mirrors ResetInstrumental's reset shape (status='deferred',
 // priority=-100 so the row is dequeue-eligible but strictly behind foreground
@@ -470,6 +684,8 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 // consistent snapshot and either deletes it or refuses it as disputed.
 // removeFile is the unlink seam, so a test can fail one delete of a pair.
 var removeFile = os.Remove
+
+var renameFile, lstatFile = os.Rename, os.Lstat // the restore's file seams
 
 var errProvenanceChangedUnderfoot = errors.New("purgeprovenance: provenance changed between index and delete")
 

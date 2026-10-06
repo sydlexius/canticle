@@ -339,6 +339,24 @@ canticle scan reconcile-remediated --yes
 - **Aggregate-only output,** and each applied row's prior outcome, tier, timing verdict and status are written to `<db-dir>/reconcile-remediated-backup-<timestamp>.jsonl` (or `--backup`) and fsynced before the row commits. That is enough to undo an `unsynced` or tier change by hand; for a reset it is an audit record only, since the reset also clears word-timing and upgrade state it does not save, and restoring it would bring back a row claiming a missing synced file.
 - **Busy database:** a row that hits `SQLITE_BUSY` is counted as `write_failed` (exit 1) and is not retried, so the backup never gets a duplicate record; rerun the command, which is idempotent.
 
+## Purge provenance
+
+`scan purge-provenance` selects sidecars by a header tag. Dry run by default; `--yes` applies. Exactly one selector is required: `--source <name>`, `--no-source` or `--generated`. `--library` limits the run to one library.
+
+```sh
+canticle scan purge-provenance --source <name>
+canticle scan purge-provenance --generated
+canticle scan purge-provenance --generated --yes
+```
+
+- **`--source <name>` / `--no-source`** (#474) delete each matching `.lrc`/`.txt` (and an owned `.elrc` companion), drop its cache entry and requeue the track for re-fetch.
+- **`--generated`** (#1008) undoes accepted Auto alignment. It selects each `.lrc` whose header carries `[timing:canticle-aligner]` and puts `<name>.lrc.orig` back over it, which restores the provider's own timing. The `.orig` is consumed, an `.elrc` companion is removed only when Canticle owns it (`[by:canticle]`) and it carries the same marker, and the row's edit mark is cleared with its tier recorded as line-synced. Nothing is re-fetched: the queue status and the cache are left as they were. The row's timing verdict is cleared; the serve timing sweep, when enabled, judges the restored file. `[source:]`, `[fetched:]`, `[isrc:]` and `[mbid:]` tags the retimed file had gained since the backup are added to the restored file (`[upstream:]` is not). A hand offset made before the alignment was accepted is not preserved.
+- **Backup no longer matches:** a `.lrc.orig` is saved once, by the first edit, and a later re-fetch does not refresh it. A file is restored only when its backup has the same lines of text in the same order and no differing `[source:]`, `[fetched:]`, `[upstream:]`, `[isrc:]` or `[mbid:]` tag; otherwise it is left untouched and counted as `skipped original differs`.
+- **No queue row:** a restored file with no queue row has no edit mark to clear and is counted as `without a queue row`.
+- **Skipped as well:** a file with no `.lrc.orig` (left untouched, never deleted, counted as `skipped without an original`), symlinked sidecars, and files whose row is in flight (`processing`); rerun later for those. The dry run's `would restore up to` count is an upper bound.
+- **Backup first.** Every file a run replaces or deletes is written, bytes included, to `<db-dir>/purge-provenance-backup-<timestamp>.jsonl` (or `--backup`) and fsynced before it is touched; a failed backup leaves the file alone.
+- **`--generated` output is aggregate-only on stdout:** no track path, only counts and the backup path. A failure warning on stderr names the file's path, as it does for the other selectors.
+
 ## Index Metadata
 
 `scan index-metadata` walks a library's audio files and records the complete tag set into the `audio_metadata` table. This populates audio metadata coverage independently of fetch history - a library that has never had lyrics fetched can be indexed to record ISRC, MBID, duration, and other technical metadata from the audio files themselves.
