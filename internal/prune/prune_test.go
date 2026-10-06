@@ -920,3 +920,32 @@ func TestSweep_MalformedOutputPathsSkippedNotFatal(t *testing.T) {
 		t.Fatalf("malformed row count = %d (err %v), want 1 (left untouched)", n, err)
 	}
 }
+
+// TestSweep_MalformedGoneSourceIsHeld (#937 review): a malformed row whose source
+// is gone must keep its scan_results row too. Pruning the source would detach
+// the malformed work_queue row it claims to leave untouched.
+func TestSweep_MalformedGoneSourceIsHeld(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	bad := filepath.Join(root, "ArtistBad", "01. bad.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, bad, "done", "done", "mbid-nomatch-3", "")
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET output_paths = ? WHERE source_path = ?`, "{not json", bad); err != nil {
+		t.Fatalf("corrupt output_paths: %v", err)
+	}
+	if err := os.Remove(bad); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.SkippedMalformed != 1 {
+		t.Fatalf("SkippedMalformed = %d, want 1", res.SkippedMalformed)
+	}
+	var wq, sr int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE source_path = ?`, bad).Scan(&wq); err != nil || wq != 1 {
+		t.Fatalf("malformed row count = %d (err %v), want 1", wq, err)
+	}
+	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_results WHERE file_path = ?`, bad).Scan(&sr); err != nil || sr != 1 {
+		t.Fatalf("scan_results count for the malformed source = %d (err %v), want 1 (held)", sr, err)
+	}
+}

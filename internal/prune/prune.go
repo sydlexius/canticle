@@ -434,6 +434,11 @@ type candidate struct {
 	// processing is true when any linked work_queue row is still 'processing',
 	// so the whole source is deferred (the worker owns it) to avoid a half-prune.
 	processing bool
+	// malformed is true when a linked work_queue row's output_paths is not valid
+	// JSON (#937). The source is deferred like a processing one: the row cannot
+	// be read, so deleting or relinking the source could detach it, and the
+	// processing hold would be blind to its status.
+	malformed bool
 	// settled is true when EVERY linked work_queue row has reached a terminal
 	// state -- 'done' OR 'unavailable' (#477) -- so the source is no longer
 	// work, and there is nothing to retire. Distinct from processing: a
@@ -795,7 +800,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		} else if inFolder {
 			policy = policyInFolder
 		}
-		if c.processing {
+		if c.processing || c.malformed {
 			ds.retry(src) // not recorded: looked at again once the worker lets go
 			// The worker still owns this source; deleting its scan_results row now
 			// would null work_queue.scan_result_id (migration 009, ON DELETE SET
@@ -2359,6 +2364,7 @@ func (p *Pruner) gatherCandidates(ctx context.Context, sc scope, libraryID *int6
 			if err := json.Unmarshal([]byte(outputPaths), &paths); err != nil {
 				malformed++
 				slog.Warn("prune: skipping work_queue row with malformed output_paths", "work_queue_id", id, "error", err)
+				ensureCandidate(bySource, source).malformed = true
 				return nil
 			}
 		}
