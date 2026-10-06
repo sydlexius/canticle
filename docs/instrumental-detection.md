@@ -38,7 +38,7 @@ failing means "not instrumental", and the track is left as a normal miss.
 |------|-----------|---------|
 | **Music gate** | The **mean** over frames of the summed `instrumental_classes` probabilities is at least `min_confidence`. | `min_confidence = 0.90`, `instrumental_classes = ["Music", "Musical instrument"]` |
 | **Sung-vocal gate** (#384) | The **peak** (max over frames) of *every* `vocal_classes` score stays **below** `vocal_max_confidence`. | `vocal_max_confidence = 0.015`, `vocal_classes` = the singing/vocal set below |
-| **Speech gate** (#403) | The summed frame **mean** of the `speech_classes` stays **below** `speech_max_confidence`. | `speech_max_confidence = 0.20` (provisional), `speech_classes = ["Speech"]` |
+| **Speech gate** (#403) | The summed frame **mean** of the `speech_classes` stays **below** `speech_max_confidence`. | `speech_max_confidence = 0.20`, `speech_classes = ["Speech"]` |
 
 The default `vocal_classes` (sung-vocal) set is:
 
@@ -98,8 +98,7 @@ safe in that direction.
 
 The `vocal_max_confidence = 0.015` default was calibrated on 2026-07-19 against a
 296-track labeled sample scored by the live sidecar: 146 tracks that provider
-lyrics prove are vocal, and 150 provider-labeled instrumentals. The music gate
-was held at `0.90` and the speech gate at `0.20`.
+lyrics prove are vocal, and 150 provider-labeled instrumentals.
 
 **The two classes overlap; there is no clean separating margin.** An earlier
 6-track sample suggested instrumentals topped out near `0.021` while vocals
@@ -116,6 +115,9 @@ instrumental territory. Any threshold trades one error against the other.
 | `0.020` | 2.05% | 58.7% |
 | `0.030` (prior default) | 4.79% | 66.0% |
 
+During this sweep the music gate was held at `0.90` and the speech gate at
+`0.20`.
+
 `0.015` is chosen because it recovers the most true instrumentals available at
 its error level: it costs no additional false instrumentals over `0.010`, and
 the prior `0.030` misclassified 4.79% of known-vocal tracks.
@@ -128,11 +130,33 @@ recovery. At n=146 a single track is 0.68%, so a 1% ceiling is finer than the
 sample can resolve and pushes the sweep into a strictly worse operating point.
 Treat the sweep as evidence, not as the decision.
 
-**The music gate, not the vocal gate, is now the binding constraint on
-recovery.** 32 of the 150 labeled instrumentals (21%) score `music_sum < 0.90`
-and cannot be recovered at any vocal threshold. The speech gate blocks only 2 of
-150. Further recovery gains have to come from `min_confidence`, which has not
-been calibrated.
+**The music gate is the binding constraint on recovery.** The `min_confidence =
+0.90` default was measured against the same 296-track sample with vocal gate held
+at the calibrated 0.015 and speech gate at 0.20:
+
+| `min_confidence` | False instrumental (of 146 known-vocal) | True instrumental recovered (of 150) |
+|---|---|---|
+| 0.95 | 1.37% | 49.3% |
+| **0.90** (default) | **1.37%** | **54.0%** |
+| 0.85 | 1.37% | 57.3% |
+| 0.80 | 2.05% | 60.0% |
+| 0.70 | 2.05% | 60.0% |
+| 0.50 | 2.05% | 60.7% |
+
+Total headroom is about 7 percentage points, and recovery plateaus hard below
+0.80. Lowering `min_confidence` to 0.85 is free in error rate (identical 1.37%
+false-positive rate) and recovers 3.3 additional percentage points, but that is
+5 tracks out of 150 and is marginal at this sample size. **Do not change the
+default.** The value in this measurement is knowing the recovery ceiling, not
+moving the constant.
+
+An earlier analysis claimed the music gate capped recovery at roughly 79%. That
+figure was inferred from 32 of 150 negatives failing the `music_sum >= 0.90`
+gate, not directly measured. The sweep shows the real ceiling is about 61%:
+most of those 32 rows do not become recoverable when the gate lowers, because
+they fail on other grounds too. The speech gate blocks 2 of 150 and has little
+effect on measured instrumental recovery (positive-class `speech_mean` median
+0.0006, orders of magnitude below the 0.20 threshold).
 
 ### Applying a threshold change to rows already decided
 
@@ -168,14 +192,12 @@ both directions - there are no scores to re-decide from. Those need a real
 re-scan via `scan reconcile`.
 
 The speech gate's `speech_max_confidence = 0.20` default (#403) is a different
-kind of value: it is a **provisional placeholder**, chosen conservatively low
-(biased toward "not instrumental", preserving lyric protection) pending a
-calibration sweep over the audit set, in the style of #384, to pin the final
-constant. Because
-the key is configurable, that calibration refines the value without a code change.
-The acceptance criterion - that incidental-speech instrumentals get re-confirmed -
-is satisfied by the **post-calibration** validation gate (re-running the audit
-set), not by the placeholder itself.
+kind of value: it was chosen conservatively low (biased toward "not
+instrumental", preserving lyric protection) and has since been measured against
+the audit set (see the music-gate sweep above): it has little effect on
+measured instrumental recovery, blocking 2 of 150 labeled instrumentals, so
+there is nothing to pin. Because the
+key is configurable, it can still be changed without a code change.
 
 ## Sidecar setup
 
@@ -236,13 +258,20 @@ All keys live under `[instrumental_detector]`; each has an
 | `instrumental_classes` | `["Music", "Musical instrument"]` | Classes summed for the music gate. |
 | `vocal_max_confidence` | `0.015` | Sung-vocal-gate threshold (peak). Values outside (0, 1] reset to `0.015`. |
 | `vocal_classes` | (the singing/vocal set above) | Sung-vocal classes whose peak blocks an instrumental marking. |
-| `speech_max_confidence` | `0.20` (provisional) | Speech-gate threshold (summed mean). Values outside (0, 1] reset to `0.20`. |
+| `speech_max_confidence` | `0.20` | Speech-gate threshold (summed mean). Values outside (0, 1] reset to `0.20`. |
 | `speech_classes` | `["Speech"]` | Speech classes gated on sustained mean (not peak). |
 | `cooldown_seconds` | `5` | Minimum gap between inference calls. `0` disables. |
 
 **The defaults are the calibrated values - do not change the thresholds without a
 specific reason.** They were tuned against real audio (#384) to maximize the
 margin between instrumentals and vocals.
+
+**Recovery is ceiling-bound by the detector, not by the thresholds.** The three
+gates trade against each other in a narrow band (7pp headroom), and the recovery
+ceiling is a property of the acoustic model and feature set rather than any
+constant. The goal of recovering sustained melodic instrumentals that read faintly
+as vocals (#510) is not reachable by threshold tuning alone; it requires a
+different model or different input features.
 
 If you do tune:
 
@@ -251,10 +280,9 @@ If you do tune:
   direction). **Lowering** it marks fewer tracks instrumental (safer, but you may
   re-query genuine instrumentals).
 - **`speech_max_confidence`** controls the speech gate the same way, on the
-  summed Speech **mean**. Its `0.20` default is provisional (see Calibration
-  evidence): raising it tolerates more sustained speech as instrumental; lowering
-  it blocks instrumental marking on less speech. Pin it from a calibration sweep
-  before relying on the exact value.
+  summed Speech **mean**. Its `0.20` default is has little effect on measured
+  instrumental recovery (see Calibration evidence): raising it tolerates more sustained speech
+  as instrumental; lowering it blocks instrumental marking on less speech.
 - **`min_confidence`** rarely needs changing; lowering it admits non-music audio
   (field recordings, spoken word) as "instrumental".
 - **`spread_samples`** trades inference cost for coverage. Fewer windows risks
