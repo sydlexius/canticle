@@ -74,7 +74,14 @@ trap 'rm -rf "$workdir"' EXIT
 # an unknown option is a HARD curl failure, which would break `make ui` on a
 # machine where it used to work. So probe once and degrade to plain --retry:
 # still better than no retry, and never worse than before this script retried.
-CURL_RETRY=(--retry 3 --retry-delay 2 --connect-timeout 15)
+#
+# The window matters as much as the flag: a fixed `--retry 3 --retry-delay 2` gave
+# only ~6s, and a GitHub release-asset 5xx outage lasting longer failed a whole CI
+# job (#1147). Omitting --retry-delay makes curl back off exponentially (1, 2, 4,
+# 8, 16s for --retry 3, ~31s of waiting), and --retry-max-time bounds the total so a
+# hard outage still fails in about a minute and a half. -f keeps a 4xx fatal at once
+# (curl does not retry it), and the checksum comparison below is unaffected.
+CURL_RETRY=(--retry 5 --retry-max-time 90 --connect-timeout 15)
 if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
   CURL_RETRY+=(--retry-all-errors)
 else
