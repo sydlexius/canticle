@@ -213,34 +213,43 @@ var errNotRegular = errors.New("not a regular file")
 // file, so an entry swapped in between the Lstat and the open is refused
 // rather than read. Any error means "could not judge": callers keep the file.
 func readRegularNoFollow(path string, limit ...int64) ([]byte, error) {
+	b, _, err := readRegularNoFollowInfo(path, limit...)
+	return b, err
+}
+
+// readRegularNoFollowInfo is readRegularNoFollow that also returns the
+// FileInfo of the handle the bytes came from, so a caller can later tell
+// whether the entry at path is still that file (os.SameFile).
+func readRegularNoFollowInfo(path string, limit ...int64) ([]byte, os.FileInfo, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, errNotRegular
+		return nil, nil, errNotRegular
 	}
 	f, err := openNoFollow(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
 	hfi, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !hfi.Mode().IsRegular() || !os.SameFile(fi, hfi) {
-		return nil, errNotRegular
+		return nil, nil, errNotRegular
 	}
 	if len(limit) > 0 {
 		// One byte past the cap tells "exactly at" from "over".
 		b, err := io.ReadAll(io.LimitReader(f, limit[0]+1))
 		if err == nil && int64(len(b)) > limit[0] {
-			return nil, errTooLarge
+			return nil, nil, errTooLarge
 		}
-		return b, err
+		return b, hfi, err
 	}
-	return io.ReadAll(f)
+	b, err := io.ReadAll(f)
+	return b, hfi, err
 }
 
 // errTooLarge is readRegularNoFollow's refusal of a file over its optional cap.

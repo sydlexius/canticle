@@ -169,6 +169,9 @@ type Result struct {
 
 	SkippedOriginalDiffers int // generated .lrc files left untouched: the .orig is another lyric (lyrics.SameLyric)
 	RestoredNoRow          int // restores (planned ones, in a dry run) of a file with no work_queue row to unmark
+	// SkippedOtherLibrary counts generated files a --library run left untouched
+	// because the row found by its audio path is not provably that library's.
+	SkippedOtherLibrary int
 }
 
 // Purger locates and purges provenance-matched sidecars against db.
@@ -487,7 +490,10 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 // Order under apply: backup record, edit mark, companion, rename. The mark
 // goes first so a failure after it leaves the marker and the .orig for the
 // next run to finish; the reverse could strand a mark on a restored file no
-// selector finds again. The rename restores the .lrc and consumes the .orig.
+// selector finds again. The restore installs the .orig bytes SameLyric judged
+// (never the .orig pathname) and then consumes the .orig if it is unchanged.
+// On a --library run, a row found only by its audio path must be provably that
+// library's, or the file is left alone (SkippedOtherLibrary).
 func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.ProvenanceTags, scanResultIDs, workItemIDs []int64, opts Options, res *Result) {
 	orig := path + ".orig"
 	fi, err := lstatFile(orig)
@@ -500,11 +506,20 @@ func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.Pr
 		res.SkippedNoOriginal++
 		return
 	}
-	same, err := lyrics.SameLyric(path, orig)
+	// The .orig is read ONCE, through a no-follow handle fstat'ed regular, and
+	// those bytes are both what SameLyric judges and what the restore installs:
+	// an entry swapped in at the .orig name afterwards is never installed.
+	origRaw, origFI, err := lyrics.ReadEditable(orig)
+	var same, busy, outOfScope bool
+	if err == nil {
+		var raw []byte
+		if raw, _, err = lyrics.ReadEditable(path); err == nil {
+			same = lyrics.SameLyric(raw, origRaw)
+		}
+	}
 	// No scan_results link: find the row by the audio beside the file (#1082).
-	var busy bool
 	if err == nil && same && len(workItemIDs) == 0 {
-		workItemIDs, busy, err = p.rowsBySource(ctx, path)
+		workItemIDs, busy, outOfScope, err = p.rowsBySource(ctx, path, opts.LibraryID)
 	}
 	if err != nil {
 		res.Errors++
@@ -513,6 +528,14 @@ func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.Pr
 	}
 	if !same {
 		res.SkippedOriginalDiffers++
+		return
+	}
+	if outOfScope {
+		// A --library run cannot show the row is that library's: leave the file
+		// and the row for an unscoped run, rather than unmark another library's
+		// row or restore the file and strand its mark.
+		res.SkippedOtherLibrary++
+		slog.Warn("purge-provenance: the row found by source path is not provably in the --library scope; skipping", "work_queue_ids", workItemIDs)
 		return
 	}
 	if busy {
@@ -571,9 +594,10 @@ func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.Pr
 		}
 		res.CompanionsDeleted++
 	}
-	// The .orig was checked by name (Lstat, SameLyric) and is renamed by name:
-	// an entry swapped in between, by a writer to this directory, is installed.
-	if rerr := renameFile(orig, path); rerr != nil {
+	// Install the validated bytes through a fresh temp file renamed over the
+	// .lrc, never the .orig pathname itself, so no entry that was not judged
+	// (a symlink or other non-regular file swapped in since) is installed.
+	if rerr := installFile(path, origRaw, origFI.Mode().Perm()); rerr != nil {
 		res.Errors++
 		slog.Warn("purge-provenance: restore failed; the edit mark is already cleared, rerun to finish", "path", path, "error", rerr)
 		return
@@ -582,38 +606,93 @@ func (p *Purger) restoreGenerated(ctx context.Context, path string, pt lyrics.Pr
 	if len(workItemIDs) == 0 {
 		res.RestoredNoRow++
 	}
+	// Consume the .orig only if it is still the file that was read: a swapped
+	// entry is not ours to remove.
+	if cur, lerr := lstatFile(orig); lerr != nil || !os.SameFile(cur, origFI) {
+		res.Errors++
+		slog.Warn("purge-provenance: restored, but the original changed since it was read; leaving it", "path", orig, "error", lerr)
+	} else if rerr := removeFile(orig); rerr != nil && !os.IsNotExist(rerr) {
+		res.Errors++
+		slog.Warn("purge-provenance: restored, but the original was not removed", "path", orig, "error", rerr)
+	}
 	// A .orig saved before the [re:canticle] (#483) or provenance backfill lacks tags the replaced
 	// file had; put them back. Both helpers add absent keys only, and neither adds [upstream:].
-	if _, ierr := lyrics.InjectEditorTag(path); ierr != nil {
+	// A failure is an error (the restored file lacks a tag), though the restore stands.
+	if _, ierr := injectEditorTag(path); ierr != nil {
+		res.Errors++
 		slog.Warn("purge-provenance: restored, but the editor tag was not re-added", "path", path, "error", ierr)
 	}
-	if _, _, ierr := lyrics.InjectProvenance(path, pt); ierr != nil {
+	if _, _, ierr := injectProvenance(path, pt); ierr != nil {
+		res.Errors++
 		slog.Warn("purge-provenance: restored, but the provenance tags were not re-added", "path", path, "error", ierr)
 	}
 }
 
-// rowsBySource returns the rows whose source_path is audio of lrc's stem.
-func (p *Purger) rowsBySource(ctx context.Context, lrc string) (ids []int64, busy bool, retErr error) {
-	var args []any
+// installFile atomically replaces path with data: a fresh exclusive temp file
+// in path's directory is written, synced and given perm, then renamed over
+// path (renameFile). The temp file is removed on any failure.
+func installFile(path string, data []byte, perm os.FileMode) (retErr error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp") //nolint:gosec // reason: path is a sidecar found by the root walk; the temp file is created exclusive
+	if err != nil {
+		return fmt.Errorf("purgeprovenance: create restore temp: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	_, werr := tmp.Write(data)
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if werr == nil {
+		werr = tmp.Chmod(perm)
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("purgeprovenance: write restore temp: %w", werr)
+	}
+	return renameFile(tmp.Name(), path)
+}
+
+// rowsBySource returns the rows whose source_path is audio of lrc's stem. On a
+// --library run (libraryID set) outOfScope reports that some found row is not
+// provably that library's: it has no scan link to the library, or one to
+// another. work_queue carries no library, so its scan links are the only proof.
+func (p *Purger) rowsBySource(ctx context.Context, lrc string, libraryID *int64) (ids []int64, busy, outOfScope bool, retErr error) {
+	var lib any // NULL: every row is in scope
+	if libraryID != nil {
+		lib = *libraryID
+	}
+	args := []any{lib, lib, lib}
 	for _, sp := range revalidate.SiblingAudioPaths(lrc) {
 		args = append(args, sp)
 	}
 	//nolint:gosec // reason: G202 - only "?" placeholders are built; every path is a bound parameter
-	rows, err := p.db.QueryContext(ctx, `SELECT id, status FROM work_queue WHERE source_path IN (?`+
-		strings.Repeat(",?", len(args)-1)+`) ORDER BY id`, args...)
+	rows, err := p.db.QueryContext(ctx, `SELECT id, status,
+	            ? IS NULL OR (
+	              EXISTS (SELECT 1 FROM work_queue_scan_results j JOIN scan_results sr ON sr.id = j.scan_result_id
+	                      WHERE j.work_queue_id = work_queue.id AND sr.library_id = ?)
+	              AND NOT EXISTS (SELECT 1 FROM work_queue_scan_results j JOIN scan_results sr ON sr.id = j.scan_result_id
+	                      WHERE j.work_queue_id = work_queue.id AND sr.library_id <> ?))
+	         FROM work_queue WHERE source_path IN (?`+
+		strings.Repeat(",?", len(args)-4)+`) ORDER BY id`, args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("purgeprovenance: rows by source path: %w", err)
+		return nil, false, false, fmt.Errorf("purgeprovenance: rows by source path: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck // reason: read-only cursor; rows.Err() below reports any failure
 	for rows.Next() {
 		var id int64
 		var status string
-		if serr := rows.Scan(&id, &status); serr != nil {
-			return nil, false, fmt.Errorf("purgeprovenance: scan row by source path: %w", serr)
+		var inScope bool
+		if serr := rows.Scan(&id, &status, &inScope); serr != nil {
+			return nil, false, false, fmt.Errorf("purgeprovenance: scan row by source path: %w", serr)
 		}
-		ids, busy = append(ids, id), busy || status == "processing"
+		ids, busy, outOfScope = append(ids, id), busy || status == "processing", outOfScope || !inScope
 	}
-	return ids, busy, rows.Err()
+	return ids, busy, outOfScope, rows.Err()
 }
 
 // clearEditMarks forgets the edit mark on the rows of a file about to be
@@ -633,29 +712,37 @@ func (p *Purger) clearEditMarks(ctx context.Context, workItemIDs []int64, keepTi
 		}
 		defer func() { _ = tx.Rollback() }()
 		for _, id := range workItemIDs {
-			var status string
-			serr := tx.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status)
-			if errors.Is(serr, sql.ErrNoRows) {
-				continue
-			}
-			if serr != nil {
-				return fmt.Errorf("purgeprovenance: re-read work_queue %d: %w", id, serr)
-			}
-			if status == "processing" {
-				busy = true
-				return nil
-			}
-			if _, err := tx.ExecContext(ctx,
+			// The status guard is IN the UPDATE, so the row it changes is the
+			// row it judged; no separate read can go stale before the write.
+			ur, err := tx.ExecContext(ctx,
 				`UPDATE work_queue
                  SET lyric_offset_ms = NULL,
                      lyric_edited_at = NULL,
                      timing_outcome = NULL, overrun_magnitude = NULL, overrun_ratio = NULL, evaluated_at = NULL,
                      timing_stamp_source = NULL, missync_recheck_generation = NULL,
                      sync_tier = CASE WHEN ? THEN sync_tier ELSE 'line' END
-                 WHERE id = ?`,
-				keepTier, id); err != nil {
+                 WHERE id = ? AND status <> 'processing'`,
+				keepTier, id)
+			if err != nil {
 				return fmt.Errorf("purgeprovenance: clear edit mark %d: %w", id, err)
 			}
+			if n, err := ur.RowsAffected(); err != nil {
+				return fmt.Errorf("purgeprovenance: clear edit mark %d: %w", id, err)
+			} else if n > 0 {
+				continue
+			}
+			// Nothing changed: the row is gone (it cannot be unmarked, nothing
+			// to do) or in flight (busy: roll back, touch no file).
+			var one int
+			serr := tx.QueryRowContext(ctx, `SELECT 1 FROM work_queue WHERE id = ?`, id).Scan(&one)
+			if errors.Is(serr, sql.ErrNoRows) {
+				continue
+			}
+			if serr != nil {
+				return fmt.Errorf("purgeprovenance: re-read work_queue %d: %w", id, serr)
+			}
+			busy = true
+			return tx.Rollback()
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("purgeprovenance: commit restore tx: %w", err)
@@ -686,6 +773,9 @@ func (p *Purger) clearEditMarks(ctx context.Context, workItemIDs []int64, keepTi
 var removeFile = os.Remove
 
 var renameFile, lstatFile = os.Rename, os.Lstat // the restore's file seams
+
+// The restore's tag seams, so a test can fail the re-add after a restore.
+var injectEditorTag, injectProvenance = lyrics.InjectEditorTag, lyrics.InjectProvenance
 
 var errProvenanceChangedUnderfoot = errors.New("purgeprovenance: provenance changed between index and delete")
 

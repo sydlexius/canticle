@@ -374,3 +374,138 @@ func TestRunGenerated_KeepsACompanionItDidNotWrite(t *testing.T) {
 		}
 	}
 }
+
+// A --library run that finds the row only by its audio path restores the file
+// only when the row's scan links prove it is that library's: never when the row
+// is linked to another library alone, nor when it has no link at all.
+func TestRunGenerated_LibraryScopeBoundsTheSourcePathFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, stmt string
+		restored   bool
+	}{
+		// Control: linked to the scoped library under another outdir, so the
+		// index misses it and the fallback finds it, in scope.
+		{"linked here", `UPDATE scan_results SET outdir = 'elsewhere'`, true},
+		{"linked to another library", `UPDATE scan_results SET library_id = (SELECT MAX(id) FROM libraries)`, false},
+		{"linked to both", `UPDATE scan_results SET outdir = 'elsewhere';
+		    INSERT INTO scan_results (library_id, file_path, artist, title, outdir, filename, status)
+		        SELECT MAX(id), 'b', 'Artist', 'Title', 'b', 'b.lrc', 'done' FROM libraries;
+		    INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) SELECT MIN(id), (SELECT MAX(id) FROM scan_results) FROM work_queue`, false},
+		{"not linked", `DELETE FROM work_queue_scan_results`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := genFixture(t, genOriginal, "done")
+			var libA int64
+			if err := g.db.QueryRowContext(g.ctx, `SELECT MIN(id) FROM libraries`).Scan(&libA); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.db.ExecContext(g.ctx, `INSERT INTO libraries (path, name) VALUES ('/other', 'other')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.db.ExecContext(g.ctx, tc.stmt); err != nil {
+				t.Fatal(err)
+			}
+			retimed := mustRead(t, g.lrc)
+			res, err := New(g.db).Run(g.ctx, Options{Roots: []string{g.root}, LibraryID: &libA, Filter: Filter{Generated: true}})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if tc.restored {
+				if res.Restored != 1 || res.SkippedOtherLibrary != 0 || g.row(t) != genRestored {
+					t.Fatalf("result = %+v, row = %q; want the in-scope row unmarked and the file restored", res, g.row(t))
+				}
+				return
+			}
+			if res.SkippedOtherLibrary != 1 || res.Restored != 0 || res.Errors != 0 {
+				t.Fatalf("result = %+v; want one other-library skip and nothing restored", res)
+			}
+			if got := g.row(t); got != genUntouched {
+				t.Errorf("row = %q; a --library run moved a row it cannot show is its own", got)
+			}
+			if mustRead(t, g.lrc) != retimed || !exists(g.lrc+".orig") {
+				t.Error("the generated file or its .orig changed")
+			}
+		})
+	}
+}
+
+// An entry swapped in at the .orig name after it was judged (here a symlink,
+// in the backup callback) is never installed: the .lrc gets the bytes that were
+// judged, as a regular file, and the swapped entry is left and counted.
+func TestRunGenerated_SwappedOriginalIsNotInstalled(t *testing.T) {
+	g := genFixture(t, genOriginal, "done")
+	evil := filepath.Join(g.root, "evil")
+	g.write(t, evil, "[00:01.00]not the lyric\n")
+	res := g.run(t, false, func(Record) error {
+		if err := os.Remove(g.lrc + ".orig"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(evil, g.lrc+".orig"); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		return nil
+	})
+	fi, err := os.Lstat(g.lrc)
+	if err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf(".lrc mode = %v (%v); want a regular file, never the swapped-in entry", fi.Mode(), err)
+	}
+	if got := mustRead(t, g.lrc); got != genOriginal {
+		t.Errorf(".lrc = %q; want the judged original bytes", got)
+	}
+	if res.Restored != 1 || res.Errors != 1 {
+		t.Errorf("result = %+v; want the restore and one error for the changed .orig", res)
+	}
+	if ofi, err := os.Lstat(g.lrc + ".orig"); err != nil || ofi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the swapped .orig was not left in place: %v, %v", ofi, err)
+	}
+}
+
+// The edit-mark clear's status guard is in the UPDATE itself: a row in flight
+// makes the whole clear busy and rolls back the rows already cleared.
+func TestClearEditMarks_InFlightRowRollsBackTheBatch(t *testing.T) {
+	g := genFixture(t, genOriginal, "done")
+	var libID int64
+	if err := g.db.QueryRowContext(g.ctx, `SELECT MIN(id) FROM libraries`).Scan(&libID); err != nil {
+		t.Fatal(err)
+	}
+	_, busyID := seedTrack(t, g.ctx, g.db, libID, filepath.Join(g.root, "Other"), "other.lrc", "processing")
+	if _, err := g.db.ExecContext(g.ctx, `UPDATE work_queue SET lyric_edited_at = '2026-01-02T03:04:05Z' WHERE id = ?`, busyID); err != nil {
+		t.Fatal(err)
+	}
+	busy, err := New(g.db).clearEditMarks(g.ctx, []int64{g.id, busyID}, false)
+	if err != nil || !busy {
+		t.Fatalf("clearEditMarks = busy %v, %v; want busy for the in-flight row", busy, err)
+	}
+	var edited int
+	if err := g.db.QueryRowContext(g.ctx, `SELECT COUNT(*) FROM work_queue WHERE lyric_edited_at IS NOT NULL`).Scan(&edited); err != nil {
+		t.Fatal(err)
+	}
+	if edited != 2 || g.row(t) != genUntouched {
+		t.Errorf("%d rows still marked, row = %q; want both marks kept (the batch rolled back)", edited, g.row(t))
+	}
+	if busy, err := New(g.db).clearEditMarks(g.ctx, []int64{g.id, 1 << 40}, false); err != nil || busy || g.row(t) != genRestored {
+		t.Errorf("clearEditMarks(done, vanished) = busy %v, %v, row %q; want the done row cleared and the vanished one ignored", busy, err, g.row(t))
+	}
+}
+
+// A tag re-add that fails after the restore is an error (the CLI exits
+// non-zero), though the restore itself stands.
+func TestRunGenerated_TagReaddFailureIsAnError(t *testing.T) {
+	for _, failEditor := range []bool{true, false} {
+		g := genFixture(t, genOriginal, "done")
+		t.Cleanup(func() { injectEditorTag, injectProvenance = lyrics.InjectEditorTag, lyrics.InjectProvenance })
+		if failEditor {
+			injectEditorTag = func(string) (bool, error) { return false, os.ErrPermission }
+		} else {
+			injectProvenance = func(string, lyrics.ProvenanceTags) (int, int, error) { return 0, 0, os.ErrPermission }
+		}
+		res := g.run(t, false, nil)
+		injectEditorTag, injectProvenance = lyrics.InjectEditorTag, lyrics.InjectProvenance
+		if res.Restored != 1 || res.Errors != 1 {
+			t.Errorf("failEditor=%v: result = %+v; want the restore and one error", failEditor, res)
+		}
+		if got := mustRead(t, g.lrc); got != genOriginal || exists(g.lrc+".orig") || g.row(t) != genRestored {
+			t.Errorf("failEditor=%v: restore did not stand: .lrc %q, row %q", failEditor, got, g.row(t))
+		}
+	}
+}

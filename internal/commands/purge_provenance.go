@@ -191,12 +191,16 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	if args.Generated {
 		// A restore, not a delete: nothing is requeued, reset or invalidated,
 		// so the summary has no such columns. Counts only.
-		verb, restored := "would restore up to", res.Matched-res.SkippedProcessing-res.SkippedNoOriginal-res.SkippedOriginalDiffers
+		verb, restored := "would restore up to", res.Matched-res.SkippedProcessing-res.SkippedNoOriginal-res.SkippedOriginalDiffers-res.SkippedOtherLibrary
 		if args.Yes {
 			verb, restored = "restored", res.Restored
 		}
 		_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d generated retiming(s)%s (%d without a queue row; %d skipped original differs, %d skipped without an original, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
 			res.Scanned, verb, restored, companionNote, res.RestoredNoRow, res.SkippedOriginalDiffers, res.SkippedNoOriginal, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
+		if res.SkippedOtherLibrary > 0 {
+			_, _ = fmt.Fprintf(out, "note: %d generated retiming(s) were left alone because --library cannot show their queue row belongs to that library; rerun without --library to restore them\n",
+				res.SkippedOtherLibrary)
+		}
 		if backupFile != nil {
 			_, _ = fmt.Fprintf(out, "backup of replaced files written to %s\n", backupPath)
 		}

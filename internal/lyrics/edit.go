@@ -325,29 +325,35 @@ func editLines(path string, roots []string, current bool, expect time.Time) ([]T
 // holds ([fetched:] differs after a re-fetch); the rest ([re:], [ve:], [by:], [timing:]) canticle may add in place.
 var lyricIdentityKeys = map[string]bool{"source": true, "upstream": true, "isrc": true, "mbid": true, "fetched": true}
 
-// SameLyric reports whether the sidecars at a and b hold the same words: as
+// ReadEditable reads the sidecar (or .orig backup) at path the way SameLyric
+// expects it read: no-follow, regular-checked on the handle, and capped at
+// maxEditFileSize. It also returns that handle's FileInfo, so a caller that
+// later acts on the path can check (os.SameFile) that the entry is still the
+// file it read. An unreadable or non-regular entry is an error.
+func ReadEditable(path string) ([]byte, os.FileInfo, error) {
+	b, fi, err := readRegularNoFollowInfo(path, maxEditFileSize)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return b, fi, nil
+}
+
+// SameLyric reports whether the sidecar bodies a and b hold the same words: as
 // many cues (at least one), the same text in order, and no identity tag both carry with
 // different values. Stamps are not compared. ParseTimedLRC makes a BOM, CRLF,
 // stacked stamps and word marks no difference, and an empty cue equals the "♪"
-// ApplyEdit writes for it. Each file is read no-follow, regular-checked and
-// capped at maxEditFileSize; an unreadable one is an error.
-func SameLyric(a, b string) (bool, error) {
-	var docs [2]TimedLRC
-	for i, p := range [2]string{a, b} {
-		raw, err := readRegularNoFollow(p, maxEditFileSize)
-		if err != nil {
-			return false, fmt.Errorf("reading %s: %w", p, err)
-		}
-		docs[i] = ParseTimedLRC(string(raw))
-	}
+// ApplyEdit writes for it. It judges bytes, not paths, so a caller that read
+// them through ReadEditable acts on exactly the bytes that were judged.
+func SameLyric(a, b []byte) bool {
+	docs := [2]TimedLRC{ParseTimedLRC(string(a)), ParseTimedLRC(string(b))}
 	if len(docs[0].Lines) != len(docs[1].Lines) || len(docs[0].Lines) == 0 {
-		return false, nil
+		return false
 	}
 	empty := map[string]bool{"": true, "♪": true}
 	for i, l := range docs[0].Lines {
 		o := docs[1].Lines[i].Text //nolint:gosec // reason: the lengths were compared equal just above
 		if l.Text != o && (!empty[l.Text] || !empty[o]) {
-			return false, nil
+			return false
 		}
 	}
 	seen := map[string]string{}
@@ -355,14 +361,14 @@ func SameLyric(a, b string) (bool, error) {
 		for _, tg := range d.Tags {
 			k, v := strings.ToLower(strings.TrimSpace(tg.Key)), strings.TrimSpace(tg.Value)
 			if w, ok := seen[k]; i == 1 && ok && !strings.EqualFold(v, w) {
-				return false, nil
+				return false
 			}
 			if i == 0 && lyricIdentityKeys[k] {
 				seen[k] = v
 			}
 		}
 	}
-	return true, nil
+	return true
 }
 
 func refuseOrWrap(err error) error {
