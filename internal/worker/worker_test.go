@@ -331,7 +331,9 @@ func (q *fakeQueue) SetTimingOutcome(_ context.Context, id int64, rec queue.Timi
 	return nil
 }
 
-func (q *fakeQueue) SetProviderLane(_ context.Context, id int64, _ string) error {
+// SetProviderLane records the stamp (or the configured error); the lane and
+// upstream values are not kept.
+func (q *fakeQueue) SetProviderLane(_ context.Context, id int64, _, _ string) error {
 	if q.setProviderLaneErr != nil {
 		return q.setProviderLaneErr
 	}
