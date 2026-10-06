@@ -107,6 +107,42 @@ func TestAutoURLAbsentUnlessEveryConditionHolds(t *testing.T) {
 	})
 }
 
+// The Auto controls (#1008 S8) render exactly where data-auto-url does: an
+// editable row with an available aligner. Otherwise they are absent, never
+// shown disabled, while the offset editor itself still renders.
+func TestAutoButtonRenderedOnlyWithAutoURL(t *testing.T) {
+	controls := []string{`id="mx-auto-run"`, `id="mx-auto-stop"`, `id="mx-auto-progress"`}
+	for _, name := range []string{"available", "no aligner attached", "unhealthy"} {
+		t.Run(name, func(t *testing.T) {
+			e := newEditEnv(t)
+			f := &fakeAuto{}
+			if name == "unhealthy" {
+				down := errors.New("down")
+				f.err.Store(&down)
+			}
+			if name != "no aligner attached" {
+				attachSettled(t, e.ui, f)
+			}
+			body := e.page(e.id).Body.String()
+			if !strings.Contains(body, `id="mx-edit"`) {
+				t.Fatal("editor panel missing (control)")
+			}
+			want := name == "available"
+			for _, c := range controls {
+				if got := strings.Contains(body, c); got != want {
+					t.Errorf("%s rendered = %v, want %v", c, got, want)
+				}
+			}
+			if want && !strings.Contains(body, `<button type="button" id="mx-auto-run" class="mx-edit-btn">Auto</button>`) {
+				t.Error("Auto button markup changed: want an enabled type=button labeled Auto")
+			}
+			if want && !strings.Contains(body, `id="mx-auto-stop" class="mx-edit-btn" hidden`) {
+				t.Error("the stop button must start hidden")
+			}
+		})
+	}
+}
+
 // A render must never wait on the sidecar: with a Health that never returns,
 // attach and the page both come back at once and report unavailable.
 func TestAutoRenderNeverWaitsOnAligner(t *testing.T) {

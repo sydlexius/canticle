@@ -272,6 +272,31 @@
   padding-top: 0.875rem;
   border-top: 1px solid var(--mx-surface-border);
 }
+/* Auto alignment (#1008 S8): the run/cancel row, an indeterminate progress
+ * bar while a run is going, and the suggested starts' times in the accent
+ * color so an unsaved suggestion never reads as the file's own timing. */
+.mx-auto-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+.mx-auto-row [hidden] { display: none; }
+.mx-auto-progress {
+  position: relative;
+  overflow: hidden;
+  width: 4rem;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--mx-surface-border);
+}
+.mx-auto-progress::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: 2px;
+  background: var(--mx-accent);
+  animation: mx-auto-slide 1.2s ease-in-out infinite;
+}
+@keyframes mx-auto-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) { .mx-auto-progress::before { animation: none; width: 100%; opacity: 0.6; } }
+.mx-preview-lyrics.is-auto-suggested .mx-preview-time { color: var(--mx-accent); }
 .mx-ear-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; flex-shrink: 0; }
 .mx-ear-toggle[aria-pressed="true"] { border-color: var(--mx-sidebar-active-text); background: var(--mx-sidebar-active-bg); color: var(--mx-sidebar-active-text); }
 .mx-ear-short { display: none; }
@@ -402,6 +427,8 @@
   .mx-preview-layout[data-editor] #mx-edit .mx-edit-foot { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
   .mx-preview-layout[data-editor] #mx-edit .mx-ear-row,
   .mx-preview-layout[data-editor] #mx-edit .mx-edit-actions { display: contents; }
+  .mx-preview-layout[data-editor] #mx-edit .mx-auto-row { grid-column: 1 / -1; gap: 0.5rem; }
+  .mx-preview-layout[data-editor] #mx-edit:not(.is-open) .mx-auto-row .mx-edit-hint { display: none; }
   .mx-preview-layout[data-editor] #mx-edit:not(.is-open) .mx-ear-row .mx-edit-hint,
   .mx-preview-layout[data-editor] #mx-edit .mx-ear-long { display: none; }
   .mx-preview-layout[data-editor] #mx-edit .mx-ear-short { display: inline; }
