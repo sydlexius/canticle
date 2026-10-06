@@ -248,6 +248,9 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 	if res.PruneSkipped > 0 {
 		_, _ = fmt.Fprintf(out, "reconcile-paths: %d planned prune(s) not or only partly applied (the row was in flight, or had moved to another file since it was read); rows already deleted for them are counted above\n", res.PruneSkipped)
 	}
+	if res.SkippedMalformed > 0 {
+		_, _ = fmt.Fprintf(out, "reconcile-paths: skipped %d work_queue row(s) whose output_paths is not valid JSON (#937); they were left untouched\n", res.SkippedMalformed)
+	}
 	// Planned relinks that did not (in a dry run, would not) happen, by reason
 	// (#1262); the counts above already exclude them in both modes.
 	if res.RelinkOwned+res.RelinkChanged > 0 {

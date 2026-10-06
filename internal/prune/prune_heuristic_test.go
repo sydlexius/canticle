@@ -940,7 +940,7 @@ func TestClassify_PoolErrorPropagatesRatherThanRetiring(t *testing.T) {
 	}
 
 	p := New(sqlDB)
-	bySource, err := p.gatherCandidates(ctx, scope{}, nil)
+	bySource, _, err := p.gatherCandidates(ctx, scope{}, nil)
 	if err != nil {
 		t.Fatalf("gatherCandidates: %v", err)
 	}
