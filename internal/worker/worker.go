@@ -69,6 +69,9 @@ type Queue interface {
 	// remains the path for a PROVIDER hit, where the lane is one of several and the
 	// completion is the ordinary multi-step one.
 	SetProviderLane(ctx context.Context, id int64, lane string) error
+	// ClearProviderLane drops a processing row's lane, for a completion served
+	// from a laneless cache entry (#1207).
+	ClearProviderLane(ctx context.Context, id int64) error
 	// SettleInstrumental records a detector-sourced instrumental verdict and
 	// completes the row in ONE transaction (telemetry, instrumental_result=1,
 	// outcome_type, provider_lane, status, scan_results writeback). It is shared
@@ -1723,9 +1726,17 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 
 	ctxNoCancel := context.WithoutCancel(ctx)
 	// A cache hit stamps the lane of the fetch that stored the entry (#1207),
-	// restored by lyrics.DecodeCachedSong; a legacy entry carries none, and
-	// stampLane leaves the row's lane untouched on an empty one.
-	w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
+	// restored by lyrics.DecodeCachedSong. A laneless hit (a legacy entry, the
+	// bucket-0 fallback, a dropped lane) CLEARS the row's lane instead: a retry
+	// can carry the lane an earlier attempt stamped (a verify failure stamps the
+	// rejected lane), and the sidecar just written has no [source:]. Non-fatal.
+	if cacheHit && song.WinningLane == "" {
+		if err := w.queue.ClearProviderLane(ctxNoCancel, item.ID); err != nil {
+			slog.Warn("worker: clear provider lane failed", "id", item.ID, "error", err)
+		}
+	} else {
+		w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
+	}
 	if !cacheHit {
 		// Cached only AFTER a write landed (#553). cache consumers are the
 		// worker's own lookup (a hit re-runs the writer and settles with the

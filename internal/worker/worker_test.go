@@ -340,6 +340,8 @@ func (q *fakeQueue) SetProviderLane(_ context.Context, id int64, _ string) error
 	return nil
 }
 
+func (q *fakeQueue) ClearProviderLane(context.Context, int64) error { return nil }
+
 // SettleInstrumental fakes the shared settle transaction.
 //
 // It deliberately reproduces the REAL method's two defining behaviors rather than

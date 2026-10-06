@@ -146,3 +146,36 @@ func TestRunOnce_LegacyCacheHitSettlesLaneless(t *testing.T) {
 		t.Errorf("sidecar = %q; want the cached words with no [source:]/[fetched:]", body)
 	}
 }
+
+// TestRunOnce_Laneless_CacheHitClearsEarlierLane: a retried row that still
+// carries the lane an earlier attempt stamped (a verify failure stamps the
+// rejected lane before w.fail) and is then settled by a laneless cache hit
+// must complete with NO lane, matching its sidecar's missing [source:].
+func TestRunOnce_Laneless_CacheHitClearsEarlierLane(t *testing.T) {
+	primary := &fakeFetcher{err: errors.New("provider must not be asked on a cache hit")}
+	rig, w := newCacheLaneRig(t, primary)
+	ctx := context.Background()
+	raw, err := json.Marshal(fallthroughSong(90, "legacy entry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.cache.Store(ctx, "Synthetic Artist", "Synthetic Title", normalize.DurationBucket(fallthroughFileSeconds), string(raw)); err != nil {
+		t.Fatalf("seed legacy entry: %v", err)
+	}
+	if _, err := rig.db.Exec(`UPDATE work_queue SET provider_lane = ?, attempts = 1 WHERE id = ?`, providers.PetitLyrics, rig.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if primary.calls != 0 {
+		t.Fatalf("provider calls = %d; want 0 (a cache hit)", primary.calls)
+	}
+	var lane, status string
+	if err := rig.db.QueryRow(`SELECT COALESCE(provider_lane, ''), status FROM work_queue WHERE id = ?`, rig.id).Scan(&lane, &status); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "done" || lane != "" {
+		t.Errorf("row status %q lane %q; want done with the earlier %s lane cleared", status, lane, providers.PetitLyrics)
+	}
+}
