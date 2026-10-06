@@ -448,6 +448,22 @@ func TestAutoRunCancel(t *testing.T) {
 	if rec := e.cancel(); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != canceledBody {
 		t.Errorf("cancel of a finished run = %d %s, want 200 %s", rec.Code, rec.Body, canceledBody)
 	}
+
+	// A run whose row left the eligible set mid-run can still be canceled.
+	fake.script(nil, nil)
+	fake.hold = make(chan struct{})
+	e.start(t)
+	run = e.run()
+	if _, err := e.db.ExecContext(context.Background(), `UPDATE work_queue SET sync_tier = 'word' WHERE id = ?`, e.rowID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := e.cancel(); rec.Code != http.StatusOK || e.run() != nil {
+		t.Fatalf("cancel after the row became ineligible = %d (run %v), want 200 and the run gone", rec.Code, e.run())
+	}
+	ended(t, "after the ineligible-row cancel", run)
+	if rec := e.cancel(); rec.Code != http.StatusNotFound {
+		t.Errorf("cancel of an ineligible row with no run = %d, want 404", rec.Code)
+	}
 	if code, _ := e.poll(); code != http.StatusNotFound {
 		t.Errorf("poll after a finished run was canceled = %d, want 404", code)
 	}

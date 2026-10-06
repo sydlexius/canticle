@@ -130,16 +130,16 @@ func (s *autoRuns) reapLoop(now func() time.Time) {
 
 // cancel forgets the row's run, running or finished, and cancels it. Its
 // goroutine counts under the cap until it has ended.
-func (s *autoRuns) cancel(id int64) (wasRunning bool) {
+func (s *autoRuns) cancel(id int64) (found, wasRunning bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.m[id]
 	if r == nil {
-		return false
+		return false, false
 	}
 	delete(s.m, id)
 	r.cancel()
-	return r.state == autoRunning
+	return true, r.state == autoRunning
 }
 
 // close cancels and forgets every run, stops the reaper and waits, at most
@@ -415,18 +415,25 @@ func (a autoAudio) Read(p []byte) (int, error) {
 // later poll answers 404. Idempotent: with no run it answers the same 200
 // {"state":"canceled"}. The cancel is canticle-side only: it ends this
 // process's request; the sidecar may still finish the alignment it was sent.
+// A registered run is canceled before any row lookup, so one whose row has
+// since left the eligible set (or vanished) can still be stopped.
 func (u *UI) handleAutoCancel(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, editMaxBody)
 	if !enforceSameOrigin(w, r) || !enforceCSRFToken(w, r) {
 		return
 	}
-	id, _, _, ok := u.autoTarget(w, r)
-	if !ok {
-		return
+	found := false
+	if id, err := strconv.ParseInt(r.PathValue("id"), 10, 64); err == nil && u.auto != nil {
+		var running bool
+		if found, running = u.auto.runs.cancel(id); running {
+			slog.Info("auto alignment: run canceled", "id", id)
+		}
 	}
-	if u.auto.runs.cancel(id) {
-		slog.Info("auto alignment: run canceled", "id", id)
+	if !found {
+		if _, _, _, ok := u.autoTarget(w, r); !ok {
+			return
+		}
 	}
 	writeEditJSON(w, http.StatusOK, map[string]string{"state": "canceled"})
 }
