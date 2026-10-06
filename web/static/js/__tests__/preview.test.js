@@ -288,8 +288,9 @@ describe("offset editor helpers", () => {
     const times = () => Array.from(p.doc.querySelectorAll(".mx-preview-time")).map((e) => e.textContent);
     // layout stubs jsdom's missing geometry: the player's bottom edge (document
     // coordinates), the bar's content height and the viewport height.
-    const layout = ({ playerBottom, barHeight, viewport }) => {
+    const layout = ({ playerBottom, barHeight, viewport, bannerBottom = 0 }) => {
       p.win.innerHeight = viewport;
+      $("mx-ear-banner").getBoundingClientRect = () => ({ bottom: bannerBottom });
       $("mx-preview-audio").getBoundingClientRect = () => ({ bottom: playerBottom });
       Object.defineProperty($("mx-edit"), "scrollHeight", { configurable: true, get: () => barHeight });
     };
@@ -419,6 +420,79 @@ describe("offset editor helpers", () => {
       expect(pinFits(300, 261, 568)).toBe(false);
       expect(pinFits(300, 900, 568)).toBe(false); // capped at 70% of the viewport: 568 - 397.6 = 170
       expect(pinFits(150, 900, 568)).toBe(true); // a short header leaves room even for the capped bar
+    });
+
+    it("pinFits: a showing banner must also clear the bar (#1273)", () => {
+      const { pinFits } = mountEditor().win.mxPreviewEdit;
+      expect(pinFits(300, 150, 568, 0)).toBe(true);
+      expect(pinFits(300, 150, 568, 420)).toBe(false); // 428 > 418
+      expect(pinFits(300, 150, 568, 410)).toBe(true);
+    });
+
+    it("unpins while By ear is on and its banner would sit under the bar, and re-pins when it ends", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568, bannerBottom: 450 });
+      e.nudge("+0.1");
+      expect(unpinned(e)).toBe(false); // banner hidden: not counted
+      e.$("mx-ear-toggle").click();
+      expect(e.$("mx-ear-banner").hidden).toBe(false);
+      expect(unpinned(e)).toBe(true);
+      e.$("mx-ear-toggle").click();
+      expect(e.$("mx-ear-banner").hidden).toBe(true);
+      expect(unpinned(e)).toBe(false);
+      expect(e.errors).toEqual([]);
+    });
+
+    it("moves focus from the By ear toggle to Cancel when turning it on unpins the bar (#1273)", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568, bannerBottom: 450 });
+      const toggle = e.$("mx-ear-toggle");
+      toggle.focus();
+      toggle.click();
+      expect(unpinned(e)).toBe(true);
+      expect(e.doc.activeElement).toBe(e.$("mx-ear-cancel"));
+    });
+
+    it("leaves focus on the By ear toggle when the bar stays pinned (#1273)", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568, bannerBottom: 380 });
+      const toggle = e.$("mx-ear-toggle");
+      toggle.focus();
+      toggle.click();
+      expect(unpinned(e)).toBe(false);
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("does not steal focus on the off transition or when focus is elsewhere (#1273)", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568, bannerBottom: 450 });
+      const toggle = e.$("mx-ear-toggle");
+      toggle.click(); // focus never on the toggle
+      expect(unpinned(e)).toBe(true);
+      expect(e.doc.activeElement).not.toBe(e.$("mx-ear-cancel"));
+      toggle.focus();
+      toggle.click(); // off: bar re-pins, focus stays on the toggle
+      expect(unpinned(e)).toBe(false);
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("only moves focus on the on transition, not on later renders while unpinned (#1273)", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568, bannerBottom: 450 });
+      e.$("mx-ear-toggle").click();
+      expect(unpinned(e)).toBe(true);
+      const toggle = e.$("mx-ear-toggle");
+      toggle.focus();
+      e.nudge("+0.1"); // re-renders with By ear still on
+      expect(e.doc.activeElement).toBe(toggle);
+    });
+
+    it("stays pinned while By ear is on when the banner clears the bar", () => {
+      const e = mountEditor({ more: true, keyboard: true, starts: [1000] });
+      e.layout({ playerBottom: 300, barHeight: 150, viewport: 568, bannerBottom: 380 });
+      e.$("mx-ear-toggle").click();
+      expect(e.$("mx-ear-banner").hidden).toBe(false);
+      expect(unpinned(e)).toBe(false);
     });
 
     it("stays pinned while the bar fits, unpins when it would intersect, and re-pins when it shrinks", () => {
