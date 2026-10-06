@@ -369,6 +369,12 @@ const (
 	UpstreamLyricFind  = "lyricfind"
 )
 
+// KnownUpstream reports whether v is a token this lane can write into
+// [upstream:] / work_queue.upstream. The one closed set: the reconcile-upstream
+// backfill accepts nothing else from a sidecar. providers.UpstreamLanes names
+// the lanes that use it; keep the two in step.
+func KnownUpstream(v string) bool { return v == UpstreamMusixmatch || v == UpstreamLyricFind }
+
 // sourceMessagePrefix is the display prefix the API puts in front of the
 // licensor name. MEASURED, not assumed: every observed value took the form
 // "Source: Musixmatch" / "Source: LyricFind".

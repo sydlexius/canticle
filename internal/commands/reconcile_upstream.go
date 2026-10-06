@@ -15,6 +15,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -38,6 +39,7 @@ const (
 	upUnreadable     = "unreadable"
 	upNoTags         = "no_tags"
 	upNoUpstream     = "no_upstream"
+	upUnknownUp      = "unknown_upstream"
 	upSourceMismatch = "source_mismatch"
 )
 
@@ -112,9 +114,9 @@ func runReconcileUpstream(ctx context.Context, out io.Writer, args ScanReconcile
 	if args.Yes {
 		verb = "filled"
 	}
-	_, _ = fmt.Fprintf(out, "reconcile-upstream: scanned %d row(s); %s %d (skipped: source_mismatch=%d no_sidecar=%d unreadable=%d no_tags=%d no_upstream=%d processing=%d raced=%d write_failed=%d)%s\n",
+	_, _ = fmt.Fprintf(out, "reconcile-upstream: scanned %d row(s); %s %d (skipped: source_mismatch=%d no_sidecar=%d unreadable=%d no_tags=%d no_upstream=%d unknown_upstream=%d processing=%d raced=%d write_failed=%d)%s\n",
 		len(candidates), verb, counts[upFill], counts[upSourceMismatch], counts[upNoSidecar], counts[upUnreadable],
-		counts[upNoTags], counts[upNoUpstream], counts[upProcessing], counts["raced"], writeFailed, suffixDryRun(args.Yes))
+		counts[upNoTags], counts[upNoUpstream], counts[upUnknownUp], counts[upProcessing], counts["raced"], writeFailed, suffixDryRun(args.Yes))
 	if applied > 0 {
 		_, _ = fmt.Fprintf(out, "backup of filled rows written to %s\n", backupPath)
 	}
@@ -124,13 +126,17 @@ func runReconcileUpstream(ctx context.Context, out io.Writer, args ScanReconcile
 	return 0
 }
 
-// planUpstream decides one candidate, shared by the dry run and the apply so
-// their counts cannot differ. The sidecar is DERIVED from source_path (stem +
-// .lrc, else the owned .elrc, else .txt), each with the extension-case
-// resolver as its miss fallback; the first regular file found is the one read.
-// A symlink is never read. Returns (upstream, upFill) only when the sidecar's
-// [source:] equals the row's lane and it carries an [upstream:] line; anything
-// else is counted and left NULL, never guessed.
+// planUpstream decides one candidate, shared by the dry run and the apply. On a
+// quiescent database their counts are equal: raced and write_failed can only be
+// non-zero on apply, and "would fill" includes rows that may still race. The
+// sidecar is DERIVED from source_path (stem + .lrc, else the owned .elrc, else
+// .txt; a foreign .elrc is skipped, by lyrics.IsOwnedCompanion), each with the
+// extension-case resolver as its miss fallback; the first regular file found is
+// the one read, and a tagless one does not fall through to the next. It is read
+// through lyrics.ReadProvenanceHeader (no-follow, regular-file-only, bounded),
+// so a symlink or FIFO is never read. Returns (upstream, upFill) only when the
+// sidecar's [source:] equals the row's lane and it carries a KNOWN [upstream:]
+// token; anything else is counted and left NULL, never guessed.
 func planUpstream(c queue.UpstreamCandidate) (upstream, outcome string) {
 	if c.Status == "processing" {
 		return "", upProcessing
@@ -158,7 +164,10 @@ func planUpstream(c queue.UpstreamCandidate) (upstream, outcome string) {
 		case !fi.Mode().IsRegular():
 			return "", upUnreadable
 		}
-		pt, rerr := lyrics.ReadProvenanceTags(path)
+		if ext == ".elrc" && !lyrics.IsOwnedCompanion(path) {
+			continue
+		}
+		pt, rerr := lyrics.ReadProvenanceHeader(path)
 		switch {
 		case rerr != nil:
 			return "", upUnreadable
@@ -168,6 +177,8 @@ func planUpstream(c queue.UpstreamCandidate) (upstream, outcome string) {
 			return "", upSourceMismatch
 		case pt.Upstream == "":
 			return "", upNoUpstream
+		case !innertube.KnownUpstream(pt.Upstream):
+			return "", upUnknownUp
 		}
 		return pt.Upstream, upFill
 	}

@@ -15,13 +15,17 @@ import (
 )
 
 type upstreamSeed struct {
-	name    string
-	lane    string
-	status  string
-	sidecar string // file name beside the audio ("" = none)
-	body    string
-	symlink bool // make the sidecar a symlink to itself-elsewhere
+	name     string
+	lane     string
+	status   string
+	sidecar  string // file name beside the audio ("" = none)
+	body     string
+	symlink  bool   // make the sidecar a symlink to itself-elsewhere
+	also     string // a second sidecar beside the audio ("" = none)
+	alsoBody string
 }
+
+const upOwnedElrc = "[by:canticle]\n" + upTagged
 
 const upTagged = "[source:innertube]\n[upstream:lyricfind]\n[re:canticle]\n[00:01.00]la\n"
 
@@ -55,6 +59,11 @@ func seedUpstream(t *testing.T, specs []upstreamSeed) (ctx context.Context, cfgP
 				t.Fatal(err)
 			}
 		}
+		if s.also != "" {
+			if err := os.WriteFile(filepath.Join(dir, s.also), []byte(s.alsoBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		key := "k" + string(rune('a'+i))
 		var id int64
 		if err := sqlDB.QueryRowContext(ctx,
@@ -84,7 +93,7 @@ func readUpstream(t *testing.T, ctx context.Context, dbPath string, id int64) sq
 
 var upstreamSpecs = []upstreamSeed{
 	{name: "fill", lane: "innertube", status: "done", sidecar: "fill.lrc", body: upTagged},
-	{name: "elrc", lane: "innertube", status: "done", sidecar: "elrc.elrc", body: upTagged},
+	{name: "elrc", lane: "innertube", status: "done", sidecar: "elrc.elrc", body: upOwnedElrc},
 	{name: "txt", lane: "innertube", status: "done", sidecar: "txt.txt", body: upTagged},
 	{name: "variant", lane: "innertube", status: "done", sidecar: "variant.LRC", body: upTagged},
 	{name: "mismatch", lane: "innertube", status: "done", sidecar: "mismatch.lrc", body: "[source:musixmatch]\n[upstream:lyricfind]\n[00:01.00]la\n"},
@@ -93,6 +102,15 @@ var upstreamSpecs = []upstreamSeed{
 	{name: "notags", lane: "innertube", status: "done", sidecar: "notags.lrc", body: "[00:01.00]la\n"},
 	{name: "noupstream", lane: "innertube", status: "done", sidecar: "noupstream.lrc", body: "[source:innertube]\n[00:01.00]la\n"},
 	{name: "inflight", lane: "innertube", status: "processing", sidecar: "inflight.lrc", body: upTagged},
+	// Precedence: the .lrc is read first and a tagless one does not fall through.
+	{name: "precA", lane: "innertube", status: "done", sidecar: "precA.lrc", body: upTagged, also: "precA.txt", alsoBody: strings.Replace(upTagged, "lyricfind", "musixmatch", 1)},
+	{name: "precB", lane: "innertube", status: "done", sidecar: "precB.lrc", body: "[00:01.00]la\n", also: "precB.txt", alsoBody: upTagged},
+	// A foreign .elrc (no [by:canticle]) is not canticle's to trust.
+	{name: "foreign", lane: "innertube", status: "done", sidecar: "foreign.elrc", body: upTagged},
+	// Only the writer's tokens are accepted; the header read is bounded.
+	{name: "unknown", lane: "innertube", status: "done", sidecar: "unknown.lrc", body: "[source:innertube]\n[upstream:bogus]\n[00:01.00]la\n"},
+	{name: "long", lane: "innertube", status: "done", sidecar: "long.lrc", body: "[source:innertube]\n[upstream:" + strings.Repeat("x", 500) + "]\n[00:01.00]la\n"},
+	{name: "huge", lane: "innertube", status: "done", sidecar: "huge.lrc", body: "[source:innertube]\n[upstream:" + strings.Repeat("x", 100<<10) + "]\n[00:01.00]la\n"},
 	{name: "direct", lane: "musixmatch", status: "done", sidecar: "direct.lrc", body: upTagged},
 }
 
@@ -119,19 +137,19 @@ func TestRunReconcileUpstream_DryRunMatchesApply(t *testing.T) {
 	if code := runReconcileUpstream(ctx, &applied, ScanReconcileUpstreamCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
 		t.Fatalf("apply exit=%d out=%s", code, applied.String())
 	}
-	const wantCounts = "scanned 10 row(s); %s 4 (skipped: source_mismatch=1 no_sidecar=1 unreadable=1 no_tags=1 no_upstream=1 processing=1 raced=0 write_failed=0)"
+	const wantCounts = "scanned 16 row(s); %s 5 (skipped: source_mismatch=1 no_sidecar=2 unreadable=1 no_tags=2 no_upstream=2 unknown_upstream=2 processing=1 raced=0 write_failed=0)"
 	if want := strings.Replace(wantCounts, "%s", "would fill", 1); !strings.Contains(dry.String(), want) {
 		t.Errorf("dry counts want %q; got %s", want, dry.String())
 	}
 	if want := strings.Replace(wantCounts, "%s", "filled", 1); !strings.Contains(applied.String(), want) {
 		t.Errorf("apply counts want %q; got %s", want, applied.String())
 	}
-	for _, n := range []string{"fill", "elrc", "txt", "variant"} {
+	for _, n := range []string{"fill", "elrc", "txt", "variant", "precA"} {
 		if got := readUpstream(t, ctx, dbPath, ids[n]); !got.Valid || got.String != "lyricfind" {
 			t.Errorf("%s: upstream = %+v, want lyricfind", n, got)
 		}
 	}
-	for _, n := range []string{"mismatch", "missing", "unreadable", "notags", "noupstream", "inflight", "direct"} {
+	for _, n := range []string{"mismatch", "missing", "unreadable", "notags", "noupstream", "inflight", "direct", "precB", "foreign", "unknown", "long", "huge"} {
 		if got := readUpstream(t, ctx, dbPath, ids[n]); got.Valid {
 			t.Errorf("%s: upstream = %q, want NULL", n, got.String)
 		}
@@ -156,8 +174,8 @@ func TestRunReconcileUpstream_DryRunMatchesApply(t *testing.T) {
 	}
 	b, _ := os.ReadFile(m[0]) //nolint:gosec // test-controlled path
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("want 4 backup records, got %d: %q", len(lines), b)
+	if len(lines) != 5 {
+		t.Fatalf("want 5 backup records, got %d: %q", len(lines), b)
 	}
 	for _, l := range lines {
 		var rec upstreamBackupRecord
@@ -171,8 +189,8 @@ func TestRunReconcileUpstream_DryRunMatchesApply(t *testing.T) {
 	if code := runReconcileUpstream(ctx, &again, ScanReconcileUpstreamCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
 		t.Fatalf("rerun exit=%d", code)
 	}
-	if !regexp.MustCompile(`scanned 6 row\(s\); filled 0`).MatchString(again.String()) {
-		t.Errorf("rerun want 6 scanned, 0 filled; got %s", again.String())
+	if !regexp.MustCompile(`scanned 11 row\(s\); filled 0`).MatchString(again.String()) {
+		t.Errorf("rerun want 11 scanned, 0 filled; got %s", again.String())
 	}
 }
 

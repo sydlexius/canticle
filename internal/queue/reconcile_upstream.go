@@ -15,7 +15,7 @@ type UpstreamCandidate struct {
 
 // ListUpstreamCandidates returns the done or processing rows with a
 // provider_lane in lanes and a NULL upstream. The caller passes the lanes that
-// can report an upstream (providers.ReportsUpstream), so queue holds no second
+// can report an upstream (providers.UpstreamLanes), so queue holds no second
 // list. processing rows are returned so the caller can count them as skipped.
 func (q *DBQueue) ListUpstreamCandidates(ctx context.Context, lanes []string) ([]UpstreamCandidate, error) {
 	if len(lanes) == 0 {
