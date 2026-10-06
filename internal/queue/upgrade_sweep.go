@@ -159,3 +159,28 @@ func (q *DBQueue) SettleUpgradeTrip(ctx context.Context, id int64, answered bool
 	})
 	return settled, err
 }
+
+// SettleStuckUpgradeTrip settles an upgrade trip whose pass reached its lane
+// answer but whose Complete failed through to the attempt cap (#1119). It
+// records the answer like Complete does (a mis_synced row's #1120 pass), and
+// when landed (the writer already replaced the file) it also stamps
+// completed_at with the settle time, so the row's completion time describes
+// the new file rather than the one it replaced. landed=false (the writer kept
+// the better file on disk, nothing was written) leaves completed_at alone,
+// exactly as SettleUpgradeTrip does. false = not a processing upgrade trip.
+func (q *DBQueue) SettleStuckUpgradeTrip(ctx context.Context, id int64, landed bool) (settled bool, err error) {
+	now := formatTime(q.now())
+	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		res, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done', last_error = '', refused_waits = 0, attempts = 0,
+                 completed_at = CASE WHEN ? THEN ? ELSE completed_at END,
+                 missync_recheck_generation = CASE WHEN timing_outcome = 'mis_synced' THEN ? ELSE missync_recheck_generation END
+             WHERE id = ? AND status = 'processing' AND upgrade_queued = 1`, landed, now, q.providersVersion, id)
+		if err != nil {
+			return fmt.Errorf("queue: settle stuck upgrade trip id %d: %w", id, err)
+		}
+		n, err := res.RowsAffected()
+		settled = n > 0
+		return err
+	})
+	return settled, err
+}

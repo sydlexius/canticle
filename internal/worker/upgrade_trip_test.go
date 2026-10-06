@@ -469,3 +469,133 @@ func TestUpgradeTrip_MissyncedKeptRecordsPass(t *testing.T) {
 		t.Fatalf("kept pass re-offered after the hold: %v", got)
 	}
 }
+
+// failingCompleteQueue fails Complete over the real DBQueue, standing in for a
+// persistent DB write error at the end of a pass.
+type failingCompleteQueue struct{ *queue.DBQueue }
+
+func (failingCompleteQueue) Complete(context.Context, int64) error {
+	return errors.New("injected complete failure")
+}
+
+// TestUpgradeTrip_CompleteFailureAppliesAttemptCap (#1119): a trip whose
+// Complete fails counts toward upgradeMaxAttempts and settles at the cap
+// instead of retrying as an ordinary failed row forever.
+func TestUpgradeTrip_CompleteFailureAppliesAttemptCap(t *testing.T) {
+	t.Run("below the cap the trip fails and stays armed", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+		r.w.queue = failingCompleteQueue{r.q}
+		r.run(t)
+		if got := r.row(t); got != "failed outcome=synced timing=ok lane=musixmatch misses=14 armed=1" {
+			t.Fatalf("row = %q, want failed and still armed", got)
+		}
+	})
+	t.Run("at the cap the trip settles", func(t *testing.T) {
+		r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+		r.w.queue = failingCompleteQueue{r.q}
+		if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ? WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.db.Exec(`UPDATE work_queue SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, r.id); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.w.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce = %v, want nil after a successful cap settle (the drain continues)", err)
+		}
+		if r.w.consecutiveFailures != 0 {
+			t.Fatalf("consecutiveFailures = %d, want 0 after a cap settle", r.w.consecutiveFailures)
+		}
+		if got := r.row(t); got != "done outcome=synced timing=ok lane=musixmatch misses=14 armed=0" {
+			t.Fatalf("row = %q, want settled done describing the written file", got)
+		}
+		if got := r.completedAt(t); got == "2026-08-01T00:00:00Z" {
+			t.Fatalf("completed_at = %q, want re-stamped for the file this pass wrote", got)
+		}
+	})
+}
+
+// TestUpgradeTrip_KeptCompleteFailureAtCapRecordsPass: a post-settle mis_synced
+// trip whose result the writer KEPT out and whose Complete then fails to the cap
+// was answered by the lanes, so the settle records the #1120 pass (as Complete
+// would) and, since nothing was written, leaves completed_at on the kept file.
+func TestUpgradeTrip_KeptCompleteFailureAtCapRecordsPass(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "correctly timed")})
+	dir := filepath.Dir(r.txt)
+	if err := os.Remove(r.txt); err != nil {
+		t.Fatal(err)
+	}
+	word := "[00:10.00]<00:10.00>kept <00:11.00>word <00:12.00>line\n[02:00.00]<02:00.00>past <02:01.00>the <02:02.00>end\n"
+	if err := os.WriteFile(filepath.Join(dir, "track.lrc"), []byte(word), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.db.Exec(`UPDATE work_queue SET outcome_type = 'synced', sync_tier = 'word' WHERE id = ?`, r.id); err != nil {
+		t.Fatal(err)
+	}
+	r.postSettleMissynced(t)
+	r.w.queue = failingCompleteQueue{r.q}
+	if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ? WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	if got, want := r.row(t), "done outcome=synced timing=mis_synced lane= misses=14 armed=0"; got != want {
+		t.Fatalf("row = %q, want %q", got, want)
+	}
+	if g := r.marker(t); !g.Valid || g.Int64 != 5 {
+		t.Fatalf("pass marker = %+v, want 5 (a kept result is an answer)", g)
+	}
+	if got := r.completedAt(t); got != "2026-08-01T00:00:00Z" {
+		t.Fatalf("completed_at = %q, want the kept file's time untouched", got)
+	}
+}
+
+// completedAt is the row's completed_at as stored.
+func (r *upgradeRig) completedAt(t *testing.T) string {
+	t.Helper()
+	var s sql.NullString
+	if err := r.db.QueryRow(`SELECT completed_at FROM work_queue WHERE id = ?`, r.id).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s.String
+}
+
+// failingSettleQueue fails Complete and the cap settle, so the cap path must
+// fall through to Fail and surface the error.
+type failingSettleQueue struct{ failingCompleteQueue }
+
+func (failingSettleQueue) SettleStuckUpgradeTrip(context.Context, int64, bool) (bool, error) {
+	return false, errors.New("injected settle failure")
+}
+
+// TestUpgradeTrip_CapSettleFailureStillFails: when the cap settle itself fails
+// the row is failed (never wedged) and the error is returned.
+func TestUpgradeTrip_CapSettleFailureStillFails(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+	r.w.queue = failingSettleQueue{failingCompleteQueue{r.q}}
+	if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ?, next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.w.RunOnce(context.Background()); err == nil {
+		t.Fatal("RunOnce = nil, want the error when the cap settle fails")
+	}
+	if r.w.consecutiveFailures != 1 {
+		t.Fatalf("consecutiveFailures = %d, want 1", r.w.consecutiveFailures)
+	}
+	if got := r.row(t); got != "failed outcome=synced timing=ok lane=musixmatch misses=14 armed=1" {
+		t.Fatalf("row = %q, want failed and still armed", got)
+	}
+}
+
+// TestUpgradeTrip_StampFailureAtCapStaysRetryable: a trip at the cap whose
+// sync-tier stamp AND clear both fail must not settle (SettleUpgradeTrip would
+// keep the previous tier for a file this pass rewrote); it fails and stays armed.
+func TestUpgradeTrip_StampFailureAtCapStaysRetryable(t *testing.T) {
+	r := newUpgradeRig(t, &fakeFetcher{song: fallthroughSong(90, "new synced lyric")})
+	r.w.queue = failingSyncTierQueue{r.q}
+	if _, err := r.db.Exec(`UPDATE work_queue SET attempts = ? WHERE id = ?`, upgradeMaxAttempts-1, r.id); err != nil {
+		t.Fatal(err)
+	}
+	r.run(t)
+	if got := r.row(t); got != "failed outcome=synced timing=ok lane=musixmatch misses=14 armed=1" {
+		t.Fatalf("row = %q, want failed and still armed (not settled)", got)
+	}
+}

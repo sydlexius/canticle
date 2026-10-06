@@ -126,6 +126,9 @@ type Queue interface {
 	// is not an upgrade trip. answered: the lanes answered, so a mis_synced
 	// row's one provider pass is recorded (#1120).
 	SettleUpgradeTrip(ctx context.Context, id int64, answered bool) (bool, error)
+	// SettleStuckUpgradeTrip settles a trip whose Complete failed to the attempt
+	// cap (#1119): records the lane answer and, when landed, a fresh completed_at.
+	SettleStuckUpgradeTrip(ctx context.Context, id int64, landed bool) (bool, error)
 }
 
 // ProviderRecorder records per-lane provider outcome counters. A nil
@@ -1790,10 +1793,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// this same completion may have just changed. Fail it via the same path
 	// a failed Complete already takes, below.
 	if err := w.stampSyncTier(ctxNoCancel, item, song); err != nil {
-		return w.failStuckItem(ctxNoCancel, item.ID, err)
+		return w.failStuckItem(ctxNoCancel, item, capNever, err)
 	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
-		return w.failStuckItem(ctxNoCancel, item.ID, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
+		return w.failStuckItem(ctxNoCancel, item, capLanded, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
 	return nil
@@ -1867,25 +1870,58 @@ func (w *Worker) completeKept(ctx context.Context, item queue.WorkItem, kept []*
 		}
 	}
 	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
-		return w.failStuckItem(ctxNoCancel, item.ID, err)
+		return w.failStuckItem(ctxNoCancel, item, capNever, err)
 	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
-		return w.failStuckItem(ctxNoCancel, item.ID, fmt.Errorf("worker: complete kept item %d: %w", item.ID, err))
+		return w.failStuckItem(ctxNoCancel, item, capKept, fmt.Errorf("worker: complete kept item %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
 	return nil
 }
 
+// capSettle says how failStuckItem may settle an upgrade trip at the cap.
+type capSettle int
+
+const (
+	// capNever: the file-record columns may be stale, so the trip stays retryable.
+	capNever capSettle = iota
+	// capKept: the writer kept the better file; completed_at stays.
+	capKept
+	// capLanded: the writer replaced the file; completed_at is re-stamped.
+	capLanded
+)
+
 // failStuckItem marks item failed and returns the resulting error, for a
 // terminal pre-Complete step (Complete itself, or a stamp whose own failure
 // path refused to settle the row) that cannot be retried in place. Shared so
-// both call sites above stay in lockstep.
-func (w *Worker) failStuckItem(ctxNoCancel context.Context, id int64, cause error) error {
-	w.consecutiveFailures++
-	if _, err := w.queue.Fail(ctxNoCancel, id, cause); err != nil {
-		return fmt.Errorf("worker: item %d and mark failed: %w", id, errors.Join(cause, err))
+// every call site above stay in lockstep.
+//
+// An upgrade trip applies the same attempt cap failPass does (#1119): the
+// failure that reaches upgradeMaxAttempts settles the trip through
+// SettleStuckUpgradeTrip instead of failing it, so a persistent Complete
+// failure is bounded. capLanded/capKept are used only when the completion
+// metadata is known consistent (a failed Complete, after every stamp landed):
+// capLanded re-stamps completed_at for the file this pass wrote, capKept leaves
+// it for the better file the writer kept. Both record the lanes' answer, as
+// Complete does (a lane answered, or no file would exist). A failed
+// stamp-and-clear of the sync tier passes capNever, because a settle leaves the
+// file-record columns alone and would keep the PREVIOUS tier for a file this
+// pass already rewrote, so that case stays retryable. A successful cap settle
+// returns nil and leaves consecutiveFailures alone, like failPass's cap settle:
+// the cause is logged and the drain continues. A settle error falls through to
+// Fail, so the row never wedges.
+func (w *Worker) failStuckItem(ctxNoCancel context.Context, item queue.WorkItem, how capSettle, cause error) error {
+	if how != capNever && item.UpgradeQueued && item.Attempts+1 >= upgradeMaxAttempts {
+		slog.Info("worker: upgrade trip could not complete; settling at the attempt cap", "id", item.ID, "attempts", item.Attempts+1, "error", cause)
+		if settled, err := w.queue.SettleStuckUpgradeTrip(ctxNoCancel, item.ID, how == capLanded); err == nil && settled {
+			return nil
+		}
 	}
-	return fmt.Errorf("worker: item %d (marked failed): %w", id, cause)
+	w.consecutiveFailures++
+	if _, err := w.queue.Fail(ctxNoCancel, item.ID, cause); err != nil {
+		return fmt.Errorf("worker: item %d and mark failed: %w", item.ID, errors.Join(cause, err))
+	}
+	return fmt.Errorf("worker: item %d (marked failed): %w", item.ID, cause)
 }
 
 // errVerificationRejected marks a verifier's rejection (a verdict), as opposed
