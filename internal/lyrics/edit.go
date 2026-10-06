@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -391,6 +392,11 @@ type editSkeleton struct {
 
 func skeletonOf(body []byte) editSkeleton {
 	var sk editSkeleton
+	type stamped struct {
+		total float64
+		text  string
+	}
+	var cues []stamped
 	for _, raw := range strings.Split(strings.TrimPrefix(string(body), utf8BOM), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
@@ -404,7 +410,7 @@ func skeletonOf(body []byte) editSkeleton {
 				if text == "" {
 					text = "♪" // ApplyEdit writes an empty cue as a note
 				}
-				sk.cues = append(sk.cues, text)
+				cues = append(cues, stamped{c.Time.Total, text})
 			}
 		case len(doc.Tags) > 0:
 			if line != timingMarker { // the aligner marker is canticle's own addition
@@ -413,6 +419,12 @@ func skeletonOf(body []byte) editSkeleton {
 		default:
 			sk.orphans = append(sk.orphans, line)
 		}
+	}
+	// The writer emits cues sorted by stamp (ParseBody, stable), so an original
+	// listing them out of order must compare in that order too.
+	sort.SliceStable(cues, func(i, j int) bool { return cues[i].total < cues[j].total })
+	for _, c := range cues {
+		sk.cues = append(sk.cues, c.text)
 	}
 	return sk
 }

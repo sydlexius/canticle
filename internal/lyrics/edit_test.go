@@ -631,3 +631,30 @@ func TestApplyEditRefusesStaleOrig(t *testing.T) {
 		}
 	}
 }
+
+// An original whose cues are listed out of stamp order is written back sorted;
+// the second edit must still recognize its .orig as the file's original, while
+// a genuinely different .orig is still refused (#1313).
+func TestApplyEditUnsortedOriginalEditsTwice(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "t.lrc")
+	const unsorted = "[ar:a]\n[00:05.00]two\n[00:01.00]one\n[00:09.00]three\n"
+	writeFixture(t, p, unsorted)
+	opts := EditOptions{Roots: []string{root}, DurationSeconds: 30}
+	for i, off := range []int{500, -300} {
+		lines, tags, err := OriginalLines(p, opts.Roots)
+		if err != nil {
+			t.Fatalf("edit %d: OriginalLines: %v", i+1, err)
+		}
+		if _, err := ApplyEdit(p, ShiftLines(lines, off), tags, opts); err != nil {
+			t.Fatalf("edit %d: ApplyEdit: %v", i+1, err)
+		}
+	}
+	if got := readFile(t, p+".orig"); got != unsorted {
+		t.Errorf(".orig touched:\n%s", got)
+	}
+	writeFixture(t, p+".orig", "[ar:a]\n[00:05.00]uno\n[00:01.00]dos\n[00:09.00]tres\n")
+	if _, _, err := OriginalLines(p, opts.Roots); !errors.Is(err, ErrEditStaleOrig) {
+		t.Errorf("different .orig: err = %v, want ErrEditStaleOrig", err)
+	}
+}
