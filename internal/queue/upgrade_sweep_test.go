@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -418,5 +419,29 @@ func TestEnqueueScanLiftsArmedUpgradeTrip(t *testing.T) {
 	}
 	if prio != PriorityScan || armed != 1 || status != StatusPending {
 		t.Fatalf("after scan collision: priority=%d armed=%d status=%s; want %d, 1, pending", prio, armed, status, PriorityScan)
+	}
+}
+
+// The upgrade sweep's mis_synced arm must SEARCH the partial index
+// idx_work_queue_missynced (migration 062). Without it the arm walks the whole
+// done partition on every sweep cycle. Judged on the arm's real predicate text.
+func TestUpgradeMissyncedArmUsesPartialIndex(t *testing.T) {
+	_, dbh := upgradeQueue(t)
+	rows, err := dbh.Query(`EXPLAIN QUERY PLAN SELECT id, upgrade_checked_at, completed_at FROM work_queue WHERE`+upgradeMissyncedPredicate, 1, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plans []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plans = append(plans, detail)
+	}
+	if len(plans) != 1 || !strings.Contains(plans[0], "SEARCH work_queue USING INDEX idx_work_queue_missynced (timing_outcome=? AND status=?)") {
+		t.Fatalf("mis_synced arm plan = %q, want a SEARCH of idx_work_queue_missynced", plans)
 	}
 }
