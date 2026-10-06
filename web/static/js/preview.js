@@ -820,8 +820,11 @@
       if (method === "POST") {
         opts.body = new window.URLSearchParams({ mtime: st.mtime, csrf_token: token ? token.value : "" });
       }
-      return window.fetch(url, opts).then(
-        function (res) {
+      // One catch for the request AND the body read: a body stream that fails
+      // in text() is a transport failure too, never a stuck run.
+      return window
+        .fetch(url, opts)
+        .then(function (res) {
           return res.text().then(function (text) {
             var data = {};
             try {
@@ -831,12 +834,11 @@
             }
             return { status: res.status, data: data, text: text };
           });
-        },
-        function (e) {
+        })
+        .catch(function (e) {
           console.error("preview.js: auto alignment request failed", e && e.message);
           return { status: 0, data: {}, text: "" };
-        },
-      );
+        });
     }
     function autoLater(fn) {
       window.clearTimeout(au.timer);

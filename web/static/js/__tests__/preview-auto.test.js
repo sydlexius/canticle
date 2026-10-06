@@ -71,7 +71,8 @@ function mount({ autoURL = "/preview/7/auto", strip = false } = {}) {
       return Promise.reject(new Error("unexpected request to " + url));
     }
     const [status, body] = answers.shift();
-    return Promise.resolve({ status, ok: status < 300, text: () => Promise.resolve(body) });
+    const text = () => (body === BROKEN ? Promise.reject(new Error("body stream failed")) : Promise.resolve(body));
+    return Promise.resolve({ status, ok: status < 300, text });
   };
   win.eval(KB);
   win.eval(JS);
@@ -98,6 +99,7 @@ function mount({ autoURL = "/preview/7/auto", strip = false } = {}) {
   return { win, $, answers, calls, errors, poll, run, times, status, esc, pending };
 }
 
+const BROKEN = Symbol("a body whose text() rejects");
 const START = [202, '{"state":"running"}'];
 const RUNNING = [200, '{"state":"running"}'];
 const done = (mtime = MTIME, lines = "[1500,3200]") => [200, `{"state":"done","mtime":${mtime},"aligned_words":2,"lines":${lines},"words":[null,null],"quality":{},"warnings":[]}`];
@@ -242,6 +244,27 @@ describe("Auto alignment", () => {
     [500, '{"error":"read"}', "could not run the alignment"],
     [0, null, "could not run the alignment"], // no answer queued: the fetch rejects
   ];
+  it("a body that fails to read is a transport failure on start and on poll, never a stuck run", async () => {
+    const leftRunning = (p) => {
+      expect(p.$("mx-edit-chip").textContent).toBe("Original");
+      expect(p.$("mx-auto-run").hidden).toBe(false);
+      expect(p.$("mx-auto-stop").hidden).toBe(true);
+      expect(p.win.document.querySelector(".mx-edit-nudge").disabled).toBe(false);
+      expect(p.status()).toContain("could not run the alignment");
+    };
+    const s = mount();
+    await s.run([202, BROKEN]);
+    leftRunning(s);
+    const p = mount();
+    await p.run(START);
+    for (let i = 0; i < 3; i++) {
+      p.answers.push([200, BROKEN]); // two consecutive failures are retried
+      await p.poll();
+    }
+    expect(p.calls.map((c) => c.method)).toEqual(["POST", "GET", "GET", "GET"]);
+    leftRunning(p);
+  });
+
   it.each(startCodes)("a start answered %i says so", async (status, body, want) => {
     const p = mount();
     await (status ? p.run([status, body]) : p.run());
