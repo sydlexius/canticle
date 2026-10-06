@@ -3495,6 +3495,10 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 		if path == "" {
 			path = defaultConfigPath()
 		}
+		if path == "" {
+			_, _ = fmt.Fprintln(out, "cannot determine a config file location (no home directory); pass --config <path>")
+			return 2
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 			slog.Error("failed to create config directory", "error", err)
 			return 1
@@ -4020,11 +4024,11 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 // defaultConfigPath is where `config set` writes when no --config is given.
 // It delegates to config.ResolveConfigPath so the write target is the same
 // file serve and `config get` read, including /config under MXLRC_DOCKER (#980).
+// It returns "" when no path resolves (no home directory, not Docker); the
+// reader then loads no file at all, so the caller must refuse rather than
+// invent a path the reader would never see.
 func defaultConfigPath() string {
-	if p := config.ResolveConfigPath(""); p != "" {
-		return p
-	}
-	return "config.toml"
+	return config.ResolveConfigPath("")
 }
 
 // writeFileAtomic writes via a temp file in the destination directory, fsyncs

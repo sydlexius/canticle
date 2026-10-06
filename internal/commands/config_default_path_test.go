@@ -96,3 +96,26 @@ func TestWriteFileAtomic(t *testing.T) {
 		t.Errorf("got %q mode %v, want new 0640", b, st.Mode().Perm())
 	}
 }
+
+func TestConfigSetRefusesWhenNoPathResolves(t *testing.T) {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		t.Skip("/.dockerenv present: resolver falls back to /config")
+	}
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("MXLRC_DOCKER", "")
+	if config.ResolveConfigPath("") != "" {
+		t.Skip("home directory still resolvable on this platform")
+	}
+	cwd := t.TempDir()
+	t.Setenv("MXLRC_DB_PATH", filepath.Join(cwd, "db.sqlite"))
+	t.Chdir(cwd)
+	var out bytes.Buffer
+	code := runConfig(&out, ConfigCmd{Set: &ConfigSetCmd{Key: "output.word_sync_mode", Value: "off"}})
+	if code != 2 || !strings.Contains(out.String(), "--config") {
+		t.Errorf("exit %d output %q, want exit 2 mentioning --config", code, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(cwd, "config.toml")); !os.IsNotExist(err) {
+		t.Errorf("config.toml written to the working directory (err=%v)", err)
+	}
+}
