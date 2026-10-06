@@ -72,6 +72,9 @@ func (s *fakeStore) ListUnclassified(_ context.Context, opts queue.ListUnclassif
 		return nil, s.listErr
 	}
 	items := s.items
+	if opts.Limit > 0 {
+		items = items[min(opts.Offset, len(items)):]
+	}
 	if opts.Limit > 0 && len(items) > opts.Limit {
 		items = items[:opts.Limit]
 	}

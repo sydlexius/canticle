@@ -4170,6 +4170,38 @@ func TestDBQueue_ListUnclassifiedFindsNeverScoredDeferredRows(t *testing.T) {
 	}
 }
 
+// A path the detector already failed to sample sorts behind every other row,
+// so it cannot hold a Limit slot a never-attempted row is waiting for (#1149).
+// Offset pages into the ordered set.
+func TestDBQueue_ListUnclassifiedSortsRememberedFailuresLast(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	var ids []int64
+	for _, src := range []string{"/music/remembered.flac", "/music/healthy.flac"} {
+		it, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: src}, Outdir: "o", Filename: "f.lrc", SourcePath: src}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, it.ID)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET status='deferred', created_at='2026-01-01T00:00:00Z'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `INSERT INTO detector_sample_failures (file_path, mtime_nsec, size_bytes) VALUES ('/music/remembered.flac', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	for offset, want := range []int64{ids[1], ids[0]} {
+		got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{Limit: 1, Offset: offset, GlobalDetectDefault: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].ID != want {
+			t.Fatalf("offset %d: got %v; want id %d (healthy first, remembered last)", offset, got, want)
+		}
+	}
+}
+
 // TestDBQueue_InstrumentalWritesRefuseRowOwnedByWorker pins the concurrency
 // contract (#499). The backfill does not own its rows: it leaves them 'deferred'
 // while the detector runs, and Dequeue selects deferred rows, so a serve-mode
