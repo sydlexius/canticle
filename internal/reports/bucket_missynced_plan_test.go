@@ -40,7 +40,7 @@ func explainPlan(t *testing.T, d *sql.DB, query string, args ...any) []string {
 // arm is the pinned partial-index user (queue.TestUpgradeMissyncedArmUsesPartialIndex).
 func TestSettledMissyncedPagePlanIsIndexed(t *testing.T) {
 	d := seedLibraryRows(t)
-	query, args, err := bucketQuery(BucketSettled, BucketFilter{MisSynced: true}, BucketSpec(BucketSettled).Default, tablesort.Cursor{}, 50)
+	query, args, err := bucketQuery(BucketSettled, TopRungWord, BucketFilter{MisSynced: true}, BucketSpec(BucketSettled).Default, tablesort.Cursor{}, 50)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,13 +25,48 @@ const timeFormat = time.RFC3339
 
 // Repo provides read-only report queries over the application database.
 type Repo struct {
-	db *sql.DB
+	db  *sql.DB
+	top TopRung
+}
+
+// TopRung is the highest sync rung the configuration can produce, which decides
+// what Finished means (#1275). The zero value is TopRungWord.
+type TopRung uint8
+
+const (
+	// TopRungWord means word sync is on, so only the word tier is finished (#553).
+	TopRungWord TopRung = iota
+	// TopRungLine means output.word_sync_mode is off, so no row can reach the word
+	// tier and a settled line-synced row is finished too.
+	TopRungLine
+)
+
+// Option configures a Repo at construction.
+type Option func(*Repo)
+
+// WithLineTopRung selects TopRungLine when on (serve wires it from
+// output.word_sync_mode = off). The rung is decided in every query, never
+// stored on a row, so a restart under a new mode re-buckets with no backfill.
+func WithLineTopRung(on bool) Option {
+	return func(r *Repo) {
+		if on {
+			r.top = TopRungLine
+		}
+	}
 }
 
 // New returns a Repo backed by db.
-func New(db *sql.DB) *Repo {
-	return &Repo{db: db}
+func New(db *sql.DB, opts ...Option) *Repo {
+	r := &Repo{db: db}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
+
+// TopRung reports the rung this Repo counts as Finished, so the UI describes
+// the buckets and offers chips by the same rule the queries apply.
+func (r *Repo) TopRung() TopRung { return r.top }
 
 // QueueSummary is a count of work_queue rows per status. Every status field is
 // populated (zero when no rows have that status) so callers can render a
@@ -61,8 +96,14 @@ type QueueSummary struct {
 	// A row with no recorded sync_tier (NULL, before `scan reconcile-sync-tier`
 	// runs) counts as SettledUpgradable: nothing proves it terminal, and the
 	// counter must never overstate what is finished.
+	//
+	// Under TopRungLine (word sync off, #1275) Finished also counts settled
+	// line-synced rows (lineFinishedPredicate), since no row can reach the word
+	// tier there; the pair still sums to Done by the same derivation.
 	Finished          int64
 	SettledUpgradable int64
+	// TopRung is the rung Finished was counted under.
+	TopRung TopRung
 }
 
 // retiredPredicate matches a row prune retired as unresolvable (status='done',
@@ -97,20 +138,34 @@ const TierUnknownPredicate = `(sync_tier IS NULL
                       OR word_timing_state = 'queued')`
 
 // finishedPredicate is wordTierPredicate restricted to settled synced rows:
-// the rows QueueSummary counts as Finished.
+// the rows QueueSummary counts as Finished under TopRungWord.
 const finishedPredicate = `status = 'done' AND outcome_type = 'synced' AND ` + wordTierPredicate
+
+// lineFinishedPredicate is Finished under TopRungLine (#1275): a settled synced
+// row at the word OR line tier. A word row written before word sync was turned
+// off stays finished. Built from the same tier predicates, so the Settled
+// complement, the Line-synced chip and ResultsBreakdown cannot drift from it.
+const lineFinishedPredicate = `status = 'done' AND outcome_type = 'synced' AND ((` +
+	wordTierPredicate + `) OR (` + lineTierPredicate + `))`
+
+// finishedPredicates maps each rung to its Finished fragment: the ONE place a
+// rung becomes SQL. QueueSummary and the Finished/Settled buckets read it.
+var finishedPredicates = map[TopRung]string{
+	TopRungWord: finishedPredicate,
+	TopRungLine: lineFinishedPredicate,
+}
 
 // QueueSummary returns the count of work_queue rows grouped by status.
 //
 // Source: work_queue.status (CHECK-constrained to pending/processing/done/
 // failed/deferred/unavailable by migrations 001, 012, 049). Zero-count
 // statuses are reported as 0 rather than omitted. Finished is counted in the
-// same scan (finishedPredicate), so it can never describe a different
+// same scan (finishedPredicates[r.top]), so it can never describe a different
 // population than Done.
 func (r *Repo) QueueSummary(ctx context.Context) (QueueSummary, error) {
-	var s QueueSummary
+	s := QueueSummary{TopRung: r.top}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT status, COUNT(*), SUM(CASE WHEN `+finishedPredicate+` THEN 1 ELSE 0 END)
+		`SELECT status, COUNT(*), SUM(CASE WHEN `+finishedPredicates[r.top]+` THEN 1 ELSE 0 END)
          FROM work_queue GROUP BY status`)
 	if err != nil {
 		return QueueSummary{}, fmt.Errorf("reports: queue summary: %w", err)

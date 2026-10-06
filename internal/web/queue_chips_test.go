@@ -257,7 +257,7 @@ func TestQueueChipsMutuallyExclusive(t *testing.T) {
 		t.Error("search form carries the dropped tier")
 	}
 	v, _ := url.ParseQuery("tier=line&missync=1")
-	s, err := parseQueueViewState(v, reports.BucketSettled)
+	s, err := parseQueueViewState(v, reports.BucketSettled, reports.TopRungWord)
 	if err != nil || s.Tier != "" || !s.MisSynced {
 		t.Errorf("state for tier=line&missync=1 = %+v, %v; want MisSynced only", s, err)
 	}
@@ -394,7 +394,7 @@ func TestQueueChipsEmptyStates(t *testing.T) {
 
 func TestQueueChipsStateRoundTrip(t *testing.T) {
 	v, _ := url.ParseQuery("tier=line&edited=1&q=x&sort=title&dir=desc")
-	s, err := parseQueueViewState(v, reports.BucketSettled)
+	s, err := parseQueueViewState(v, reports.BucketSettled, reports.TopRungWord)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestQueueChipsStateRoundTrip(t *testing.T) {
 	}
 	// On Finished the chips the bucket does not offer never enter the state.
 	v, _ = url.ParseQuery("tier=line&edited=1&missync=1")
-	f, err := parseQueueViewState(v, reports.BucketFinished)
+	f, err := parseQueueViewState(v, reports.BucketFinished, reports.TopRungWord)
 	if err != nil || f.Tier != "" || f.MisSynced || !f.Edited {
 		t.Errorf("finished state = %+v, %v; want Edited only", f, err)
 	}

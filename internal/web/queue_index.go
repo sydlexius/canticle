@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
 )
 
@@ -23,5 +24,6 @@ func (u *UI) handleQueueIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "queue summary failed", http.StatusInternalServerError)
 		return
 	}
-	render(w, r, templates.QueueIndexPage(u.version, buildQueueTiles(qs), u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+	render(w, r, templates.QueueIndexPage(u.version, buildQueueTiles(qs), u.buildRail(""), u.musixmatchInactive, u.musixmatchServing,
+		qs.TopRung == reports.TopRungLine))
 }

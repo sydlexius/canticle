@@ -53,13 +53,14 @@ type queueViewState struct {
 // if the bucket's own spec sorts on it: a key that is merely in the shared
 // vocabulary (status) would otherwise resolve to the default order in SQL while
 // the state, and every link built from it, kept naming an unsupported sort.
-func parseQueueViewState(v url.Values, bucket reports.Bucket) (queueViewState, error) {
+// top is the reports Repo's rung, which decides the bucket's chips (#1275).
+func parseQueueViewState(v url.Values, bucket reports.Bucket, top reports.TopRung) (queueViewState, error) {
 	var s queueViewState
 	spec := reports.BucketSpec(bucket)
 	keys := []string{"q", "after", "sort", "dir", "library", "lane", "reason"}
 	// A repeated chip param is ambiguous only where the bucket offers that chip;
 	// elsewhere it is ignored like any other chip param.
-	for _, c := range reports.BucketChips(bucket) {
+	for _, c := range reports.BucketChips(bucket, top) {
 		keys = append(keys, string(c))
 	}
 	for _, k := range keys {
@@ -81,15 +82,15 @@ func parseQueueViewState(v url.Values, bucket reports.Bucket) (queueViewState, e
 	// Chips: an unknown value is ignored, never an error, and a chip the bucket
 	// does not offer is dropped so no link ever carries a filter that cannot
 	// apply (or one that is always empty or a no-op there).
-	if reports.HasChip(bucket, reports.ChipLineSynced) {
+	if reports.HasChip(bucket, reports.ChipLineSynced, top) {
 		if t := v.Get("tier"); reports.ValidTier(t) {
 			s.Tier = t
 		}
 	}
-	if reports.HasChip(bucket, reports.ChipEdited) {
+	if reports.HasChip(bucket, reports.ChipEdited, top) {
 		s.Edited = v.Get("edited") == "1"
 	}
-	if reports.HasChip(bucket, reports.ChipMissynced) {
+	if reports.HasChip(bucket, reports.ChipMissynced, top) {
 		s.MisSynced = v.Get("missync") == "1"
 	}
 	// The line tier predicate excludes mis_synced rows, so the two chips can
