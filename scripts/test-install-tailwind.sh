@@ -39,7 +39,7 @@ run "$GOOD"
 check "success installs the binary" "$([ "$rc" = 0 ] && [ -x "$TMP/dest" ]; echo $?)"
 check "retry window is at least 5 attempts" "$(grep -q -- '--retry 5' "$TMP/log"; echo $?)"
 check "no fixed retry delay (exponential backoff)" "$(! grep -q -- '--retry-delay' "$TMP/log"; echo $?)"
-check "total retry time is bounded" "$(grep -q -- '--retry-max-time' "$TMP/log"; echo $?)"
+check "total retry time is bounded at 90s on both downloads" "$([ "$(grep -c -- '--retry-max-time 90' "$TMP/log")" = 2 ]; echo $?)"
 check "both downloads use the retry flags" "$([ "$(grep -c -- '--retry 5' "$TMP/log")" = 2 ]; echo $?)"
 
 run "deadbeef"

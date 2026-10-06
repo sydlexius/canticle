@@ -78,7 +78,7 @@ trap 'rm -rf "$workdir"' EXIT
 # The window matters as much as the flag: a fixed `--retry 3 --retry-delay 2` gave
 # only ~6s, and a GitHub release-asset 5xx outage lasting longer failed a whole CI
 # job (#1147). Omitting --retry-delay makes curl back off exponentially (1, 2, 4,
-# 8, 16s for --retry 3, ~31s of waiting), and --retry-max-time bounds the total so a
+# 8, 16s for --retry 5, ~31s of waiting), and --retry-max-time bounds the total so a
 # hard outage still fails in about a minute and a half. -f keeps a 4xx fatal at once
 # (curl does not retry it), and the checksum comparison below is unaffected.
 CURL_RETRY=(--retry 5 --retry-max-time 90 --connect-timeout 15)
