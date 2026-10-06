@@ -79,6 +79,21 @@ func assertArtistAlbumTitle(t *testing.T, heads, cells []string, album string) {
 	}
 }
 
+var (
+	recentLabels = []string{"Artist", "Album", "Title", "Result", "Detail", "Source", "Completed"}
+	instrLabels  = []string{"Artist", "Album", "Title", "ID", "File", "Detect requested"}
+	reviewLabels = []string{"Artist", "Album", "Title", "Outcome", "Overrun (s)", "Ratio", "Evaluated", "Lyrics"}
+)
+
+// plainCols is an unsorted header row of the given labels.
+func plainCols(labels ...string) []SortHeaderView {
+	out := make([]SortHeaderView, len(labels))
+	for i, l := range labels {
+		out[i] = SortHeaderView{Label: l}
+	}
+	return out
+}
+
 const (
 	tcArtist = "Test Artist"
 	tcAlbum  = "Test Album"
@@ -94,10 +109,10 @@ func TestTrackTablesArtistAlbumTitle(t *testing.T) {
 		{"dashboard recent", dashRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
 		{"attention", attentionTable([]AttentionRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "none")},
 		{"up next", dashUpNext(nil, []UpNextRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "h", "e")},
-		{"reports recent", tableRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
-		{"reports instrumentals", tableInstrumentals([]InstrumentalRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
+		{"reports recent", tableRecentOutcomes(plainCols(recentLabels...), []RecentOutcomeRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
+		{"reports instrumentals", tableInstrumentals(plainCols(instrLabels...), []InstrumentalRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}})},
 		{"failure group", FailureGroupRows(FailureGroupView{Rows: []FailureItemRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}})},
-		{"review queue", tableReviewQueue([]ReviewQueueRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "")},
+		{"review queue", tableReviewQueue(plainCols(reviewLabels...), []ReviewQueueRow{{Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}, "")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,7 +141,7 @@ func TestUpNextInFlightRow(t *testing.T) {
 // three columns of the Instrumentals table, with the row ID after them. (Up
 // Next's "#" is a queue position, not a track attribute, and stays first.)
 func TestInstrumentalsArtistLeads(t *testing.T) {
-	heads, cells := renderTable(t, tableInstrumentals([]InstrumentalRow{{ID: "7", Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}))
+	heads, cells := renderTable(t, tableInstrumentals(plainCols(instrLabels...), []InstrumentalRow{{ID: "7", Artist: tcArtist, Album: tcAlbum, Title: tcTitle}}))
 	if len(heads) < 4 || heads[0] != "Artist" || heads[1] != "Album" || heads[2] != "Title" || heads[3] != "ID" {
 		t.Fatalf("headers %v: want Artist, Album, Title, ID leading", heads)
 	}
@@ -144,10 +159,10 @@ func TestTrackTablesEmptyAlbumIsDash(t *testing.T) {
 		{"dashboard recent", dashRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"attention", attentionTable([]AttentionRow{{Artist: tcArtist, Title: tcTitle}}, "none")},
 		{"up next", dashUpNext(nil, []UpNextRow{{Artist: tcArtist, Title: tcTitle}}, "h", "e")},
-		{"reports recent", tableRecentOutcomes([]RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
-		{"reports instrumentals", tableInstrumentals([]InstrumentalRow{{Artist: tcArtist, Title: tcTitle}})},
+		{"reports recent", tableRecentOutcomes(plainCols(recentLabels...), []RecentOutcomeRow{{Artist: tcArtist, Title: tcTitle}})},
+		{"reports instrumentals", tableInstrumentals(plainCols(instrLabels...), []InstrumentalRow{{Artist: tcArtist, Title: tcTitle}})},
 		{"failure group", FailureGroupRows(FailureGroupView{Rows: []FailureItemRow{{Artist: tcArtist, Title: tcTitle}}})},
-		{"review queue", tableReviewQueue([]ReviewQueueRow{{Artist: tcArtist, Title: tcTitle}}, "")},
+		{"review queue", tableReviewQueue(plainCols(reviewLabels...), []ReviewQueueRow{{Artist: tcArtist, Title: tcTitle}}, "")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

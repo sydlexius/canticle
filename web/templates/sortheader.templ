@@ -16,6 +16,7 @@ type SortHeaderView struct {
 // the meaning).
 templ SortHeader(h SortHeaderView) {
 	<th
+		scope="col"
 		if h.Aria != "" {
 			aria-sort={ h.Aria }
 		}

@@ -35,6 +35,15 @@ type ReportView struct {
 	// never run (the default-pane case never carries a populated ReportView).
 	LastRun string
 
+	// Columns is the sortable header row of the selected report's track table
+	// (#1260), built by the handler from the report's tablesort spec.
+	Columns []SortHeaderView
+
+	// RefreshHref is the Refresh control's target: the report path plus the
+	// table's own validated sort, so Refresh keeps the sort the URL shows. Empty
+	// means the bare report path.
+	RefreshHref string
+
 	RecentRows       []RecentOutcomeRow
 	ProviderRows     []ProviderRow
 	InstrumentalRows []InstrumentalRow
@@ -195,4 +204,12 @@ func AlbumText(album string) string {
 		return "-"
 	}
 	return album
+}
+
+// refreshHref is the Refresh control's target for v.
+func refreshHref(v ReportView) string {
+	if v.RefreshHref != "" {
+		return v.RefreshHref
+	}
+	return "/reports/" + v.Key
 }

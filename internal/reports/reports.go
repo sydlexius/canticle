@@ -17,6 +17,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/failsig"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
 // timeFormat matches the layout work_queue.completed_at is stored in
@@ -412,7 +413,41 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
 		return nil, nil
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT artist, title, album, completed_at, provider_lane, COALESCE(last_error, ''),
+		recentSelect+`
+         FROM work_queue
+         WHERE `+recentWhere+`
+         ORDER BY `+RecentOutcomesSpec.OrderBy(RecentOutcomesSpec.Default)+`
+         LIMIT ?`,
+		limit,
+	)
+	return scanRecentOutcomes(rows, err)
+}
+
+// RecentOutcomesSorted is RecentOutcomes with the rows re-ordered by o (#1260).
+// WHICH rows are listed never changes: the inner query picks the newest limit
+// rows in the default order, and only the outer ORDER BY (a fixed expression
+// from RecentOutcomesSpec, never request text) arranges them. The default Order
+// yields the same rows in the same order as RecentOutcomes.
+func (r *Repo) RecentOutcomesSorted(ctx context.Context, limit int, o tablesort.Order) ([]RecentOutcome, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx,
+		recentSelect+`
+         FROM work_queue
+         WHERE id IN (SELECT id FROM work_queue WHERE `+recentWhere+`
+                      ORDER BY `+RecentOutcomesSpec.OrderBy(RecentOutcomesSpec.Default)+` LIMIT ?)
+         ORDER BY `+RecentOutcomesSpec.OrderBy(o),
+		limit,
+	)
+	return scanRecentOutcomes(rows, err)
+}
+
+// recentWhere is the Recent outcomes membership: every settled row.
+const recentWhere = `status IN ('done', 'unavailable')`
+
+// recentSelect is the column list scanRecentOutcomes reads.
+const recentSelect = `SELECT artist, title, album, completed_at, provider_lane, COALESCE(last_error, ''),
             COALESCE(
                 NULLIF(outcome_detail, ''),
                 -- outcome_type IS NULL explains the rows that render 'unknown': a
@@ -424,8 +459,22 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
                      THEN 'timing refused: ' || timing_outcome
                 END
             ) AS detail,
-            COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate') AS timing_verdict,
-            CASE
+            ` + recentTimingVerdictExpr + ` AS timing_verdict,
+            ` + recentResultExpr + ` AS result`
+
+// recentTimingVerdictExpr is true for a row with a recorded timing verdict;
+// scanRecentOutcomes keeps such a row's lane, and the Source sort mirrors that.
+const recentTimingVerdictExpr = `COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate')`
+
+// recentLaneExpr is the Source cell's value: NULL exactly when
+// scanRecentOutcomes blanks the lane (an unknown result with no timing
+// verdict), so the Source sort orders what the cell shows.
+const recentLaneExpr = `CASE WHEN (` + recentResultExpr + `) = 'unknown' AND NOT (` + recentTimingVerdictExpr + `)
+                THEN NULL ELSE provider_lane END`
+
+// recentResultExpr classifies a row into its ResultClass key; RecentOutcomes
+// selects it and the Result header of the Reports table sorts on it.
+const recentResultExpr = `CASE
                 WHEN last_error = 'miss limit reached' THEN 'miss'
                 WHEN outcome_type = 'synced' AND sync_tier = 'word'
                      AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
@@ -438,13 +487,27 @@ func (r *Repo) RecentOutcomes(ctx context.Context, limit int) ([]RecentOutcome, 
                 WHEN outcome_type = 'instrumental' THEN 'instrumental'
                 WHEN outcome_type = 'rejected' THEN 'rejected'
                 ELSE 'unknown'
-            END AS result
-         FROM work_queue
-         WHERE status IN ('done', 'unavailable')
-         ORDER BY completed_at IS NULL, completed_at DESC, id DESC
-         LIMIT ?`,
-		limit,
-	)
+            END`
+
+// RecentOutcomesSpec is the Reports Recent outcomes sort (#1260): the default is
+// the order RecentOutcomes has always used (newest completion first, NULLs
+// last, id breaking ties). Detail is not sortable.
+var RecentOutcomesSpec = tablesort.Spec{
+	Columns: map[string]tablesort.Column{
+		tablesort.KeyArtist: {Expr: "artist_key"},
+		tablesort.KeyAlbum:  {Expr: "album COLLATE NOCASE"},
+		tablesort.KeyTitle:  {Expr: "title_key"},
+		// Result sorts on the class key, not the label the cell shows (the
+		// "-" of an unknown row lands between "rejected" and "unsynced"); accepted.
+		tablesort.KeyResult:    {Expr: recentResultExpr},
+		tablesort.KeySource:    {Expr: recentLaneExpr},
+		tablesort.KeyCompleted: {Expr: "completed_at", DescFirst: true},
+	},
+	ID:      "id",
+	Default: tablesort.Order{Key: tablesort.KeyCompleted, Desc: true},
+}
+
+func scanRecentOutcomes(rows *sql.Rows, err error) ([]RecentOutcome, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reports: recent outcomes: %w", err)
 	}
@@ -599,16 +662,42 @@ type InstrumentalTrack struct {
 // work_queue_scan_results (migration 010) to scan_results for file_path, with
 // work_queue.detect_instrumental (migration 016) carried as the request flag.
 // The LEFT JOIN keeps CLI-enqueued rows that have no scan_results link.
+//
+// The order is the zero Order (wq.id, sr.id) unless the caller sorts (#1260,
+// InstrumentalSpec); sr.id always breaks the last tie, so a track with several
+// files lists them in a stable order. The row set never depends on the order.
 func (r *Repo) InstrumentalInventory(ctx context.Context) ([]InstrumentalTrack, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT wq.id, wq.artist, COALESCE(NULLIF(sr.album, ''),
+	return r.InstrumentalInventorySorted(ctx, tablesort.Order{})
+}
+
+// instrumentalAlbumExpr is the Album cell's value, also its sort expression.
+const instrumentalAlbumExpr = `COALESCE(NULLIF(sr.album, ''),
                 CASE WHEN (SELECT COUNT(*) FROM work_queue_scan_results c WHERE c.work_queue_id = wq.id) <= 1
-                     THEN wq.album ELSE '' END), wq.title, wq.detect_instrumental, COALESCE(sr.file_path, '')
+                     THEN wq.album ELSE '' END)`
+
+// InstrumentalSpec is the Reports Instrumentals sort (#1260). ID and File are
+// not sortable. The default is the zero Order: wq.id ascending.
+var InstrumentalSpec = tablesort.Spec{
+	Columns: map[string]tablesort.Column{
+		tablesort.KeyArtist: {Expr: "wq.artist_key"},
+		tablesort.KeyAlbum:  {Expr: instrumentalAlbumExpr + " COLLATE NOCASE"},
+		tablesort.KeyTitle:  {Expr: "wq.title_key"},
+		tablesort.KeyDetect: {Expr: "wq.detect_instrumental", Integer: true},
+	},
+	ID: "wq.id",
+}
+
+// InstrumentalInventorySorted is InstrumentalInventory ordered by o.
+func (r *Repo) InstrumentalInventorySorted(ctx context.Context, o tablesort.Order) ([]InstrumentalTrack, error) {
+	// The ORDER BY is a fixed expression from InstrumentalSpec, never request text.
+	//nolint:gosec // reason: G202: the ORDER BY is a fixed InstrumentalSpec expression, never request text
+	query := `SELECT wq.id, wq.artist, ` + instrumentalAlbumExpr + `, wq.title, wq.detect_instrumental, COALESCE(sr.file_path, '')
          FROM work_queue wq
          LEFT JOIN work_queue_scan_results wqsr ON wqsr.work_queue_id = wq.id
          LEFT JOIN scan_results sr ON sr.id = wqsr.scan_result_id
          WHERE wq.instrumental_result = 1
-         ORDER BY wq.id, sr.id`)
+         ORDER BY ` + InstrumentalSpec.OrderBy(o) + `, sr.id`
+	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("reports: instrumental inventory: %w", err)
 	}
@@ -910,13 +999,37 @@ const previewableFilePredicate = `status = 'done' AND outcome_type = 'synced'
 // package's existing RecentOutcomes and InstrumentalInventory reports, which
 // already carry artist/title/path for the same reason.
 func (r *Repo) ReviewQueue(ctx context.Context) ([]ReviewQueueItem, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, artist, title, album, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at,
-                COALESCE(`+previewableFilePredicate+`, 0)
+	return r.ReviewQueueSorted(ctx, ReviewQueueSpec.Default)
+}
+
+// ReviewQueueSpec is the Reports Review queue sort (#1260). The default is the
+// order ReviewQueue has always used: newest verdict first, id breaking ties.
+// Lyrics is not sortable.
+var ReviewQueueSpec = tablesort.Spec{
+	Columns: map[string]tablesort.Column{
+		tablesort.KeyArtist:    {Expr: "artist_key"},
+		tablesort.KeyAlbum:     {Expr: "album COLLATE NOCASE"},
+		tablesort.KeyTitle:     {Expr: "title_key"},
+		tablesort.KeyOutcome:   {Expr: "timing_outcome"},
+		tablesort.KeyOverrun:   {Expr: "COALESCE(overrun_magnitude, 0)", DescFirst: true},
+		tablesort.KeyRatio:     {Expr: "COALESCE(overrun_ratio, 0)", DescFirst: true},
+		tablesort.KeyEvaluated: {Expr: "evaluated_at", DescFirst: true},
+	},
+	ID:      "id",
+	Default: tablesort.Order{Key: tablesort.KeyEvaluated, Desc: true},
+}
+
+// ReviewQueueSorted is ReviewQueue ordered by o. The table is unbounded, so the
+// row set is the same under every order.
+func (r *Repo) ReviewQueueSorted(ctx context.Context, o tablesort.Order) ([]ReviewQueueItem, error) {
+	// The ORDER BY is a fixed expression from ReviewQueueSpec, never request text.
+	//nolint:gosec // reason: G202: the ORDER BY is a fixed ReviewQueueSpec expression, never request text
+	query := `SELECT id, artist, title, album, timing_outcome, overrun_magnitude, overrun_ratio, evaluated_at,
+                COALESCE(` + previewableFilePredicate + `, 0)
          FROM work_queue
          WHERE timing_outcome IN ('mis_synced', 'categorical')
-         ORDER BY evaluated_at DESC, id DESC`,
-	)
+         ORDER BY ` + ReviewQueueSpec.OrderBy(o)
+	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("reports: review queue: %w", err)
 	}
