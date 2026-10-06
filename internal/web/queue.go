@@ -53,6 +53,21 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
 }
 
+// lineTopBucketInfo overrides Finished and Settled when word sync is off
+// (reports.TopRungLine, #1275): line-synced is the best result there.
+var lineTopBucketInfo = map[reports.Bucket][2]string{
+	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, the best result with word sync off."},
+	reports.BucketSettled:  {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to line sync."},
+}
+
+// bucketInfo is the bucket's heading and meaning under rung top.
+func bucketInfo(b reports.Bucket, top reports.TopRung) [2]string {
+	if info, ok := lineTopBucketInfo[b]; ok && top == reports.TopRungLine {
+		return info
+	}
+	return queueBucketInfo[b]
+}
+
 // handleQueueBucket lists the rows behind one dashboard queue counter. An htmx
 // request gets just the next rows (the "Show more" fragment); a plain
 // navigation gets the full page, so every pager link is a real destination.
@@ -69,7 +84,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "queue data source unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	state, err := parseQueueViewState(r.URL.Query(), bucket)
+	state, err := parseQueueViewState(r.URL.Query(), bucket, u.reports.TopRung())
 	if err != nil {
 		http.Error(w, "invalid queue parameters: "+err.Error(), http.StatusBadRequest)
 		return
@@ -118,11 +133,11 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	if more {
 		rows = rows[:queuePageSize]
 	}
-	info := queueBucketInfo[bucket]
+	info := bucketInfo(bucket, u.reports.TopRung())
 	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: cursor.ID,
 		Query: state.Query, StartHref: state.href(string(bucket), ""), ClearHref: state.withoutQuery().href(string(bucket), ""),
 		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir,
-		Chips: buildQueueChips(bucket, state), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive(),
+		Chips: buildQueueChips(bucket, state, u.reports.TopRung()), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive(),
 		Libraries: buildLibraryOptions(libs, state.Library), Lanes: buildLaneOptions(state.Lane),
 		Reasons: buildReasonOptions(bucket, state.Reason)}
 	// Only the retired bucket can be revived; failed rows are already retried,
@@ -273,8 +288,8 @@ var queueChipLabels = map[reports.Chip]string{
 // outcome_type, sync_tier and last_error: EXPLAIN QUERY PLAN gives "SEARCH
 // work_queue USING INDEX idx_work_queue_missynced (timing_outcome=? AND status=?)",
 // a partial-index search with a table lookup per row, not a COVERING INDEX read.
-func buildQueueChips(bucket reports.Bucket, state queueViewState) []templates.QueueChip {
-	offered := reports.BucketChips(bucket)
+func buildQueueChips(bucket reports.Bucket, state queueViewState, top reports.TopRung) []templates.QueueChip {
+	offered := reports.BucketChips(bucket, top)
 	if len(offered) == 0 {
 		return nil
 	}

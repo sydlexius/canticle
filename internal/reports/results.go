@@ -25,7 +25,8 @@ const lineTierPredicate = `sync_tier = 'line'
 // timing_outcome, word_timing_state); no other table is consulted.
 type ResultsBreakdown struct {
 	// WordSynced: outcome_type='synced' AND wordTierPredicate. The same
-	// predicate as QueueSummary.Finished, so the two always agree.
+	// predicate as QueueSummary.Finished under TopRungWord, so the two always
+	// agree; under TopRungLine Finished is WordSynced + LineSynced (#1275).
 	WordSynced int64
 	// LineSynced: outcome_type='synced' AND lineTierPredicate.
 	LineSynced int64
@@ -45,6 +46,9 @@ type ResultsBreakdown struct {
 	// the language guard, nothing written) or NULL (settled before outcomes
 	// were recorded). Exists so no completed row is ever dropped from the sum.
 	Other int64
+	// TopRung is the Repo's rung, so a caller can word the tiles to match
+	// what QueueSummary.Finished counts. It does not change the split itself.
+	TopRung TopRung
 }
 
 // Total is the sum of every bucket; it equals QueueSummary.Done.
@@ -87,7 +91,7 @@ func (r *Repo) ResultsBreakdown(ctx context.Context) (ResultsBreakdown, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var b ResultsBreakdown
+	b := ResultsBreakdown{TopRung: r.top}
 	for rows.Next() {
 		var bucket string
 		var n int64

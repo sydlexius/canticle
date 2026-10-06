@@ -148,12 +148,21 @@ InnerTube lane on the result it returns and empty for every other lane:
 Upstream string `json:"-"`
 ```
 
-`json:"-"` is not incidental. It matches `WinningLane` and is required for the
-same reason: `encodeSong`/`decodeSong` (`internal/worker/worker.go:2208-2232`)
-round-trip the song through the lyrics cache, and a serialized upstream would let
-a cache hit resurrect an attribution that was true for a different fetch. The
-cache is keyed on (artist, title, duration bucket) and knows nothing about which
-upstream served the entry it stores.
+`json:"-"` is not incidental. `lyrics.EncodeCachedSong`/`DecodeCachedSong`
+(`internal/lyrics/timing_guard.go`) round-trip the song through the lyrics cache,
+and a serialized upstream would let a cache hit resurrect an attribution that was
+true for a different fetch. The cache is keyed on (artist, title, duration
+bucket), and the upstream is the far side's per-fetch routing decision.
+
+`WinningLane` and `FetchedAt` are also `json:"-"`, but since #1207 the cache
+envelope stores them in their own `Lane`/`Fetched` keys: a cache row is written
+in exactly one place, after the fetch whose result landed, so the lane and fetch
+time are facts about that entry, like its lyric body. The upstream is NOT in the
+envelope. On decode a stored lane is restored only when it is a built-in provider
+(`providers.IsKnown`); any other value, including the detector lane (whose
+verdicts are never cached), decodes laneless. An entry stored before #1207
+carries neither key and decodes laneless; no lane is guessed and nothing is
+backfilled.
 
 ### 2. On disk
 
@@ -198,15 +207,18 @@ these two arms plus a default that yields nothing.
 | Fresh fetch, InnerTube lane wins, upstream B reported | `[source:innertube]` | `[upstream:<B>]` |
 | Fresh fetch, InnerTube lane wins, no upstream reported | `[source:innertube]` | omitted |
 | Fresh fetch, any other provider lane wins | `[source:<that lane>]` | omitted |
-| Cache hit (any lane) | omitted | omitted |
+| Cache hit, entry stored since #1207 | `[source:<storing lane>]` | omitted |
+| Cache hit, legacy entry (no stored lane) | omitted | omitted |
 | Detector-written instrumental marker | `[source:canticle-detector]` | omitted |
 | InnerTube-sourced instrumental (provider-asserted) | `[source:innertube]` | `[upstream:<X>]` if known |
 
-The cache-hit row is existing behavior, not a new rule: `WinningLane` is empty on
-a decoded cache hit, so the writer's `song.WinningLane != ""` guard already omits
-`[source:]` there. `Upstream` is empty on the same path for the same reason, so
-the two tags appear and disappear together. A cache-hit sidecar has always been
-part of purge's `NoSource` cohort and remains so.
+A cache hit restores the storing fetch's lane and fetch time (#1207), so its
+sidecar carries `[source:]` and `[fetched:]` and the worker stamps the same lane
+onto `work_queue.provider_lane`; the two agree for `provenanceAgrees`. `Upstream`
+is never restored, so a hit on an InnerTube entry writes `[source:innertube]`
+with no `[upstream:]`, which asserts nothing about the licensor. A legacy entry
+decodes laneless: the writer's `song.WinningLane != ""` guard omits `[source:]`,
+and that sidecar stays in purge's `NoSource` cohort as before.
 
 An omitted `[upstream:]` asserts nothing. It is not "no upstream" and not
 "unknown provider" -- it is the absence of a claim, matching how `[dv:]` is
@@ -256,7 +268,8 @@ and trimmed by the function before comparison.
 | InnerTube, upstream A | `"innertube"` | `"innertube"` | `tag == lane` | agrees |
 | InnerTube, upstream B | `"innertube"` | `"innertube"` | `tag == lane` | agrees |
 | InnerTube, upstream unknown | `"innertube"` | `"innertube"` | `tag == lane` | agrees |
-| InnerTube cache hit | `""` | `"innertube"` | empty tag | agrees |
+| InnerTube cache hit (legacy entry) | `""` | `"innertube"` | empty tag | agrees |
+| InnerTube cache hit (#1207 entry) | `"innertube"` | `"innertube"` | `tag == lane` | agrees |
 | Any pre-existing sidecar | unchanged | unchanged | unchanged | unchanged |
 
 The guard holds because **the `[source:]` token does not vary with the upstream**

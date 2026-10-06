@@ -12,6 +12,7 @@ import (
 	"github.com/sydlexius/canticle/internal/instrumentalbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/scanfail"
 )
 
 // Fallback bounds for a Config built in code rather than loaded, where the
@@ -50,7 +51,8 @@ func runInstrumentalBackfillSweep(ctx context.Context, sqlDB *sql.DB, cfg config
 	if !ok {
 		return
 	}
-	bf := instrumentalbackfill.New(queue.NewDBQueue(sqlDB), det, lyrics.NewLRCWriter())
+	bf := instrumentalbackfill.New(queue.NewDBQueue(sqlDB), det, lyrics.NewLRCWriter()).
+		WithFailureStore(scanfail.NewDetector(sqlDB))
 	runBackfillSweepLoop(ctx, bf, bounds, cfg.InstrumentalDetector.Enabled)
 }
 

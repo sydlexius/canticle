@@ -45,7 +45,6 @@ type reportDef struct {
 }
 
 var reportDefs = []reportDef{
-	{"queue-summary", "Queue summary", "Work-queue rows grouped by status."},
 	{"recent-outcomes", "Recent outcomes", "The most recently completed tracks and their derived result."},
 	{"needs-attention", "Needs attention", "Failed tracks, then deferred ones, with their reason and last attempt."},
 	{"provider-effectiveness", "Provider effectiveness", "Per-lane hits, misses, and true per-track hit-rate."},
@@ -54,6 +53,10 @@ var reportDefs = []reportDef{
 	{"deferred-misses", "Deferred misses", "Benign misses waiting for a retry, grouped by reason."},
 	{"review-queue", "Review queue", "Synced lyrics the timing guard flagged for a look: demoted or quarantined."},
 }
+
+// retiredQueueSummaryKey is the slug of the Queue summary report, retired in
+// favor of the Queue page (#1248); its URL redirects to /queue.
+const retiredQueueSummaryKey = "queue-summary"
 
 func lookupReportDef(key string) (reportDef, bool) {
 	for _, d := range reportDefs {
@@ -408,6 +411,20 @@ func (u *UI) handleReports(w http.ResponseWriter, r *http.Request) {
 // the report selected, so each rail URL is a real, bookmarkable destination.
 func (u *UI) handleReportFragment(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+	if key == retiredQueueSummaryKey {
+		// The Queue page replaced this report (#1248); keep old links useful.
+		// An htmx request follows a 301 transparently and would swap the whole
+		// /queue page into #mx-main, so tell htmx to navigate instead.
+		// The answer differs by HX-Request, so a shared cache must key on it.
+		w.Header().Add("Vary", "HX-Request")
+		if r.Header.Get("HX-Request") == "true" {
+			w.Header().Set("HX-Redirect", "/queue")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, "/queue", http.StatusMovedPermanently)
+		return
+	}
 	def, ok := lookupReportDef(key)
 	if !ok {
 		http.NotFound(w, r)
@@ -479,13 +496,6 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef) (templates.Repo
 	}
 
 	switch def.key {
-	case "queue-summary":
-		s, err := u.reports.QueueSummary(ctx)
-		if err != nil {
-			return templates.ReportView{}, err
-		}
-		// Same bucket definition as the dashboard tiles and chart (#599).
-		v.QueueRows = queueSummaryRows(s)
 	case "recent-outcomes":
 		rows, err := u.reports.RecentOutcomes(ctx, recentOutcomesLimit)
 		if err != nil {

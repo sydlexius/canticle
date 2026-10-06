@@ -3692,6 +3692,64 @@ func TestDBQueue_SetProviderLane(t *testing.T) {
 	}
 }
 
+// TestDBQueue_ClearProviderLane verifies ClearProviderLane nulls the lane of a
+// processing row (a laneless cache hit settling a retry, #1207) and leaves a
+// row that is no longer processing untouched.
+func TestDBQueue_ClearProviderLane(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	q.SetRandomized(false)
+	q.now = func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) }
+
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}, PriorityScan); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	item, err := q.Dequeue(ctx)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	laneOf := func() *string {
+		t.Helper()
+		var lane *string
+		if err := q.db.QueryRowContext(ctx,
+			`SELECT provider_lane FROM work_queue WHERE id = ?`, item.ID,
+		).Scan(&lane); err != nil {
+			t.Fatalf("read provider_lane: %v", err)
+		}
+		return lane
+	}
+
+	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics"); err != nil {
+		t.Fatalf("SetProviderLane: %v", err)
+	}
+	if err := q.ClearProviderLane(ctx, item.ID); err != nil {
+		t.Fatalf("ClearProviderLane: %v", err)
+	}
+	if lane := laneOf(); lane != nil {
+		t.Errorf("provider_lane = %q after clear on a processing row; want NULL", *lane)
+	}
+
+	// Outside processing the clear must not touch the row.
+	if err := q.SetProviderLane(ctx, item.ID, "petitlyrics"); err != nil {
+		t.Fatalf("SetProviderLane: %v", err)
+	}
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done' WHERE id = ?`, item.ID); err != nil {
+		t.Fatalf("settle row: %v", err)
+	}
+	if err := q.ClearProviderLane(ctx, item.ID); err != nil {
+		t.Fatalf("ClearProviderLane on done row: %v", err)
+	}
+	if lane := laneOf(); lane == nil || *lane != "petitlyrics" {
+		t.Errorf("provider_lane = %v after clear on a done row; want petitlyrics untouched", lane)
+	}
+
+	closed := NewDBQueue(openQueueTestDB(t))
+	_ = closed.db.Close()
+	if err := closed.ClearProviderLane(ctx, 1); err == nil {
+		t.Error("ClearProviderLane on a closed database returned nil error")
+	}
+}
+
 // TestDBQueue_SetOutcomeType verifies SetOutcomeType persists the recorded
 // outcome on a work_queue row through a real SQLite DB (#379).
 func TestDBQueue_SetOutcomeType(t *testing.T) {
@@ -4167,6 +4225,38 @@ func TestDBQueue_ListUnclassifiedFindsNeverScoredDeferredRows(t *testing.T) {
 	}
 	if got[0].Inputs.SourcePath != "/music/never-scored.flac" {
 		t.Fatalf("SourcePath = %q; want the hydrated source so the detector has a file to read", got[0].Inputs.SourcePath)
+	}
+}
+
+// A path the detector already failed to sample sorts behind every other row,
+// so it cannot hold a Limit slot a never-attempted row is waiting for (#1149).
+// Offset pages into the ordered set.
+func TestDBQueue_ListUnclassifiedSortsRememberedFailuresLast(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	var ids []int64
+	for _, src := range []string{"/music/remembered.flac", "/music/healthy.flac"} {
+		it, err := q.Enqueue(ctx, models.Inputs{Track: models.Track{ArtistName: "A", TrackName: src}, Outdir: "o", Filename: "f.lrc", SourcePath: src}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, it.ID)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET status='deferred', created_at='2026-01-01T00:00:00Z'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `INSERT INTO detector_sample_failures (file_path, mtime_nsec, size_bytes) VALUES ('/music/remembered.flac', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	for offset, want := range []int64{ids[1], ids[0]} {
+		got, err := q.ListUnclassified(ctx, ListUnclassifiedOptions{Limit: 1, Offset: offset, GlobalDetectDefault: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].ID != want {
+			t.Fatalf("offset %d: got %v; want id %d (healthy first, remembered last)", offset, got, want)
+		}
 	}
 }
 

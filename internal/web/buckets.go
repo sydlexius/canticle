@@ -1,10 +1,7 @@
 package web
 
 import (
-	"strconv"
-
 	"github.com/sydlexius/canticle/internal/reports"
-	"github.com/sydlexius/canticle/web/templates"
 )
 
 // queueBucket is one work-queue bucket as the UI names it: the drill-down key,
@@ -13,14 +10,25 @@ type queueBucket struct {
 	Key     reports.Bucket
 	Label   string
 	Tooltip string
-	Value   func(reports.QueueSummary) int64
+	// LineTooltip, when set, replaces Tooltip under reports.TopRungLine (word
+	// sync off, #1275). The Label never changes: the chart colors key on it.
+	LineTooltip string
+	Value       func(reports.QueueSummary) int64
+}
+
+// tooltip is the hover text under rung top.
+func (b queueBucket) tooltip(top reports.TopRung) string {
+	if top == reports.TopRungLine && b.LineTooltip != "" {
+		return b.LineTooltip
+	}
+	return b.Tooltip
 }
 
 // queueBuckets is the ONE definition of the work-queue buckets (#599). The
 // dashboard tiles (buildQueueTiles), the doughnut's labels and values
-// (buildQueueChart) and the Reports queue-summary rows (queueSummaryRows) are
+// (buildQueueChart) are
 // all derived from it, so a bucket cannot carry one name on a tile and another
-// on its chart segment or Reports row. The chart color map in
+// on its chart segment. The chart color map in
 // web/static/js/chart-init.js (QUEUE_COLOR_VARS) is keyed by Label, so a rename
 // here must rename that key too; TestQueueBucketsHaveChartColors enforces it.
 //
@@ -52,16 +60,18 @@ var queueBuckets = []queueBucket{
 		Value:   func(s reports.QueueSummary) int64 { return s.Pending },
 	},
 	{
-		Key:     reports.BucketFinished,
-		Label:   "Finished",
-		Tooltip: "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain.",
-		Value:   func(s reports.QueueSummary) int64 { return s.Finished },
+		Key:         reports.BucketFinished,
+		Label:       "Finished",
+		Tooltip:     "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain.",
+		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk. Word sync is off, so line-synced is the best result: nothing further to gain.",
+		Value:       func(s reports.QueueSummary) int64 { return s.Finished },
 	},
 	{
-		Key:     reports.BucketSettled,
-		Label:   "Settled (upgradable)",
-		Tooltip: "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state.",
-		Value:   func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
+		Key:         reports.BucketSettled,
+		Label:       "Settled (upgradable)",
+		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state.",
+		LineTooltip: "Completed tracks below line sync (unsynced, instrumental, or tier not yet recorded). Word sync is off, so they could still be upgraded to line sync.",
+		Value:       func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{
 		// Given up is status 'unavailable' (#477): an exhausted benign miss,
@@ -76,21 +86,13 @@ var queueBuckets = []queueBucket{
 	},
 }
 
-// queueSummaryRows shapes a QueueSummary into the Reports queue-summary table:
-// one row per queueBuckets entry, in order, then Total.
-func queueSummaryRows(s reports.QueueSummary) []templates.QueueSummaryRow {
-	rows := make([]templates.QueueSummaryRow, 0, len(queueBuckets)+1)
-	for _, b := range queueBuckets {
-		rows = append(rows, templates.QueueSummaryRow{Status: b.Label, Count: strconv.FormatInt(b.Value(s), 10)})
-	}
-	return append(rows, templates.QueueSummaryRow{Status: "Total", Count: strconv.FormatInt(s.Total, 10), IsTotal: true})
-}
-
 // resultBucket is one Results tile: what a COMPLETED track ended up with.
 type resultBucket struct {
 	Label   string
 	Tooltip string
-	Value   func(reports.ResultsBreakdown) int64
+	// LineTooltip, when set, replaces Tooltip under reports.TopRungLine (#1275).
+	LineTooltip string
+	Value       func(reports.ResultsBreakdown) int64
 }
 
 // resultBuckets is the ONE definition of the dashboard Results row (#599). It
@@ -107,9 +109,10 @@ var resultBuckets = []resultBucket{
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.WordSynced },
 	},
 	{
-		Label:   "Line-synced",
-		Tooltip: "The .lrc on disk has line-level timing and no word timing. It may still be upgraded.",
-		Value:   func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
+		Label:       "Line-synced",
+		Tooltip:     "The .lrc on disk has line-level timing and no word timing. It may still be upgraded.",
+		LineTooltip: "The .lrc on disk has line-level timing and no word timing: the best result with word sync off.",
+		Value:       func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
 	},
 	{
 		Label:   "Unsynced",

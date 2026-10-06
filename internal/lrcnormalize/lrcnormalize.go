@@ -17,8 +17,12 @@ import (
 )
 
 // tsRe matches one leading LRC timestamp token: [mm:ss], [mm:ss.xx], or
-// [mm:ss.xxx]. Anchored at the start of the (remaining) string.
-var tsRe = regexp.MustCompile(`^\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]`)
+// [mm:ss.xxx]. Minutes take 1-4 digits because the writer emits %02d, so a
+// cue at or past 100:00 has three or more. Four digits covers the writer's
+// output up to 9999:59.99, well past the 24h retime cap (lyrics/edit.go:67,
+// 1440:00); wider stamps are dropped as before. Anchored at the start of the
+// (remaining) string.
+var tsRe = regexp.MustCompile(`^\[(\d{1,4}):(\d{2})(?:[.:](\d{1,3}))?\]`)
 
 // Tag is a classified LRC header/ID tag: [ar:Foo] -> {Key:"ar", Value:"Foo"}.
 type Tag struct {

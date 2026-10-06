@@ -365,3 +365,36 @@ func TestTrailingEndTag_StaysInOneCue(t *testing.T) {
 		t.Errorf("stacked cues = %+v; want two copies of the marked text", stacked.Cues)
 	}
 }
+
+func TestParseBody_AcceptsMinutesPastNinetyNine(t *testing.T) {
+	// models.Time.Stamp renders %02d minutes, so a cue at or past 100:00
+	// emits three or more digits; the parser must read the writer's own output.
+	cases := []struct {
+		name    string
+		ts      models.Time
+		minutes int
+		total   float64
+	}{
+		{"100:00.00", models.Time{Minutes: 100}, 100, 6000},
+		{"999:59.99", models.Time{Minutes: 999, Seconds: 59, Hundredths: 99}, 999, 59999.99},
+		{"1000:00.00", models.MsToTime(60_000_000), 1000, 60000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := ParseBody("[" + tc.ts.Stamp() + "]word")
+			if len(doc.Cues) != 1 {
+				t.Fatalf("want 1 cue for %q, got %d", tc.ts.Stamp(), len(doc.Cues))
+			}
+			c := doc.Cues[0]
+			if c.Time.Minutes != tc.minutes {
+				t.Errorf("Minutes = %d; want %d", c.Time.Minutes, tc.minutes)
+			}
+			if c.Time.Total != tc.total {
+				t.Errorf("Total = %v; want %v", c.Time.Total, tc.total)
+			}
+			if c.Text != "word" {
+				t.Errorf("want text word, got %q", c.Text)
+			}
+		})
+	}
+}

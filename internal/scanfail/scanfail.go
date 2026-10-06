@@ -10,16 +10,38 @@ import (
 	"fmt"
 )
 
+const upsertSQL = `INSERT INTO %s (file_path, mtime_nsec, size_bytes, error_text)
+	 VALUES (?, ?, ?, ?)
+	 ON CONFLICT(file_path) DO UPDATE SET
+	     mtime_nsec = excluded.mtime_nsec,
+	     size_bytes = excluded.size_bytes,
+	     error_text = excluded.error_text`
+
 // Store records and queries metadata-read failures in the
 // scanner_metadata_failures table. It is safe for concurrent use because the
 // underlying *sql.DB is.
 type Store struct {
-	db *sql.DB
+	db    *sql.DB
+	table string
 }
+
+// detectorTable holds files the instrumental detector could not sample (#1149).
+// Same (path, mtime, size) contract as the metadata table, a separate table so
+// a detector verdict never makes the scanner skip a file it can read fine.
+const (
+	metadataTable = "scanner_metadata_failures"
+	detectorTable = "detector_sample_failures"
+)
 
 // New returns a Store backed by db.
 func New(db *sql.DB) *Store {
-	return &Store{db: db}
+	return &Store{db: db, table: metadataTable}
+}
+
+// NewDetector returns a Store over the detector's unsampleable-file table, with
+// the same ShouldSkip / RecordFailure semantics (#1149).
+func NewDetector(db *sql.DB) *Store {
+	return &Store{db: db, table: detectorTable}
 }
 
 // ShouldSkip reports whether path previously failed metadata read at the same
@@ -29,7 +51,7 @@ func New(db *sql.DB) *Store {
 func (s *Store) ShouldSkip(ctx context.Context, path string, mtimeNano, size int64) (bool, error) {
 	var one int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM scanner_metadata_failures WHERE file_path=? AND mtime_nsec=? AND size_bytes=? LIMIT 1`,
+		`SELECT 1 FROM `+s.table+` WHERE file_path=? AND mtime_nsec=? AND size_bytes=? LIMIT 1`,
 		path, mtimeNano, size,
 	).Scan(&one)
 	if err == nil {
@@ -49,13 +71,7 @@ func (s *Store) RecordFailure(ctx context.Context, path string, mtimeNano, size 
 	if readErr != nil {
 		errText = readErr.Error()
 	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO scanner_metadata_failures (file_path, mtime_nsec, size_bytes, error_text)
-		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT(file_path) DO UPDATE SET
-		     mtime_nsec = excluded.mtime_nsec,
-		     size_bytes = excluded.size_bytes,
-		     error_text = excluded.error_text`,
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf(upsertSQL, s.table),
 		path, mtimeNano, size, errText,
 	)
 	if err != nil {

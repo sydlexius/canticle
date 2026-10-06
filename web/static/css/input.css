@@ -870,11 +870,6 @@ body {
   overflow: hidden;
 }
 
-.mx-row-total td {
-  font-weight: 700;
-  color: #f1f5f9; /* slate-100 */
-}
-
 .mx-report-empty {
   display: flex;
   align-items: center;

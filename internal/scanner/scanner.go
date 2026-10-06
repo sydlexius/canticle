@@ -1480,7 +1480,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 // "[00:12.34]". Used to vet that embedded SYNCEDLYRICS text is real synced LRC
 // before writing it as a .lrc sidecar -- writing prose as .lrc would win over a
 // real fetch forever via sidecar precedence.
-var lrcTimestampRe = regexp.MustCompile(`(?m)^\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]`)
+var lrcTimestampRe = regexp.MustCompile(`(?m)^\[\d{1,4}:\d{2}(?:[.:]\d{1,3})?\]`)
 
 // looksLikeLRC reports whether s carries at least one LRC-timestamped line.
 func looksLikeLRC(s string) bool { return lrcTimestampRe.MatchString(s) }

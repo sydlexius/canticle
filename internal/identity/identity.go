@@ -25,6 +25,7 @@ package identity
 
 import (
 	"iter"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -221,9 +222,25 @@ func (n NameSignal) discriminator() string {
 		return t
 	}
 	if s := strings.TrimSpace(n.Stem); s != "" {
-		return s
+		return stripTrackPrefix(s)
 	}
 	return strings.TrimSpace(n.Artist)
+}
+
+// trackPrefix matches a leading track number and its separator ("05. ",
+// "05 - ", "5) ", "05_"). Every file in an album directory carries one, so it
+// adds shared, non-discriminating characters to a stem comparison.
+var trackPrefix = regexp.MustCompile(`^\d{1,3}(?:\s*[-._)]\s*|\s+)`)
+
+// stripTrackPrefix removes a leading track number from a filename stem before
+// scoring (#1140). Left in, two unrelated tracks ("05. Alpha Beta" vs
+// "05. Gamma Delta") score 0.88 on the shared "05. " prefix alone, clearing the
+// confidence floor. A stem that is nothing but the number is kept as is.
+func stripTrackPrefix(stem string) string {
+	if rest := strings.TrimSpace(trackPrefix.ReplaceAllString(stem, "")); rest != "" {
+		return rest
+	}
+	return stem
 }
 
 // NameScore is the SINGLE definition of how two sides' names are scored against

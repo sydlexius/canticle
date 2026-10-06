@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -91,16 +92,55 @@ func TestWithReportsDBMountsReports(t *testing.T) {
 		WithWebUI(config.Config{}, "vtest"),
 		WithReportsDB(sqlDB))
 
-	req := httptest.NewRequest(http.MethodGet, "/reports/queue-summary", nil)
+	req := httptest.NewRequest(http.MethodGet, "/reports/recent-outcomes", nil)
 	req.Header.Set("HX-Request", "true")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /reports/queue-summary = %d, want 200", rec.Code)
+		t.Fatalf("GET /reports/recent-outcomes = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Total") {
-		t.Error("reports workspace did not render the queue-summary table")
+	if !strings.Contains(rec.Body.String(), "Refresh") {
+		t.Error("reports workspace did not render the recent-outcomes report")
+	}
+}
+
+// TestReportsTopRungFollowsWordSyncMode pins the #1275 wiring: the mounted
+// UI's output.word_sync_mode reaches the reports Repo, so with word sync off a
+// settled line-synced row is Finished, and with it on (both mount options) it
+// is not.
+func TestReportsTopRungFollowsWordSyncMode(t *testing.T) {
+	finishedRow := regexp.MustCompile(`href="/queue/finished">Finished</a></td>\s*<td class="mx-cell-mono">(\d+)</td>`)
+	for _, tc := range []struct {
+		name string
+		mode config.WordSyncMode
+		opt  func(config.Config) Option
+		want string
+	}{
+		{"off via WithWebUI", config.WordSyncModeOff, func(c config.Config) Option { return WithWebUI(c, "vtest") }, "1"},
+		{"off via WithWebUIAuth", config.WordSyncModeOff, func(c config.Config) Option { return WithWebUIAuth(c, "vtest", nil) }, "1"},
+		{"both", config.WordSyncModeBoth, func(c config.Config) Option { return WithWebUI(c, "vtest") }, "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			t.Cleanup(func() { _ = sqlDB.Close() })
+			if _, err := sqlDB.Exec(`INSERT INTO work_queue (artist, title, artist_key, title_key, status, outcome_type, sync_tier)
+				VALUES ('a', 't', 'a', 't', 'done', 'synced', 'line')`); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			cfg := config.Config{}
+			cfg.Output.WordSyncMode = tc.mode
+			h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", tc.opt(cfg), WithReportsDB(sqlDB))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/queue", nil))
+			m := finishedRow.FindStringSubmatch(rec.Body.String())
+			if rec.Code != http.StatusOK || m == nil || m[1] != tc.want {
+				t.Fatalf("GET /queue = %d, Finished row %v, want %s", rec.Code, m, tc.want)
+			}
+		})
 	}
 }
 

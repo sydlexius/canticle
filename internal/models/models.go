@@ -213,8 +213,11 @@ type Song struct {
 	WordTimings []WordTiming `json:",omitempty"`
 	// WinningLane is the provider lane name that returned this song. It is set by
 	// the orchestrator for both suitable results and best-available fallbacks.
-	// Empty on cache hits and zero-value songs. Used by the worker write-path to
-	// record per-lane hit counters without changing the Fetcher interface.
+	// On a cache hit it is the lane of the fetch that stored the entry, restored
+	// by lyrics.DecodeCachedSong (#1207; empty for an entry stored before that).
+	// Empty on zero-value songs. Used by the worker write-path to record per-lane
+	// hit counters without changing the Fetcher interface. `json:"-"` because the
+	// cache stores it in its own envelope field (lyrics.EncodeCachedSong).
 	WinningLane string `json:"-"`
 	// Upstream is the lyric LICENSOR a MULTIPLEXING lane routed this result to,
 	// when the lane serves several and reports which one. Empty for a lane that
@@ -228,12 +231,12 @@ type Song struct {
 	// -- it is the absence of a claim, not a claim of "none" -- so the writer
 	// omits the [upstream:] tag entirely rather than writing a placeholder.
 	//
-	// `json:"-"` is REQUIRED, for the same reason WinningLane carries it:
-	// encodeSong/decodeSong round-trip this struct through the lyrics cache,
-	// and the cache is keyed on (artist, title, duration bucket) with no
-	// knowledge of which upstream served the entry it stored. A serialized
-	// upstream would let a cache hit resurrect an attribution that was true for
-	// a different fetch. See docs/provider-attribution.md (issue #850).
+	// `json:"-"` is REQUIRED, and unlike WinningLane (#1207) the cache envelope
+	// does not store it either: lyrics.EncodeCachedSong/DecodeCachedSong
+	// round-trip this struct through the lyrics cache, keyed on (artist, title,
+	// duration bucket), and the upstream is the far side's per-fetch routing
+	// decision. A cache hit therefore never resurrects it. See
+	// docs/provider-attribution.md (issue #850).
 	Upstream string `json:"-"`
 	// LaneAttempts carries the per-lane hit/miss attribution for THIS track out of
 	// the orchestrator so the worker can persist a true per-track hit-rate (issue
@@ -244,8 +247,9 @@ type Song struct {
 	LaneAttempts []LaneAttempt `json:"-"`
 	// FetchedAt is the time the song was fetched from the provider. Set by the
 	// worker immediately after a successful fetch and before any write path so
-	// all output formats share one consistent timestamp. Zero on cache hits
-	// (timestamp not available without a live fetch). Transient: not persisted.
+	// all output formats share one consistent timestamp. On a cache hit it is
+	// the fetch time stored with the entry (#1207; zero for an entry stored
+	// before that), carried in the cache envelope, not this field's own key.
 	FetchedAt time.Time `json:"-"`
 	// DetectorVersion is the audio detector's version string when this song is an
 	// instrumental verdict written by the detector (Track.Instrumental == 1 via the
@@ -287,8 +291,9 @@ type Song struct {
 	// track (#982): served, absent (the lane affirmatively has none), or unknown
 	// (the zero value: the lane did not say, or could not be read). It is a
 	// claim about the provider's answer, never about WordTimings' length -- a
-	// dropped or unbindable payload reads unknown, not absent. Transient like
-	// WinningLane: a cache hit must not resurrect a verdict from another fetch.
+	// dropped or unbindable payload reads unknown, not absent. Transient, and
+	// not in the cache envelope: a cache hit must not resurrect a verdict about
+	// a lane's per-fetch word answer.
 	WordAnswer WordAnswer `json:"-"`
 }
 

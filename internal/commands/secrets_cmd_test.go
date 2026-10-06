@@ -125,6 +125,10 @@ func TestRunSecretsImport_Idempotent(t *testing.T) {
 	if code := runSecretsImport(ctx, &out, cfg, store, SecretsImportCmd{Token: true}); code != 0 {
 		t.Fatalf("first import exit = %d", code)
 	}
+	first, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
 	out.Reset()
 	if code := runSecretsImport(ctx, &out, cfg, store, SecretsImportCmd{Token: true}); code != 0 {
 		t.Fatalf("second import exit = %d", code)
@@ -133,8 +137,9 @@ func TestRunSecretsImport_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(infos) != 1 {
-		t.Fatalf("re-import created %d rows, want 1 (idempotent upsert)", len(infos))
+	// The token row plus its write stamp (#942); a re-import upserts both.
+	if len(infos) != len(first) || len(infos) != 2 {
+		t.Fatalf("re-import left %d rows (first import %d), want 2 both times (idempotent upsert)", len(infos), len(first))
 	}
 }
 

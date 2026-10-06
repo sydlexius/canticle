@@ -696,6 +696,9 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
 	// every path, #553) was answered by the lanes, so it records its #1120 pass
 	// here; a landed trip was already re-stamped at fetch and is unaffected.
 	// upgrade_queued is read before the 053 trigger disarms it (AFTER UPDATE).
+	// Completing an armed trip (something landed, or a lane answered and the
+	// writer kept the file) resets the #1118 hold escalation; a trip that
+	// landed nothing settles via SettleUpgradeTrip, which counts the miss.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue
          SET status = 'done',
@@ -703,7 +706,8 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
              last_error = '',
              refused_waits = 0,
              missync_recheck_generation = CASE WHEN upgrade_queued = 1 AND timing_outcome = 'mis_synced'
-                 THEN ? ELSE missync_recheck_generation END
+                 THEN ? ELSE missync_recheck_generation END,
+             upgrade_miss_count = CASE WHEN upgrade_queued = 1 THEN 0 ELSE upgrade_miss_count END
          WHERE id = ?
            AND status = 'processing'`,
 		now,
@@ -2127,6 +2131,20 @@ func (q *DBQueue) SetProviderLane(ctx context.Context, id int64, lane string) er
 	return nil
 }
 
+// ClearProviderLane drops a processing row's provider_lane (#1207): a
+// completion served from a laneless cache entry must not keep the lane an
+// earlier attempt stamped (a verify failure stamps the rejected lane before
+// the retry), or the row names a provider its sidecar does not. Guarded on
+// 'processing', like the other pre-Complete stamps' callers.
+func (q *DBQueue) ClearProviderLane(ctx context.Context, id int64) error {
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET provider_lane = NULL WHERE id = ? AND status = 'processing'`, id,
+	); err != nil {
+		return fmt.Errorf("queue: clear provider lane for id %d: %w", id, err)
+	}
+	return nil
+}
+
 // InstrumentalTelemetry carries the five score fields from an audio detection
 // run. All fields are set when detection ran; the zero value (empty struct) is
 // used on the not-ran path, keeping the five DB columns NULL (pre-telemetry /
@@ -2470,7 +2488,8 @@ type CompletionProvenance struct {
 	ISRC string
 	// MBID is the MusicBrainz recording ID from the resolved provider result.
 	MBID string
-	// FetchedAt is when the provider round-trip completed. Zero on a cache hit.
+	// FetchedAt is when the provider round-trip completed; on a cache hit, the
+	// one that stored the entry (#1207), zero for an entry stored before that.
 	FetchedAt time.Time
 	// WriterVersion is the app version that produced the output
 	// (internal/version.Version), matching the .lrc [ve:] tag.
@@ -2769,6 +2788,9 @@ type ListUnclassifiedOptions struct {
 	LibraryID *int64
 	// Limit caps the number of returned rows when > 0.
 	Limit int
+	// Offset skips that many rows of the ordered set; honored only with Limit > 0.
+	// The backfill pages past rows it skips in Go (#1149).
+	Offset int
 	// GlobalDetectDefault resolves rows whose per-item detect_instrumental is NULL,
 	// mirroring how the worker resolves it. It MUST be applied here, in SQL, rather
 	// than by the caller after the fact: Limit is applied by the database, so an
@@ -2809,7 +2831,13 @@ func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOpt
                        WHERE instrumental_result IS NULL
                          AND status = 'deferred'
                          AND TRIM(COALESCE(source_path, '')) <> ''` + notWordRecheckQueued
-	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
+	// A path the detector already failed to sample (detector_sample_failures,
+	// #1149) sorts LAST. Whether it is still skippable depends on the file's
+	// current (mtime, size), which only a stat can tell, so the backfill filters
+	// those rows in Go after Limit; ordering them behind every other row means a
+	// remembered row can never occupy a slot a never-attempted row is waiting for.
+	const orderClause = ` ORDER BY source_path IN (SELECT file_path FROM detector_sample_failures) ASC,
+                       priority DESC, created_at ASC, id ASC`
 	query := baseQuery
 	var args []any
 	// Eligibility BEFORE the limit: an ineligible row filtered in Go has already
@@ -2823,8 +2851,8 @@ func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOpt
 	args = append(args, libArgs...)
 	query += orderClause
 	if opts.Limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, opts.Limit)
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, max(opts.Offset, 0))
 	}
 
 	rows, err := q.db.QueryContext(ctx, query, args...) //nolint:gosec // G202: all concatenated fragments are package constants / recheckLibraryClause's + detectEligibleClause's fixed clauses; never user-built SQL

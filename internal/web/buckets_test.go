@@ -22,35 +22,20 @@ var distinctSummary = reports.QueueSummary{
 }
 
 // TestQueueBucketSurfacesAgree is the #599 one-name-per-bucket guard: the
-// dashboard tiles, the doughnut's labels and the Reports queue-summary rows
-// carry the same labels in the same order, with the same value per label.
+// dashboard tiles and the doughnut's labels carry the same labels in the same
+// order, with the same value per label. (The Queue page's agreement with the
+// tiles is TestQueueIndexCountsMatchDashboardTiles.)
 func TestQueueBucketSurfacesAgree(t *testing.T) {
 	tiles := buildQueueTiles(distinctSummary)
 	chart := buildQueueChart(distinctSummary)
-	rows := queueSummaryRows(distinctSummary)
 
-	if len(rows) == 0 || !rows[len(rows)-1].IsTotal || rows[len(rows)-1].Count != "28" {
-		t.Fatalf("Reports rows must end with Total=28, got %+v", rows)
-	}
-	rows = rows[:len(rows)-1]
-
-	var tileLabels, tileValues, rowLabels, rowValues []string
+	var tileLabels, tileValues []string
 	for _, tl := range tiles {
 		tileLabels = append(tileLabels, tl.Label)
 		tileValues = append(tileValues, tl.Value)
 	}
-	for _, r := range rows {
-		rowLabels = append(rowLabels, r.Status)
-		rowValues = append(rowValues, r.Count)
-	}
 	if !slices.Equal(tileLabels, chart.Labels) {
 		t.Errorf("tile labels %q != chart labels %q", tileLabels, chart.Labels)
-	}
-	if !slices.Equal(tileLabels, rowLabels) {
-		t.Errorf("tile labels %q != Reports labels %q", tileLabels, rowLabels)
-	}
-	if !slices.Equal(tileValues, rowValues) {
-		t.Errorf("tile values %q != Reports values %q", tileValues, rowValues)
 	}
 	for i, v := range chart.Values {
 		if i < len(tileValues) && tileValues[i] != strconv.FormatFloat(v, 'f', -1, 64) {

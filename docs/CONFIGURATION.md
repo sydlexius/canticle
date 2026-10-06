@@ -143,9 +143,8 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | Most rows in word-recheck mode at once (1-1000); out-of-range values are ignored. |
 | `MXLRC_UPGRADE_SWEEP_ENABLED` | `false` | Master switch for the serve-mode upgrade sweep. |
 | `MXLRC_UPGRADE_SWEEP_BATCH` | `100` | Most rows waiting for an upgrade re-fetch at once (1-1000); out-of-range values are ignored. |
-| `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | EXPERIMENTAL: master switch for the word-sync generate lane (forced alignment via an external sidecar). The reference sidecar is slow on CPU (a CUDA image is available, see `deploy/aligner/README.md`); leave this off unless you run a dedicated aligner. With the web UI on, it enables the on-demand Auto alignment action. |
+| `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | EXPERIMENTAL: master switch for the Auto alignment action (forced alignment via an external sidecar). The reference sidecar is slow on CPU (a CUDA image is available, see `deploy/aligner/README.md`); leave this off unless you run a dedicated aligner. With the web UI on, it enables the on-demand Auto alignment action. |
 | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar. |
-| `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | No effect: it belonged to a removed background sweep and a later release retires it. Values below 1 reset to the default. |
 | `MXLRC_WORD_SYNC_GENERATE_CONCURRENCY` | `1` | Caps how many Auto alignment runs go at once across tracks; a start over the cap is refused as busy. Values below 1 reset to the default. |
 | `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Reserved, not yet sent to the sidecar; the sidecar selects its own models via its own `ALIGNER_*` env vars. |
 | `PUID` / `PGID` | `99` / `100` | Container-only: user/group the process drops to for file ownership. |
@@ -421,22 +420,22 @@ ffmpeg resolution is shared with `[verification]`; see [ffmpeg resolution](#ffmp
 [word_sync_generate]
 enabled = false
 url = ""
-budget_per_cycle = 10
 concurrency = 1
 model = ""
 ```
 
-**EXPERIMENTAL and opt-in.** Forced-aligns lyric lines Canticle already believes are correct to a track's own audio, via an external sidecar (`deploy/aligner`: Demucs vocal separation, then a faster-whisper transcript plus a direct wav2vec2 forced alignment). This is the "generate" counterpart to provider word-sync coverage (Petit Lyrics, Musixmatch richsync): it produces per-word timings for a track whose lyric text is already known, rather than depending on a provider having word-sync coverage for it, and it never overrides a provider-supplied word timing.
+These are the keys of the **Auto alignment** action in the lyric preview editor. **EXPERIMENTAL and opt-in.** Forced-aligns lyric lines Canticle already believes are correct to a track's own audio, via an external sidecar (`deploy/aligner`: Demucs vocal separation, then a faster-whisper transcript plus a direct wav2vec2 forced alignment). This is the "generate" counterpart to provider word-sync coverage (Petit Lyrics, Musixmatch richsync): it produces per-word timings for a track whose lyric text is already known, rather than depending on a provider having word-sync coverage for it, and it never overrides a provider-supplied word timing.
 
-The reference sidecar image ships in two variants, CPU (amd64 and arm64) and CUDA (NVIDIA GPU, amd64 only; see `docs/INSTALL.md` for the host requirements), and forced alignment (vocal separation, transcription, alignment) is far heavier per track than any other sidecar in this file -- one call can take minutes, longer on a cold start while models load lazily on first use. Leave `enabled` off unless you run a dedicated aligner sidecar (see `deploy/aligner/README.md`) with hardware and time budget for that. `url` points at that sidecar; it also accepts an optional `language` field (an ISO 639-1 hint that skips its own language detection), which the client does not send. `budget_per_cycle` has no effect: it belonged to a background sweep that was removed, and a later release retires it. `concurrency` caps how many Auto alignment runs go at once across tracks; a start over the cap is refused as busy (default `1`). `model` is **reserved and not yet sent**: the aligner client's wire contract has no model parameter, and the sidecar picks its own models via its own `ALIGNER_*` environment variables.
+The reference sidecar image ships in two variants, CPU (amd64 and arm64) and CUDA (NVIDIA GPU, amd64 only; see `docs/INSTALL.md` for the host requirements), and forced alignment (vocal separation, transcription, alignment) is far heavier per track than any other sidecar in this file -- one call can take minutes, longer on a cold start while models load lazily on first use. Leave `enabled` off unless you run a dedicated aligner sidecar (see `deploy/aligner/README.md`) with hardware and time budget for that. `url` points at that sidecar; it also accepts an optional `language` field (an ISO 639-1 hint that skips its own language detection), which the client does not send. `concurrency` caps how many Auto alignment runs go at once across tracks; a start over the cap is refused as busy (default `1`). `model` is **reserved and not yet sent**: the aligner client's wire contract has no model parameter, and the sidecar picks its own models via its own `ALIGNER_*` environment variables.
 
 **Nothing runs in the background.** With the web UI on, `enabled = true` and a `url` enable the on-demand Auto alignment action in the lyric preview editor, which asks the aligner sidecar at `url`. Nothing is written until you accept a result.
+
+`budget_per_cycle` (and `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE`) is **retired**: it belonged to a background sweep that was removed. A leftover still boots, whatever its value, and logs a warning that it has no effect; delete it.
 
 | Key | Env | Default | Meaning |
 |---|---|---|---|
 | `enabled` | `MXLRC_WORD_SYNC_GENERATE_ENABLED` | `false` | With the web UI on and a `url` set, enables the Auto alignment action. Stays off by default: forced alignment is heavy, slow work even on the GPU variant, and the CPU variant is slower still. |
 | `url` | `MXLRC_WORD_SYNC_GENERATE_URL` | (none) | Base URL of the aligner sidecar the Auto alignment action calls. |
-| `budget_per_cycle` | `MXLRC_WORD_SYNC_GENERATE_BUDGET_PER_CYCLE` | `10` | No effect: it belonged to the removed background sweep. Values below `1` reset to the default. |
 | `concurrency` | `MXLRC_WORD_SYNC_GENERATE_CONCURRENCY` | `1` | Caps how many Auto alignment runs go at once across tracks; a start over the cap is refused as busy. The reference sidecar admits only `ALIGNER_MAX_PENDING` requests at once (default 2: one running, one queued) and answers `429` with `Retry-After` beyond that, rather than refusing outright. Values below `1` reset to the default. |
 | `model` | `MXLRC_WORD_SYNC_GENERATE_MODEL` | (none) | Reserved, not yet sent to the sidecar (no model parameter on the client's wire contract); the sidecar selects its own models via its own `ALIGNER_*` env vars. |
 

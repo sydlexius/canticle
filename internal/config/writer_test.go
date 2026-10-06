@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -217,5 +218,57 @@ func TestApplyChanges_CreatesConfigWhenAbsent(t *testing.T) {
 	// First write: nothing to back up, so no .bak should exist either.
 	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
 		t.Errorf("expected no .bak after a create-on-save write, stat err = %v", err)
+	}
+}
+
+// TestApplyChanges_WritesIntegersCanonically pins #1049: Atoi accepts "0100"
+// and "+5". "0100" is not a valid TOML integer (the next Load would reject the
+// file), while "+5" loads but is not canonical; the writer must emit the
+// canonical decimal for both.
+func TestApplyChanges_WritesIntegersCanonically(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"0100", "100"},
+		{"+5", "5"},
+		{"007", "7"},
+		{"0", "0"},
+		{"-0", "0"},
+		{"00", "0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			path := writeTempConfig(t)
+			if err := ApplyChanges(path, map[string]string{"api.cooldown": tc.in}); err != nil {
+				t.Fatalf("ApplyChanges(%q): %v", tc.in, err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			if !strings.Contains(string(raw), "cooldown = "+tc.want+"\n") {
+				t.Errorf("want canonical %q for input %q, got:\n%s", tc.want, tc.in, raw)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load after saving %q: %v", tc.in, err)
+			}
+			if got := strconv.Itoa(cfg.API.Cooldown); got != tc.want {
+				t.Errorf("Load cooldown = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTomlValue_NegativeIntegerCanonical covers a negative value, which the
+// non-negative field validators reject before the writer but tomlValue must
+// still render canonically.
+func TestTomlValue_NegativeIntegerCanonical(t *testing.T) {
+	for in, want := range map[string]string{"-007": "-7", "-5": "-5"} {
+		v, err := tomlValue(TypeInt, in)
+		if err != nil {
+			t.Fatalf("tomlValue(%q): %v", in, err)
+		}
+		if got := v.String(); got != want {
+			t.Errorf("tomlValue(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

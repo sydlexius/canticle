@@ -22,9 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
+	"github.com/sydlexius/canticle/internal/ffmpeg"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -51,6 +53,14 @@ type Store interface {
 // Detector classifies a track from its audio. Satisfied by detector.Detector.
 type Detector interface {
 	Detect(ctx context.Context, path string) (detector.Result, error)
+}
+
+// FailureStore remembers audio files the detector could not sample, keyed on the
+// file's (mtime, size) so a repaired or replaced file is retried (#1149).
+// Satisfied by *scanfail.Store (scanfail.NewDetector); nil disables the memory.
+type FailureStore interface {
+	ShouldSkip(ctx context.Context, path string, mtimeNano, size int64) (bool, error)
+	RecordFailure(ctx context.Context, path string, mtimeNano, size int64, readErr error) error
 }
 
 // Writer writes the instrumental marker sidecar. Satisfied by lyrics.Writer.
@@ -116,16 +126,23 @@ type Outcome struct {
 // is RowsSettled / RowsStamped / SkippedClaimed / SkippedAlreadySettled / Errors.
 type Result struct {
 	Total           int // eligible rows in the backlog, before Limit
-	Candidates      int // rows this run considered (Total capped by Limit)
+	Candidates      int // rows this run examined; exceeds Limit only by skipped rows paged past
 	Checked         int // rows the detector actually classified
 	Instrumental    int // detector agreed  (verdict axis)
 	NotInstrumental int // detector disagreed (verdict axis)
 
-	MarkersWritten        int // marker sidecars written and still on disk
-	RowsSettled           int // rows settled instrumental and completed
-	RowsStamped           int // rows stamped not-instrumental, left deferred
-	SkippedDetectOff      int // rows whose detect decision was off
-	SkippedNoSource       int // rows with no readable source path
+	MarkersWritten   int // marker sidecars written and still on disk
+	RowsSettled      int // rows settled instrumental and completed
+	RowsStamped      int // rows stamped not-instrumental, left deferred
+	SkippedDetectOff int // rows whose detect decision was off
+	SkippedNoSource  int // rows with no readable source path
+	// SkippedMissing counts rows whose audio file no longer exists. That is a
+	// stale path for prune to retire, not a detector outcome, so it is not an
+	// Error (#1149). The row stays a candidate until prune removes it.
+	SkippedMissing int
+	// SkippedUnsampleable counts rows whose audio ffmpeg already failed to sample
+	// at the file's current (mtime, size); they are not re-attempted (#1149).
+	SkippedUnsampleable   int
 	SkippedClaimed        int // rows a serve-mode worker claimed mid-classification
 	SkippedAlreadySettled int // rows a PEER BACKFILL settled first (marker preserved)
 	// KeptOnDisk counts instrumental verdicts whose marker the writer refused
@@ -166,9 +183,25 @@ type Options struct {
 
 // Backfiller classifies never-scored rows.
 type Backfiller struct {
-	store Store
-	det   Detector
-	w     Writer
+	store    Store
+	det      Detector
+	w        Writer
+	failures FailureStore
+
+	// cursorMu guards cursor: the position in the ordered backlog where the
+	// previous capped gather stopped reading past remembered rows. In memory only,
+	// so a fresh Backfiller (every CLI invocation, every serve start) begins at 0;
+	// the serve sweep reuses one Backfiller, so its cycles rotate through the
+	// remembered tail instead of re-reading the same prefix (#1149).
+	cursorMu sync.Mutex
+	cursor   int
+}
+
+// WithFailureStore remembers unsampleable audio so each file version is
+// attempted once, not every cycle (#1149). Returns b for chaining.
+func (b *Backfiller) WithFailureStore(fs FailureStore) *Backfiller {
+	b.failures = fs
+	return b
 }
 
 // New builds a Backfiller over store, classifying with det and writing with w.
@@ -190,43 +223,39 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 
 	// Eligibility is resolved in SQL so ineligible rows never consume Limit; the
 	// per-item check below is the belt-and-braces half of the same rule.
-	candidates, err := b.store.ListUnclassified(ctx, queue.ListUnclassifiedOptions{
-		LibraryID:           opts.LibraryID,
-		Limit:               opts.Limit,
-		GlobalDetectDefault: opts.GlobalDetectDefault,
-	})
+	candidates, err := b.gather(ctx, opts, &res)
 	if err != nil {
-		return res, fmt.Errorf("instrumentalbackfill: list unclassified: %w", err)
+		return res, err
 	}
-	res.Candidates = len(candidates)
 
-	for _, item := range candidates {
+	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
-
-		// Honor the per-item decision stamped at enqueue, falling back to the global
-		// default, exactly as the worker resolves it. A row explicitly opted out
-		// stays opted out: this is a backfill for rows nobody looked at, not an
-		// override of a decision already made.
-		detect := opts.GlobalDetectDefault
-		if item.DetectInstrumental != nil {
-			detect = *item.DetectInstrumental
-		}
-		if !detect {
-			res.SkippedDetectOff++
-			continue
-		}
-
-		src := strings.TrimSpace(item.Inputs.SourcePath)
-		if src == "" {
-			res.SkippedNoSource++
-			continue
-		}
+		item, src := c.item, c.src
 
 		verdict, err := b.det.Detect(ctx, src)
 		if err != nil {
-			res.Errors++
+			switch {
+			case errors.Is(err, ffmpeg.ErrAudioMissing):
+				res.SkippedMissing++
+			case errors.Is(err, ffmpeg.ErrSampleFailed) && ctx.Err() == nil:
+				res.Errors++
+				// No path at Warn: it is private library metadata. The detector's own
+				// Warn names the file; this one names the row.
+				slog.Warn("instrumental backfill: audio could not be sampled; not retrying until the file changes",
+					"queue_id", item.ID, "cause", "unsampleable")
+				if c.haveVersion {
+					if recErr := b.failures.RecordFailure(ctx, src, c.mtimeNano, c.size, err); recErr != nil {
+						slog.Warn("instrumental backfill: could not record unsampleable file; it will be retried",
+							"queue_id", item.ID, "error", recErr)
+					}
+				}
+			default:
+				res.Errors++
+				slog.Warn("instrumental backfill: detection failed for row; will retry",
+					"queue_id", item.ID, "error", err)
+			}
 			continue
 		}
 		res.Checked++
@@ -385,6 +414,154 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	return res, nil
+}
+
+// maxGatherPages bounds how many Limit-sized pages one Run reads looking for
+// rows worth a detector call (#1149). A skipped row costs a stat and one
+// primary-key lookup, never an ffmpeg run, so reading past them is cheap; the
+// bound keeps a cycle's stats finite when the remembered population is huge.
+const maxGatherPages = 10
+
+// candidate is a row worth a detector call, with the file version observed when
+// it was checked against the remembered failures.
+type candidate struct {
+	item            queue.WorkItem
+	src             string
+	mtimeNano, size int64
+	haveVersion     bool
+}
+
+// gather returns up to opts.Limit rows worth a detector call. ListUnclassified
+// applies Limit in SQL, but a remembered-unsampleable row is only known to be
+// skippable after a stat, so a page whose rows were skipped would hand the same
+// rows to every cycle and the rows behind them would never be reached. gather
+// therefore reads further pages until Limit rows are collected, the backlog
+// ends, or maxGatherPages is spent. Nothing is mutated while gathering, so
+// offset paging is stable within the run; rows are de-duplicated by id in case
+// a concurrent writer reorders the set between pages.
+//
+// The page cap alone would re-read the same remembered prefix every cycle, so a
+// changed file further back in a large remembered tail would never be reached.
+// Page 0 is therefore always read from offset 0 (never-attempted rows sort
+// first and keep their priority), and later pages resume at b.cursor, where
+// the previous capped gather stopped; on reaching the end of the backlog the
+// tail wraps back to offset Limit and reads up to where this run started. The
+// cursor is a position, not an identity: rows leaving the backlog shift it by
+// at most a few rows, which only delays them until the next wrap. Concurrent
+// Runs on one Backfiller may share a cursor value; that costs duplicate reads,
+// never a missed or double mutation (the store's writes are guarded).
+func (b *Backfiller) gather(ctx context.Context, opts Options, res *Result) ([]candidate, error) {
+	var out []candidate
+	seen := map[int64]bool{}
+	limit := opts.Limit
+	jump := limit
+	if limit > 0 {
+		b.cursorMu.Lock()
+		jump = max(b.cursor, limit)
+		b.cursorMu.Unlock()
+	}
+	wrapped := false
+	for page, offset := 0, 0; ; page++ {
+		items, err := b.store.ListUnclassified(ctx, queue.ListUnclassifiedOptions{
+			LibraryID:           opts.LibraryID,
+			Limit:               limit,
+			Offset:              offset,
+			GlobalDetectDefault: opts.GlobalDetectDefault,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("instrumentalbackfill: list unclassified: %w", err)
+		}
+		next := offset // position of the first row this page left unexamined
+		for _, item := range items {
+			if limit > 0 && len(out) == limit {
+				break
+			}
+			next++
+			if seen[item.ID] {
+				continue
+			}
+			seen[item.ID] = true
+			res.Candidates++
+			if c, ok := b.admit(ctx, opts, item, res); ok {
+				out = append(out, c)
+			}
+		}
+		if limit <= 0 {
+			return out, nil
+		}
+		ended := len(items) < limit
+		switch {
+		case len(out) == limit || (page+1 >= maxGatherPages && !ended):
+			// Stopped early. A run that never left page 0 says nothing about the
+			// tail, so it keeps the cursor for the next run.
+			if page > 0 {
+				b.setCursor(next)
+			}
+			return out, nil
+		case page == 0 && !ended:
+			offset = jump
+		case ended && !wrapped && jump > limit:
+			offset, wrapped = limit, true
+		case ended:
+			b.setCursor(0)
+			return out, nil
+		default:
+			offset = next
+		}
+		if wrapped && offset >= jump {
+			// The wrap reached where this run's tail read began: the whole
+			// backlog has been read once.
+			b.setCursor(0)
+			return out, nil
+		}
+		if page+1 >= maxGatherPages {
+			b.setCursor(offset)
+			return out, nil
+		}
+	}
+}
+
+// setCursor records where the next capped gather resumes its tail read.
+func (b *Backfiller) setCursor(pos int) {
+	b.cursorMu.Lock()
+	b.cursor = pos
+	b.cursorMu.Unlock()
+}
+
+// admit applies the per-row skips, counting each in res.
+func (b *Backfiller) admit(ctx context.Context, opts Options, item queue.WorkItem, res *Result) (candidate, bool) {
+	// Honor the per-item decision stamped at enqueue, falling back to the global
+	// default, exactly as the worker resolves it. A row explicitly opted out
+	// stays opted out: this is a backfill for rows nobody looked at, not an
+	// override of a decision already made.
+	detect := opts.GlobalDetectDefault
+	if item.DetectInstrumental != nil {
+		detect = *item.DetectInstrumental
+	}
+	if !detect {
+		res.SkippedDetectOff++
+		return candidate{}, false
+	}
+
+	c := candidate{item: item, src: strings.TrimSpace(item.Inputs.SourcePath)}
+	if c.src == "" {
+		res.SkippedNoSource++
+		return candidate{}, false
+	}
+
+	// A file ffmpeg already failed on at this exact (mtime, size) would fail
+	// identically: skip it without touching the audio again (#1149). A stat or
+	// store failure just falls through to the attempt.
+	if b.failures != nil {
+		if fi, statErr := os.Stat(c.src); statErr == nil {
+			c.mtimeNano, c.size, c.haveVersion = fi.ModTime().UnixNano(), fi.Size(), true
+			if skip, skipErr := b.failures.ShouldSkip(ctx, c.src, c.mtimeNano, c.size); skipErr == nil && skip {
+				res.SkippedUnsampleable++
+				return candidate{}, false
+			}
+		}
+	}
+	return c, true
 }
 
 // stampNotInstrumental applies a not-instrumental change: backup record first,

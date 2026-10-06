@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -70,6 +69,9 @@ type Queue interface {
 	// remains the path for a PROVIDER hit, where the lane is one of several and the
 	// completion is the ordinary multi-step one.
 	SetProviderLane(ctx context.Context, id int64, lane string) error
+	// ClearProviderLane drops a processing row's lane, for a completion served
+	// from a laneless cache entry (#1207).
+	ClearProviderLane(ctx context.Context, id int64) error
 	// SettleInstrumental records a detector-sourced instrumental verdict and
 	// completes the row in ONE transaction (telemetry, instrumental_result=1,
 	// outcome_type, provider_lane, status, scan_results writeback). It is shared
@@ -1170,10 +1172,9 @@ func timingRecordFromSong(song models.Song, durationSeconds int, now time.Time) 
 // single fetch timestamp the worker stamps for all output paths, and the writer
 // version is the same version.Version the [ve:] tag carries.
 //
-// A cache hit legitimately yields a zero FetchedAt: models.Song carries it as
-// `json:"-"`, so it never round-trips through the cache. That leaves the column
-// NULL, meaning "not recorded" -- the honest answer, since the fetch that
-// produced those lyrics happened on an earlier dispatch.
+// A cache hit carries the FetchedAt of the fetch that stored the entry
+// (#1207), the time those lyrics were actually fetched. An entry stored before
+// #1207 carries none, which leaves the column NULL, meaning "not recorded".
 func provenanceFromSong(song models.Song) queue.CompletionProvenance {
 	return queue.CompletionProvenance{
 		ISRC:          song.Track.ISRC,
@@ -1548,11 +1549,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// branch above - checked before cacheHit's fetch-only bookkeeping runs.
 	// song.WinningLane is the discriminator: it identifies a song sourced fresh
 	// from the detector lane THIS dispatch (set only by findOrdered/resolve on a
-	// live lane result), and is safe against a cache hit resurrecting a false
-	// positive here because models.Song.WinningLane carries `json:"-"` - it is
-	// never round-tripped through the cache, so a decoded cache hit always
-	// leaves it empty. The redundant !cacheHit guard is kept as defense in
-	// depth against a future change to that tag.
+	// live lane result). A cache hit restores the storing fetch's lane (#1207),
+	// so the !cacheHit guard is what keeps a hit off this path; behind it,
+	// detector verdicts are never cached and lyrics.DecodeCachedSong drops any
+	// stored lane that is not a built-in provider, the detector included.
 	if !cacheHit && song.WinningLane == detectorLaneName {
 		// Record the same fetch bookkeeping the ordinary !cacheHit path below
 		// records, BEFORE handing off to the detector completion. A detector
@@ -1725,11 +1725,22 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// multi-path rows are the minority and the kept file itself is intact.
 
 	ctxNoCancel := context.WithoutCancel(ctx)
-	if !cacheHit {
+	// A cache hit stamps the lane of the fetch that stored the entry (#1207),
+	// restored by lyrics.DecodeCachedSong. A laneless hit (a legacy entry, the
+	// bucket-0 fallback, a dropped lane) CLEARS the row's lane instead: a retry
+	// can carry the lane an earlier attempt stamped (a verify failure stamps the
+	// rejected lane), and the sidecar just written has no [source:]. Non-fatal.
+	if cacheHit && song.WinningLane == "" {
+		if err := w.queue.ClearProviderLane(ctxNoCancel, item.ID); err != nil {
+			slog.Warn("worker: clear provider lane failed", "id", item.ID, "error", err)
+		}
+	} else {
 		w.stampLane(ctxNoCancel, item.ID, song.WinningLane)
+	}
+	if !cacheHit {
 		// Cached only AFTER a write landed (#553). cache consumers are the
-		// worker's own lookup (a hit re-runs the writer and settles without a
-		// lane) and scan.Enqueuer.EnqueuePending (a hit marks the scan row done
+		// worker's own lookup (a hit re-runs the writer and settles with the
+		// stored lane) and scan.Enqueuer.EnqueuePending (a hit marks the scan row done
 		// with no enqueue at all). A result the no-downgrade guard refused
 		// everywhere never reaches here (completeKept above returns first), so
 		// it can never be served later as though it were what is on disk; the
@@ -2221,21 +2232,20 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 		return w.completeKept(ctx, item, kept)
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)
-	// A detector-sourced instrumental is deliberately NOT cache-stored. Every
-	// field that makes this verdict replayable - WinningLane and the whole
-	// Detector* telemetry block - carries `json:"-"` on models.Song, so
-	// encodeSong would persist a bare Instrumental=1 song. A later cache HIT on
-	// that entry decodes with WinningLane empty, misses the detector routing at
-	// the call site, and completes the item having written the marker but
-	// stamped no instrumental_result and no provenance - permanently, for every
-	// future track sharing this artist/track/duration key.
+	// A detector-sourced instrumental is deliberately NOT cache-stored. The
+	// Detector* telemetry block that makes this verdict replayable carries
+	// `json:"-"` on models.Song, and lyrics.DecodeCachedSong drops a stored
+	// "detector" lane (#1207), so a stored entry would decode as a bare
+	// Instrumental=1 song. A later cache HIT on it would miss the detector
+	// routing at the call site and complete the item having written the marker
+	// but stamped no instrumental_result and no provenance - permanently, for
+	// every future track sharing this artist/track/duration key.
 	//
-	// The alternative (give those fields real json tags and restore them on the
-	// hit path) was weighed and declined: WinningLane's `json:"-"` is itself the
-	// guard that stops a cache hit from resurrecting a stale detector positive,
-	// and serializing the block would need a cache-generation bump to retire
-	// existing rows. Re-running the detector on a later track is far cheaper
-	// than a permanently unreplayable cache row.
+	// The alternative (serialize the block and restore it on the hit path) was
+	// weighed and declined: it would let a cache hit resurrect a stale detector
+	// positive, and would need a cache-generation bump to retire existing rows.
+	// Re-running the detector on a later track is far cheaper than a
+	// permanently unreplayable cache row.
 	//
 	// Provenance is stamped BEFORE the settle, not after. It is advisory (a failed
 	// provenance write must not defer a settle whose marker is already on disk),
@@ -2249,7 +2259,7 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// time: song.FetchedAt is assigned inside the !cacheHit block further down
 	// runOne, which this branch has already returned before reaching. So
 	// fetched_at stays NULL here, and a detector row is indistinguishable from a
-	// cache hit on that column alone -- use provider_lane / instrumental_result
+	// legacy (pre-#1207) cache hit on that column alone -- use provider_lane / instrumental_result
 	// to tell them apart. The detector's own timing lives in completed_at and the
 	// detector telemetry, so nothing is lost by not inventing one here.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
@@ -2550,7 +2560,13 @@ func (w *Worker) writeFor(item queue.WorkItem) func(models.Song, string, string)
 // with the row still describing the file on disk (queue.SettleUpgradeTrip).
 // Every caller settles on an answer (a miss, a refused result, a guard verdict).
 func (w *Worker) settleUpgradeTrip(ctx context.Context, item queue.WorkItem) error {
-	if _, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID, true); err != nil {
+	return w.settleUpgradeTripAnswered(ctx, item, true)
+}
+
+// settleUpgradeTripAnswered is settleUpgradeTrip with an explicit answered flag
+// (false: no lane gave a verdict, so the #1120 pass marker stays unrecorded).
+func (w *Worker) settleUpgradeTripAnswered(ctx context.Context, item queue.WorkItem, answered bool) error {
+	if _, err := w.queue.SettleUpgradeTrip(context.WithoutCancel(ctx), item.ID, answered); err != nil {
 		return w.fail(ctx, item, fmt.Errorf("worker: settle upgrade trip %d: %w", item.ID, err))
 	}
 	w.consecutiveFailures = 0
@@ -2574,6 +2590,12 @@ func (w *Worker) settleUpgradeTrip(ctx context.Context, item queue.WorkItem) err
 func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause error) error {
 	if item.UpgradeQueued {
 		// No miss_count for a track that already has lyrics on disk (#553).
+		// A hollow subtitle body (ErrTruncatedResponse, #1131) is not an answer:
+		// the provider has the lyric but returned none for this request, so the
+		// post-settle mis_synced pass must not be recorded as spent.
+		if errors.Is(cause, musixmatch.ErrTruncatedResponse) {
+			return w.settleUpgradeTripAnswered(ctx, item, false)
+		}
 		return w.settleUpgradeTrip(ctx, item)
 	}
 	nextMissCount := item.MissCount + 1
@@ -2622,11 +2644,11 @@ func outputPaths(inputs models.Inputs) []models.OutputPath {
 }
 
 func encodeSong(song models.Song) (string, error) {
-	b, err := json.Marshal(song)
+	encoded, err := lyrics.EncodeCachedSong(song)
 	if err != nil {
 		return "", fmt.Errorf("worker: encode song cache: %w", err)
 	}
-	return string(b), nil
+	return encoded, nil
 }
 
 // decodeSong is a package-local alias for lyrics.DecodeCachedSong (#952): the
