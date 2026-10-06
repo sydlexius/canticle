@@ -1708,7 +1708,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			continue
 		}
 		if err != nil {
-			err = fmt.Errorf("worker: write item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, err)
+			err = fmt.Errorf("worker: write item %d output: %w", item.ID, err)
 			slog.Warn("worker write failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "outdir", p.Outdir, "filename", p.Filename, "error", err)
 			return w.failPass(ctx, item, err, landed)
 		}
@@ -2253,7 +2253,7 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 		if writeErr := write(song, p.Filename, p.Outdir); errors.Is(writeErr, lyrics.ErrKeptBetter) {
 			kept = append(kept, keptErrorOf(writeErr))
 		} else if writeErr != nil {
-			writeErr = fmt.Errorf("worker: write instrumental item %d output %s/%s: %w", item.ID, p.Outdir, p.Filename, writeErr)
+			writeErr = fmt.Errorf("worker: write instrumental item %d output: %w", item.ID, writeErr)
 			slog.Warn("worker instrumental detection: write failed; treating as miss", "id", item.ID, "error", writeErr)
 			if derr := w.requeueDeferred(ctx, item, writeErr); derr != nil {
 				return derr
