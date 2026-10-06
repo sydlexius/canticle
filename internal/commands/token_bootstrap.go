@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -26,18 +27,53 @@ type tokenMinter interface {
 type persistingRenewer struct {
 	minter tokenMinter
 	store  secrets.Store
+	// legacy is the stored state this process started with when its token came
+	// from the store with neither a client-identity record nor a write stamp
+	// (stored before #934 / #942). Only that exact state stays renewable without
+	// a record, as resolveTokenWithStore documents. Every write through
+	// secrets.SetMusixmatchTokenWithIdentity sets a fresh stamp, so an operator
+	// save after startup, even of the byte-identical token, no longer equals it.
+	legacy *secrets.MusixmatchTokenState
 }
 
-// Renew mints a replacement and persists it with its client identity (see
-// persistMintedToken). A persist failure is logged at ERROR but the token is
-// still returned: the current run recovers, and the log says the replacement
-// will not survive a restart.
+// errOperatorTokenStored reports a renewal skipped because the stored token is
+// an operator credential, or was written by someone else while the renewal was
+// in flight (#942, #554).
+var errOperatorTokenStored = errors.New("musixmatch token renewal skipped: an operator-saved token is stored")
+
+// Renew first refuses (errOperatorTokenStored, nothing minted) when the store
+// holds a token with no client-identity record, unless the stored state is
+// exactly the startup legacy state: the identity record only ever describes a
+// token canticle minted, and every operator write path clears it (#942). A
+// store read failure also refuses, since the check cannot be made.
+//
+// Otherwise it mints a replacement and persists it with its client identity
+// ONLY IF the stored state still equals what the check read
+// (secrets.SetMusixmatchTokenWithIdentityIfUnchanged, one transaction on the
+// SQLStore). An operator save landing during the mint changes the stamp, so the
+// minted token is dropped and errOperatorTokenStored returned. Any other
+// persist failure is logged at ERROR but the token is still returned: the
+// current run recovers, and the log says the replacement will not survive a
+// restart.
 func (r *persistingRenewer) Renew(ctx context.Context) (string, error) {
+	snap, err := secrets.ReadMusixmatchTokenState(ctx, r.store)
+	if err != nil {
+		return "", fmt.Errorf("check stored musixmatch token before renewal: %w", err)
+	}
+	if snap.HasToken && !snap.HasIdentity && (r.legacy == nil || snap != *r.legacy) {
+		slog.Warn("not renewing the musixmatch token: the stored token was saved by an operator (#942)")
+		return "", errOperatorTokenStored
+	}
 	tok, err := r.minter.Mint(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := persistMintedToken(ctx, r.store, tok); err != nil {
+	err = secrets.SetMusixmatchTokenWithIdentityIfUnchanged(ctx, r.store, tok, musixmatch.ClientIdentityKey(), snap)
+	if errors.Is(err, secrets.ErrMusixmatchTokenChanged) {
+		slog.Warn("dropped a renewed musixmatch token: the stored token was replaced while it was being minted (#942)")
+		return "", errOperatorTokenStored
+	}
+	if err != nil {
 		slog.Error("renewed the musixmatch token but could not persist it; the next start will use the old one",
 			"error", err)
 	}

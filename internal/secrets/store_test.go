@@ -615,3 +615,147 @@ func TestSetMusixmatchTokenWithIdentityFallbackTokenFailure(t *testing.T) {
 		t.Errorf("vals = %v, want new-tok + new|id", w.vals)
 	}
 }
+
+func (w *nameWriter) Get(_ context.Context, name string) (string, bool, error) {
+	v, ok := w.vals[name]
+	return v, ok, nil
+}
+
+func (w *nameWriter) List(context.Context) ([]SecretInfo, error) { return nil, nil }
+
+// TestSetMusixmatchTokenWithIdentityIfUnchangedFallback pins the compare-and-set
+// on a store with no atomic pair method (#942): a matching state writes (with a
+// fresh stamp), a changed one writes nothing, and a failed stamp write stops
+// the token write.
+func TestSetMusixmatchTokenWithIdentityIfUnchangedFallback(t *testing.T) {
+	ctx := context.Background()
+	w := &nameWriter{vals: map[string]string{NameMusixmatchToken: "old-tok"}}
+	snap, err := ReadMusixmatchTokenState(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetMusixmatchTokenWithIdentityIfUnchanged(ctx, w, "new-tok", "new|id", snap); err != nil {
+		t.Fatalf("matching state: err = %v, want nil", err)
+	}
+	if w.vals[NameMusixmatchToken] != "new-tok" || w.vals[NameMusixmatchTokenStamp] == "" {
+		t.Fatalf("matching state not written with a stamp: %v", w.vals)
+	}
+	if err := SetMusixmatchTokenWithIdentityIfUnchanged(ctx, w, "other-tok", "new|id", snap); !errors.Is(err, ErrMusixmatchTokenChanged) {
+		t.Fatalf("changed state: err = %v, want ErrMusixmatchTokenChanged", err)
+	}
+	if w.vals[NameMusixmatchToken] != "new-tok" {
+		t.Errorf("changed state wrote the token: %q", w.vals[NameMusixmatchToken])
+	}
+	w = &nameWriter{failSet: map[string]bool{NameMusixmatchTokenStamp: true}, vals: map[string]string{}}
+	if err := SetOperatorMusixmatchToken(ctx, w, "op"); err == nil {
+		t.Fatal("stamp write failure: err = nil, want an error")
+	}
+	if _, ok := w.vals[NameMusixmatchToken]; ok {
+		t.Error("token written although its stamp write failed")
+	}
+}
+
+// TestTokenPairIfUnchangedStores covers the compare-and-set write on both real
+// stores: a matching state commits, a changed one returns
+// ErrMusixmatchTokenChanged and writes nothing, and the SQL read/commit error
+// arms surface.
+func TestTokenPairIfUnchangedStores(t *testing.T) {
+	ctx := context.Background()
+	sqlStore, sqlDB := newTestStore(t)
+	stores := map[string]interface {
+		TokenPairWriter
+		TokenPairCASWriter
+		Get(context.Context, string) (string, bool, error)
+	}{"sqlite": sqlStore, "memory": NewMemoryStore()}
+	for name, s := range stores {
+		t.Run(name, func(t *testing.T) {
+			if err := s.SetTokenWithIdentity(ctx, "tok", "host|app"); err != nil {
+				t.Fatal(err)
+			}
+			state, err := ReadMusixmatchTokenState(ctx, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetTokenWithIdentityIfUnchanged(ctx, "tok2", "", state); err != nil {
+				t.Fatalf("matching state: %v", err)
+			}
+			if v, _, _ := s.Get(ctx, NameMusixmatchToken); v != "tok2" {
+				t.Errorf("token = %q, want tok2", v)
+			}
+			// state is now stale: the write above changed the stamp.
+			err = s.SetTokenWithIdentityIfUnchanged(ctx, "tok3", "", state)
+			if !errors.Is(err, ErrMusixmatchTokenChanged) {
+				t.Fatalf("stale state err = %v, want ErrMusixmatchTokenChanged", err)
+			}
+			if v, _, _ := s.Get(ctx, NameMusixmatchToken); v != "tok2" {
+				t.Errorf("token = %q after refused write, want tok2", v)
+			}
+		})
+	}
+
+	if err := sqlDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlStore.SetTokenWithIdentityIfUnchanged(ctx, "x", "", MusixmatchTokenState{}); err == nil {
+		t.Error("SQL write on a closed database returned nil error")
+	}
+	if err := NewMemoryStore().SetTokenWithIdentityIfUnchanged(canceledCtx(), "x", "", MusixmatchTokenState{}); err == nil {
+		t.Error("memory write with a canceled context returned nil error")
+	}
+}
+
+func canceledCtx() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// failingGetter fails Get for the names in fail, so each read arm of
+// ReadMusixmatchTokenState can be reached.
+type failingGetter struct{ fail map[string]bool }
+
+func (g failingGetter) Get(_ context.Context, name string) (string, bool, error) {
+	if g.fail[name] {
+		return "", false, errors.New("get refused")
+	}
+	return "v", true, nil
+}
+
+// TestReadMusixmatchTokenStateErrors pins that a failed read of any of the
+// three names fails the whole read with a zero state, so a caller never acts
+// on a partial snapshot.
+func TestReadMusixmatchTokenStateErrors(t *testing.T) {
+	ctx := context.Background()
+	for _, name := range []string{NameMusixmatchToken, NameMusixmatchClientIdentity, NameMusixmatchTokenStamp} {
+		st, err := ReadMusixmatchTokenState(ctx, failingGetter{fail: map[string]bool{name: true}})
+		if err == nil {
+			t.Errorf("%s: err = nil, want the read error", name)
+		}
+		if st != (MusixmatchTokenState{}) {
+			t.Errorf("%s: state = %+v on error, want zero", name, st)
+		}
+	}
+}
+
+// TestSQLStoreIfUnchangedUnreadableState pins that a stored value the store
+// cannot decrypt makes the compare-and-set fail with a read error (not
+// ErrMusixmatchTokenChanged) and leaves the stored pair untouched.
+func TestSQLStoreIfUnchangedUnreadableState(t *testing.T) {
+	ctx := context.Background()
+	store, sqlDB := newTestStore(t)
+	if err := store.SetTokenWithIdentity(ctx, "tok", "host|app"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := ReadMusixmatchTokenState(ctx, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongKey := NewSQLStore(sqlDB, testKey(t))
+	err = wrongKey.SetTokenWithIdentityIfUnchanged(ctx, "tok2", "", state)
+	if err == nil || errors.Is(err, ErrMusixmatchTokenChanged) {
+		t.Fatalf("err = %v, want a read error distinct from ErrMusixmatchTokenChanged", err)
+	}
+	if v, _, _ := store.Get(ctx, NameMusixmatchToken); v != "tok" {
+		t.Errorf("token = %q after a failed compare, want tok", v)
+	}
+}
