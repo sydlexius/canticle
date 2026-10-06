@@ -52,3 +52,35 @@ func TestDecodeCachedSong_LaneDegradesSafely(t *testing.T) {
 		})
 	}
 }
+
+// TestEncodeCachedSong_RoundTripKeepsLaneAndFetchTimeNotUpstream pins the
+// encode half of #1207: the lane and fetch time survive Encode then Decode, and
+// the licensor (Upstream) is never stored (#850).
+func TestEncodeCachedSong_RoundTripKeepsLaneAndFetchTimeNotUpstream(t *testing.T) {
+	track := models.Track{ArtistName: "Synthetic Artist", TrackName: "Synthetic Title"}
+	at := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	song := models.Song{
+		Track:       track,
+		Lyrics:      models.Lyrics{LyricsBody: "words"},
+		WinningLane: "musixmatch",
+		FetchedAt:   at,
+		Upstream:    "lyricfind",
+	}
+	raw, err := EncodeCachedSong(song)
+	if err != nil {
+		t.Fatalf("EncodeCachedSong: %v", err)
+	}
+	got := DecodeCachedSong(raw, track)
+	if got.WinningLane != "musixmatch" {
+		t.Errorf("WinningLane = %q, want musixmatch", got.WinningLane)
+	}
+	if !got.FetchedAt.Equal(at) {
+		t.Errorf("FetchedAt = %v, want %v", got.FetchedAt, at)
+	}
+	if got.Upstream != "" {
+		t.Errorf("Upstream = %q, want empty (never stored)", got.Upstream)
+	}
+	if got.Lyrics.LyricsBody != "words" {
+		t.Errorf("LyricsBody = %q, want words", got.Lyrics.LyricsBody)
+	}
+}
