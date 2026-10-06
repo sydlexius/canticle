@@ -1240,3 +1240,56 @@ func TestClassify_Heuristic_PositionalDegradationSurvives(t *testing.T) {
 		t.Errorf("target = %q; want the lone gap's stem", res.Moves[0].Target)
 	}
 }
+
+// TestClassify_Heuristic_SharedTrackNumberOnlyIsNotPaired is the #1140
+// regression: with no TITLE tag on either side (artist-only audio, the
+// production shape) the guard compares bare stems, and a
+// shared leading track number ("05. ") carried two unrelated titles over the
+// confidence floor. The 1:1 tier must decline the pair.
+func TestClassify_Heuristic_SharedTrackNumberOnlyIsNotPaired(t *testing.T) {
+	root := tempRoot(t)
+	dir := filepath.Join(root, "Album")
+	audio := filepath.Join(dir, "05. Gamma Delta.flac")
+	orphan := filepath.Join(dir, "05. Alpha Beta.lrc")
+	write(t, audio, "a")
+	write(t, orphan, "[00:01.00]x\n")
+
+	r, lib := newRealigner(root, defaultCfg(), nil)
+	withAudioProv(r, map[string]audioProv{audio: {artist: "Marbled Kestrel Choir"}})
+
+	res, err := r.PlanLibrary(lib)
+	if err != nil {
+		t.Fatalf("PlanLibrary: %v", err)
+	}
+	if len(res.Moves) != 0 {
+		t.Errorf("moves = %+v; want none: only the track number is shared", res.Moves)
+	}
+	if len(res.Skips) != 1 || res.Skips[0].Kind != "ambiguous" {
+		t.Fatalf("skips = %+v; want 1 ambiguous", res.Skips)
+	}
+}
+
+// TestClassify_Heuristic_PunctuationVariantsStillPlanUntagged keeps the
+// punctuation-only renames planning when both sides are bare stems.
+func TestClassify_Heuristic_PunctuationVariantsStillPlanUntagged(t *testing.T) {
+	for _, tc := range []struct{ audio, orphan string }{
+		{"05. What Is This.flac", "05. What Is This?.lrc"},
+		{"06. Rock + Roll.flac", "06. Rock _ Roll.lrc"},
+		{"07. Don't Stop.flac", "07. Don’t Stop.lrc"},
+	} {
+		root := tempRoot(t)
+		dir := filepath.Join(root, "Album")
+		audio := filepath.Join(dir, tc.audio)
+		write(t, audio, "a")
+		write(t, filepath.Join(dir, tc.orphan), "[00:01.00]x\n")
+		r, lib := newRealigner(root, defaultCfg(), nil)
+		withAudioProv(r, map[string]audioProv{audio: {artist: "Marbled Kestrel Choir"}})
+		res, err := r.PlanLibrary(lib)
+		if err != nil {
+			t.Fatalf("PlanLibrary: %v", err)
+		}
+		if len(res.Moves) != 1 {
+			t.Errorf("%q -> %q: moves = %+v, skips = %+v; want 1 move", tc.orphan, tc.audio, res.Moves, res.Skips)
+		}
+	}
+}

@@ -310,3 +310,15 @@ func TestResolveHeuristic(t *testing.T) {
 		}
 	})
 }
+
+func TestStripTrackPrefix(t *testing.T) {
+	for in, want := range map[string]string{
+		"05. Alpha": "Alpha", "05 - Alpha": "Alpha", "5) Alpha": "Alpha",
+		"05_Alpha": "Alpha", "Alpha": "Alpha", "05": "05", "2 Fast": "Fast",
+		"2Fast": "2Fast", "1234": "1234", "05 -": "05 -", "5)": "5)",
+	} {
+		if got := stripTrackPrefix(in); got != want {
+			t.Errorf("stripTrackPrefix(%q) = %q; want %q", in, got, want)
+		}
+	}
+}
