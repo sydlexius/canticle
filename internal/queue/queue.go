@@ -696,6 +696,9 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
 	// every path, #553) was answered by the lanes, so it records its #1120 pass
 	// here; a landed trip was already re-stamped at fetch and is unaffected.
 	// upgrade_queued is read before the 053 trigger disarms it (AFTER UPDATE).
+	// Completing an armed trip (something landed, or a lane answered and the
+	// writer kept the file) resets the #1118 hold escalation; a trip that
+	// landed nothing settles via SettleUpgradeTrip, which counts the miss.
 	res, err := tx.ExecContext(ctx,
 		`UPDATE work_queue
          SET status = 'done',
@@ -703,7 +706,8 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
              last_error = '',
              refused_waits = 0,
              missync_recheck_generation = CASE WHEN upgrade_queued = 1 AND timing_outcome = 'mis_synced'
-                 THEN ? ELSE missync_recheck_generation END
+                 THEN ? ELSE missync_recheck_generation END,
+             upgrade_miss_count = CASE WHEN upgrade_queued = 1 THEN 0 ELSE upgrade_miss_count END
          WHERE id = ?
            AND status = 'processing'`,
 		now,
