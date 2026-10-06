@@ -2,15 +2,20 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/aligner"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/orchestrator"
+	"github.com/sydlexius/canticle/internal/web"
 )
 
 // TestWithWebUIServesPages verifies that mounting the web UI registers its
@@ -182,5 +187,52 @@ func TestWithLaneHealthReachesDashboard(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `mx-dash-tile-status-probing">Probing<`) {
 		t.Error("dashboard missing the lane status line; WithLaneHealth did not reach the web UI")
+	}
+}
+
+// ctxAligner's AlignFile returns, noting it on ended, once its context ends.
+type ctxAligner struct{ ended chan struct{} }
+
+func (ctxAligner) Health(context.Context) error { return nil }
+func (a ctxAligner) AlignFile(ctx context.Context, _ io.Reader, _ []string) (aligner.Result, error) {
+	<-ctx.Done()
+	a.ended <- struct{}{}
+	return aligner.Result{}, ctx.Err()
+}
+
+// TestCloseEndsAutoAlignmentRuns pins Close's call of the web UI's CloseAuto,
+// its only production caller: Close returns with a started run's context ended.
+func TestCloseEndsAutoAlignmentRuns(t *testing.T) {
+	ok := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	ok(err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	audio := filepath.Join(t.TempDir(), "song.flac")
+	lrc := strings.TrimSuffix(audio, ".flac") + ".lrc"
+	ok(os.WriteFile(audio, []byte("invented audio"), 0o600))
+	ok(os.WriteFile(lrc, []byte("[00:01.00]one\n[00:05.00]two\n"), 0o600))
+	fi, err := os.Stat(lrc)
+	ok(err)
+	_, err = sqlDB.ExecContext(context.Background(), `INSERT INTO libraries (path, name) VALUES (?, 'lib')`, filepath.Dir(audio))
+	ok(err)
+	_, err = sqlDB.ExecContext(context.Background(), `INSERT INTO work_queue (artist, title, artist_key, title_key, album,
+		status, source_path, outcome_type, sync_tier) VALUES ('A', 'T', 'a', 't', 'Al', 'done', ?, 'synced', 'line')`, audio)
+	ok(err)
+	fake := ctxAligner{ended: make(chan struct{}, 1)}
+	h := NewHandler(&fakeAuth{}, &fakeQueue{}, "lyrics", WithWebUI(config.Config{}, "vtest"), WithReportsDB(sqlDB), WithAutoAligner(fake, 1))
+	token := strings.Repeat("ab", 32)
+	req := httptest.NewRequest(http.MethodPost, "/preview/1/auto", strings.NewReader(fmt.Sprintf("csrf_token=%s&mtime=%d", token, fi.ModTime().UnixNano())))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: web.CSRFCookieName, Value: token})
+	rec := httptest.NewRecorder()
+	if h.ServeHTTP(rec, req); rec.Code != http.StatusAccepted {
+		t.Fatalf("start = %d %s, want 202", rec.Code, rec.Body)
+	}
+	if h.Close(); len(fake.ended) != 1 {
+		t.Fatal("Close returned with the Auto alignment run's context still live")
 	}
 }

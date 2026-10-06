@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -35,6 +34,8 @@ type runFake struct {
 	fakeAuto
 	mu     sync.Mutex
 	aligns atomic.Int32
+	ended  atomic.Int32 // calls that returned because their context ended
+	closed atomic.Int32 // calls whose audio handle was closed once read
 	audio  string
 	lines  []string
 	err    error
@@ -48,6 +49,10 @@ func (f *runFake) AlignFile(ctx context.Context, audio io.Reader, lines []string
 		f.pre()
 	}
 	b, _ := io.ReadAll(audio)
+	// Read to its end, the handle is closed already: before the sidecar works.
+	if _, err := audio.Read(make([]byte, 1)); errors.Is(err, os.ErrClosed) {
+		f.closed.Add(1)
+	}
 	f.mu.Lock()
 	f.aligns.Add(1)
 	f.audio, f.lines = string(b), lines
@@ -59,6 +64,7 @@ func (f *runFake) AlignFile(ctx context.Context, audio io.Reader, lines []string
 		select {
 		case <-hold:
 		case <-ctx.Done():
+			f.ended.Add(1)
 			return aligner.Result{}, fmt.Errorf("aligner: %w", ctx.Err())
 		}
 	}
@@ -73,7 +79,8 @@ func (f *runFake) script(err error, hold chan struct{}) {
 
 type autoEnv struct {
 	*editEnv
-	url string
+	url   string
+	ahead atomic.Int64 // how far the injected clock runs ahead of the wall clock
 }
 
 // newAutoEnv attaches fake to an edit fixture. Its cleanup cancels and waits
@@ -84,16 +91,38 @@ func newAutoEnv(t *testing.T, fake *runFake) *autoEnv {
 	e.url = "/preview/" + e.id + "/auto"
 	e.ui.AttachAutoAligner(fake, 1)
 	waitFor(t, "the priming probe", func() bool { return e.ui.auto.checkedAt.Load() != 0 && !e.ui.auto.refreshing.Load() })
-	t.Cleanup(func() {
-		e.ui.auto.runs.mu.Lock()
-		all := slices.Collect(maps.Values(e.ui.auto.runs.m))
-		e.ui.auto.runs.mu.Unlock()
-		for _, r := range all {
-			r.cancel()
-			<-r.done
-		}
-	})
+	e.ui.auto.now = func() time.Time { return time.Now().Add(time.Duration(e.ahead.Load())) }
+	t.Cleanup(e.ui.CloseAuto)
 	return e
+}
+
+// active is the registry's count of live run goroutines.
+func (e *autoEnv) active() int {
+	e.ui.auto.runs.mu.Lock()
+	defer e.ui.auto.runs.mu.Unlock()
+	return e.ui.auto.runs.active
+}
+
+func (e *autoEnv) cancel() *httptest.ResponseRecorder {
+	return e.post(e.url+"/cancel", url.Values{})
+}
+
+// ended fails unless r's goroutine ends soon.
+func ended(t *testing.T, what string, r *autoRun) {
+	t.Helper()
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the run's goroutine did not end %s", what)
+	}
+}
+
+// secondRow seeds another eligible row: its start URL and form.
+func (e *autoEnv) secondRow(t *testing.T) (string, url.Values) {
+	t.Helper()
+	e.put(t, "two.lrc", editLRC)
+	two := "/preview/" + itoa(e.seedTier(t, e.writeFile(t, e.root, "two.flac"), "line")) + "/auto"
+	return two, url.Values{"mtime": {itoa(previewSidecarMTime([]string{e.root}, filepath.Join(e.root, "two.lrc")))}}
 }
 
 // touch moves the .lrc mtime hours on, as a rewrite would.
@@ -152,8 +181,8 @@ func TestAutoRunStartAttachPollDone(t *testing.T) {
 	}
 	close(fake.hold)
 	body := e.waitState(t, autoDone)
-	if got := fake.aligns.Load(); got != 1 {
-		t.Fatalf("sidecar calls after three starts of one track = %d, want 1", got)
+	if got := fake.aligns.Load(); got != 1 || fake.closed.Load() != 1 {
+		t.Fatalf("after three starts of one track: sidecar calls %d, audio closed once read %d; want 1 and 1", got, fake.closed.Load())
 	}
 	if body["mtime"] != json.Number(mtime) || body["aligned_words"] != json.Number("2") {
 		t.Errorf("done payload = %v, want mtime %s and aligned_words 2", body, mtime)
@@ -231,21 +260,13 @@ func TestAutoRunRefusals(t *testing.T) {
 // A start naming a newer mtime replaces a run going against the old one.
 func TestAutoRunChangedFile(t *testing.T) {
 	e := newAutoEnv(t, &runFake{hold: make(chan struct{})})
-	ended := func(what string, r *autoRun) {
-		t.Helper()
-		select {
-		case <-r.done:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("the run was not canceled when %s", what)
-		}
-	}
 	e.start(t)
 	first := e.run()
 	e.touch(1)
 	if code, body := e.poll(); code != http.StatusConflict || body["error"] != "changed" {
 		t.Fatalf("poll after the .lrc changed = %d %v, want 409 changed", code, body)
 	}
-	ended("its .lrc changed", first)
+	ended(t, "when its .lrc changed", first)
 	if code, _ := e.poll(); code != http.StatusNotFound || e.run() != nil {
 		t.Fatalf("poll after the 409 = %d (run %v), want 404 and no run", code, e.run())
 	}
@@ -255,7 +276,7 @@ func TestAutoRunChangedFile(t *testing.T) {
 	e.touch(2)
 	// Busy until the canceled goroutine ends (the cap is 1), then admitted.
 	waitFor(t, "the replacing start", func() bool { return e.start(t).Code == http.StatusAccepted })
-	ended("a start named a newer .lrc", old)
+	ended(t, "when a start named a newer .lrc", old)
 	if cur := e.run(); cur == nil || cur == old || cur.state != autoRunning {
 		t.Fatalf("run after a start with a newer mtime = %+v, want a new running run", cur)
 	}
@@ -269,9 +290,7 @@ func TestAutoRunChangedFile(t *testing.T) {
 func TestAutoRunGlobalCap(t *testing.T) {
 	fake := &runFake{hold: make(chan struct{})}
 	e := newAutoEnv(t, fake)
-	e.put(t, "two.lrc", editLRC)
-	two := "/preview/" + itoa(e.seedTier(t, e.writeFile(t, e.root, "two.flac"), "line")) + "/auto"
-	vals := url.Values{"mtime": {itoa(previewSidecarMTime([]string{e.root}, filepath.Join(e.root, "two.lrc")))}}
+	two, vals := e.secondRow(t)
 	e.start(t)
 	if rec := e.post(two, vals); rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"busy"`) {
 		t.Fatalf("second row at the cap = %d %s, want 429 busy", rec.Code, rec.Body)
@@ -384,5 +403,202 @@ func TestAutoRunFailureCodes(t *testing.T) {
 	e.start(t)
 	if got := e.waitState(t, autoFailed); got["error"] != "timeout" {
 		t.Errorf("run past its timeout = %v, want error timeout", got)
+	}
+}
+
+const canceledBody = `{"state":"canceled"}`
+
+// The cancel route ends the run's context and forgets the run; it is
+// idempotent, needs the CSRF token, and drops a finished result too.
+func TestAutoRunCancel(t *testing.T) {
+	fake := &runFake{hold: make(chan struct{})}
+	e := newAutoEnv(t, fake)
+	logs := captureLogs(t)
+	e.start(t)
+	run := e.run()
+	if rec := e.postWith(e.url+"/cancel", url.Values{}, false); rec.Code != http.StatusForbidden || e.run() != run {
+		t.Fatalf("cancel with no csrf token = %d (run %v), want 403 and the run kept", rec.Code, e.run())
+	}
+	if rec := e.postWith(e.url+"/cancel", url.Values{}, true, "Sec-Fetch-Site", "cross-site"); rec.Code != http.StatusForbidden || e.run() != run {
+		t.Fatalf("cross-site cancel = %d (run %v), want 403 and the run kept", rec.Code, e.run())
+	}
+	if rec := e.post("/preview/999999/auto/cancel", url.Values{}); rec.Code != http.StatusNotFound {
+		t.Errorf("cancel of an unknown row = %d, want 404", rec.Code)
+	}
+	for i := range 2 {
+		rec := e.cancel()
+		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != canceledBody || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("cancel %d = %d %s (%q), want 200 %s, no-store", i, rec.Code, rec.Body, rec.Header().Get("Cache-Control"), canceledBody)
+		}
+	}
+	ended(t, "after the cancel route", run)
+	if got := fake.ended.Load(); got != 1 {
+		t.Errorf("sidecar calls whose context ended = %d, want 1", got)
+	}
+	if code, _ := e.poll(); code != http.StatusNotFound || e.run() != nil || e.active() != 0 {
+		t.Fatalf("after cancel: poll = %d, run %v, active %d; want 404, none, 0", code, e.run(), e.active())
+	}
+	if l := logs.String(); !strings.Contains(l, "run canceled") || !strings.Contains(l, "result=canceled") || strings.Contains(l, "song") {
+		t.Errorf("logs must name the cancel and its result class, and no path:\n%s", l)
+	}
+
+	fake.script(nil, nil)
+	e.start(t)
+	e.waitState(t, autoDone)
+	if rec := e.cancel(); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != canceledBody {
+		t.Errorf("cancel of a finished run = %d %s, want 200 %s", rec.Code, rec.Body, canceledBody)
+	}
+	if code, _ := e.poll(); code != http.StatusNotFound {
+		t.Errorf("poll after a finished run was canceled = %d, want 404", code)
+	}
+}
+
+// A canceled run whose goroutine is still alive counts under the cap, and its
+// late result neither comes back nor touches the run that replaced it.
+func TestAutoRunCancelLateFinish(t *testing.T) {
+	first, second := make(chan struct{}), make(chan struct{})
+	fake := &runFake{hold: first, deaf: true}
+	e := newAutoEnv(t, fake)
+	t.Cleanup(sync.OnceFunc(func() { close(second) }))
+	release := sync.OnceFunc(func() { close(first) })
+	t.Cleanup(release)
+	e.start(t)
+	old := e.run()
+	waitFor(t, "the first sidecar call", func() bool { return fake.aligns.Load() == 1 })
+	fake.script(nil, second)
+	e.cancel()
+	if rec := e.start(t); rec.Code != http.StatusTooManyRequests || e.active() != 1 {
+		t.Fatalf("start while the canceled goroutine lives = %d %s (active %d), want 429 and 1", rec.Code, rec.Body, e.active())
+	}
+	e.ui.auto.maxConcurrent = 2
+	if rec := e.start(t); rec.Code != http.StatusAccepted {
+		t.Fatalf("start under a cap of 2 = %d %s, want 202", rec.Code, rec.Body)
+	}
+	next := e.run()
+	release()
+	ended(t, "once released", old)
+	if code, body := e.poll(); e.run() != next || code != http.StatusOK || body["state"] != autoRunning || e.active() != 1 {
+		t.Fatalf("after the canceled run finished late: run %p (want %p), poll %d %v, active %d; want the new run, running, 1",
+			e.run(), next, code, body, e.active())
+	}
+}
+
+// A running run nobody polls is canceled after autoOrphanAfter by the ticker
+// alone; a polled one is kept. A result is forgotten autoResultTTL on.
+func TestAutoRunReap(t *testing.T) {
+	fake := &runFake{hold: make(chan struct{})}
+	e := newAutoEnv(t, fake)
+	e.ui.auto.runs.reapEvery = time.Millisecond
+	reap := func() {
+		e.ui.auto.runs.mu.Lock()
+		defer e.ui.auto.runs.mu.Unlock()
+		e.ui.auto.runs.reap(e.ui.auto.now())
+	}
+	e.start(t)
+	run := e.run()
+	e.ahead.Add(int64(autoOrphanAfter / 2))
+	if code, body := e.poll(); code != http.StatusOK || body["state"] != autoRunning {
+		t.Fatalf("poll inside the orphan window = %d %v, want running", code, body)
+	}
+	// Past the window since the start, inside it since the poll.
+	e.ahead.Add(int64(autoOrphanAfter * 3 / 4))
+	if reap(); e.run() != run || fake.ended.Load() != 0 {
+		t.Fatalf("a run polled %s ago was reaped (run %v)", autoOrphanAfter*3/4, e.run())
+	}
+	e.ahead.Add(int64(autoOrphanAfter / 2)) // no request from here on: the ticker reaps
+	ended(t, "after it went unpolled past the orphan window", run)
+	if code, _ := e.poll(); code != http.StatusNotFound || fake.ended.Load() != 1 || e.active() != 0 {
+		t.Fatalf("after the reap: poll = %d, ended contexts %d, active %d; want 404, 1, 0", code, fake.ended.Load(), e.active())
+	}
+
+	fake.script(nil, nil)
+	e.start(t)
+	e.waitState(t, autoDone)
+	e.ahead.Add(int64(autoResultTTL * 3 / 4))
+	if code, body := e.poll(); code != http.StatusOK || body["state"] != autoDone {
+		t.Fatalf("poll inside the result TTL = %d %v, want done", code, body)
+	}
+	e.ahead.Add(int64(autoResultTTL / 2)) // a poll does not extend a result's life
+	waitFor(t, "the result to expire", func() bool { return e.run() == nil })
+	if code, _ := e.poll(); code != http.StatusNotFound {
+		t.Errorf("poll after the result TTL = %d, want 404", code)
+	}
+}
+
+// A poll later than the orphan window, ahead of the ticker, keeps its run.
+func TestAutoRunLatePollKeepsRun(t *testing.T) {
+	e := newAutoEnv(t, &runFake{hold: make(chan struct{})})
+	e.ui.auto.runs.reapEvery = time.Hour // only a request reaps
+	e.start(t)
+	e.ahead.Add(int64(autoOrphanAfter + time.Second))
+	if code, body := e.poll(); code != http.StatusOK || body["state"] != autoRunning || e.run() == nil {
+		t.Fatalf("poll %s after the start = %d %v (run %v), want 200 running and the run kept", autoOrphanAfter+time.Second, code, body, e.run())
+	}
+}
+
+type panicWriter struct{ *httptest.ResponseRecorder }
+
+func (panicWriter) WriteHeader(int) { panic("invented write panic") }
+
+// A start that panics at its 202, the run admitted, still frees the run's slot.
+func TestAutoRunStartPanicAfterAdmit(t *testing.T) {
+	e := newAutoEnv(t, &runFake{})
+	req := httptest.NewRequest(http.MethodPost, e.url, strings.NewReader(url.Values{"mtime": {e.mtime(t)}, "csrf_token": {editToken}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: editToken})
+	func() { defer func() { _ = recover() }(); e.mux.ServeHTTP(panicWriter{httptest.NewRecorder()}, req) }()
+	waitFor(t, "the admitted run to release its slot", func() bool { return e.run() != nil && e.active() == 0 })
+}
+
+// CloseAuto ends every run's context and returns only once their goroutines
+// have ended; afterwards a start is refused. Safe twice, and when never attached.
+func TestAutoRunClose(t *testing.T) {
+	(&UI{}).CloseAuto()
+	fake := &runFake{hold: make(chan struct{})}
+	e := newAutoEnv(t, fake)
+	e.ui.auto.maxConcurrent = 2
+	logs := captureLogs(t)
+	two, vals := e.secondRow(t)
+	e.start(t)
+	if rec := e.post(two, vals); rec.Code != http.StatusAccepted {
+		t.Fatalf("second row = %d %s, want 202", rec.Code, rec.Body)
+	}
+	e.ui.CloseAuto()
+	if got, active := fake.ended.Load(), e.active(); got != 2 || active != 0 {
+		t.Fatalf("when CloseAuto returned: ended contexts %d, active %d; want 2 and 0", got, active)
+	}
+	if l := logs.String(); strings.Contains(l, "ignored their cancel") {
+		t.Errorf("CloseAuto hit its wait bound, so the reaper outlived it:\n%s", l)
+	}
+	e.ui.CloseAuto()
+	if rec := e.start(t); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"unavailable"`) {
+		t.Errorf("start after CloseAuto = %d %s, want 503 unavailable", rec.Code, rec.Body)
+	}
+	if code, _ := e.poll(); code != http.StatusNotFound || fake.aligns.Load() != 2 {
+		t.Errorf("after CloseAuto: poll = %d, sidecar calls %d; want 404 and 2", code, fake.aligns.Load())
+	}
+}
+
+// A sidecar call that ignores its cancel cannot hang shutdown.
+func TestAutoRunCloseBound(t *testing.T) {
+	fake := &runFake{hold: make(chan struct{}), deaf: true}
+	e := newAutoEnv(t, fake)
+	release := sync.OnceFunc(func() { close(fake.hold) })
+	t.Cleanup(release)
+	e.ui.auto.runs.closeWait = 30 * time.Millisecond
+	logs := captureLogs(t)
+	e.start(t)
+	run := e.run()
+	e.ui.CloseAuto()
+	if l := logs.String(); !strings.Contains(l, "ignored their cancel") || !strings.Contains(l, "running=1") || strings.Contains(l, "song") {
+		t.Errorf("no bound Warn with the count (or a path in it):\n%s", l)
+	}
+	if e.active() != 1 {
+		t.Errorf("active with the deaf goroutine alive = %d, want 1", e.active())
+	}
+	release()
+	ended(t, "once released", run)
+	if e.active() != 0 {
+		t.Errorf("active once it ended = %d, want 0", e.active())
 	}
 }

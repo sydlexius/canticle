@@ -57,8 +57,19 @@ func (u *UI) AttachAutoAligner(a AutoAligner, maxConcurrent int) {
 		maxConcurrent = 1
 	}
 	u.auto = &autoState{aligner: a, maxConcurrent: maxConcurrent, now: time.Now,
-		runs: autoRuns{m: map[int64]*autoRun{}, timeout: autoRunTimeout, maxAudio: autoMaxAudioBytes}}
+		runs: autoRuns{m: map[int64]*autoRun{}, timeout: autoRunTimeout, maxAudio: autoMaxAudioBytes,
+			reapEvery: autoReapEvery, closeWait: autoCloseWait}}
 	u.auto.refresh()
+}
+
+// CloseAuto cancels every Auto alignment run, stops the reaper and waits for
+// the run goroutines to end, at most autoCloseWait (a Warn says when that was
+// not enough). A start afterwards answers 503. Idempotent, and a no-op when
+// no aligner is attached. Call it at shutdown.
+func (u *UI) CloseAuto() {
+	if u.auto != nil {
+		u.auto.runs.close()
+	}
 }
 
 // available is the cached health answer. A stale (or never filled) cache
