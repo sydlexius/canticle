@@ -659,6 +659,7 @@ func (h *Handler) Close() {
 	h.bgRealign.Wait()
 	if h.webui != nil {
 		h.webui.ClosePreviewFlac()
+		h.webui.CloseAuto()
 	}
 }
 
