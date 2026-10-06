@@ -44,7 +44,8 @@ var exitStatusRe = regexp.MustCompile(`exit status \S+`)
 // (see segments), never when it merely appears somewhere inside one. Matching
 // anywhere would let text the writer does not control fake a verdict: a path
 // ("read /mnt/Timeout Band permission denied") or an artist/title carried in a
-// writer error ("nothing to save for Timeout - Song"). Go and the providers
+// legacy writer error ("nothing to save for Timeout - Song", the shape old
+// last_error rows carry; the writer now emits a plain "nothing to save"). Go and the providers
 // build their errors as "context: cause", so the diagnostic phrase starts its
 // own ": "-delimited segment; a path or a name sits in the middle of one.
 // Segment-start was chosen over "last segment only" because several real

@@ -79,14 +79,17 @@ var replacements = []struct {
 	// tail rule below (see mediaExt for why it is an allowlist).
 	{regexp.MustCompile(`(?:\b[A-Za-z]:\\|\\\\[^\\\s"]+\\)[^"\t\n]*` + mediaExt + `$`), `<path>`},
 	// Quoted track identity (#1167): lyrics.LRCWriter now emits
-	// `nothing to save for "<artist>" - "<title>"` with Go quoting, so each
+	// `nothing to save for "<artist>" - "<title>"` with Go quoting (LEGACY
+	// since #1164: the writer now emits a plain "nothing to save", but old
+	// work_queue.last_error rows keep this shape, so the rule stays), so each
 	// field ends at its first unescaped quote and a title's own ": " can no
 	// longer pass for a cause boundary. Whatever follows the closing quote (a
 	// Go-convention ": cause") is kept. Runs before the legacy rule below, which
 	// stays for rows written by older builds.
 	{regexp.MustCompile(`\bnothing to save for "(?:[^"\\\n]|\\.)*" - "(?:[^"\\\n]|\\.)*"`), `nothing to save for <track>`},
-	// Free-text track identity (#1167, #1164), LEGACY unquoted form. Anchored to the one real emitter,
-	// lyrics.LRCWriter's "nothing to save for <artist> - <title>"; no other
+	// Free-text track identity (#1167, #1164), LEGACY unquoted form. Anchored to the one former emitter,
+	// lyrics.LRCWriter's "nothing to save for <artist> - <title>" (no longer
+	// emitted, still present in old last_error rows); no other
 	// emitter in internal/ prints a track after a fixed phrase. Deliberately NOT
 	// a generic "no results for": petitlyrics.ErrProviderUnavailable's "no
 	// results for 20 consecutive lookups (application id revoked?)" is fixed

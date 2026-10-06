@@ -91,7 +91,7 @@ func (a *App) Run(ctx context.Context) error {
 				// A better sidecar is already on disk (#553): kept, not a failure.
 				slog.Info("kept better lyrics already on disk", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName)
 			} else if writeErr != nil {
-				slog.Error("failed to save lyrics", "error", writeErr)
+				slog.Error("failed to save lyrics", "artist", cur.Track.ArtistName, "track", cur.Track.TrackName, "error", writeErr)
 				a.failed.Push(cur)
 			}
 		} else {
