@@ -103,9 +103,9 @@ const defaultVocalMaxConfidence = 0.015
 // marking, while a sustained spoken-word track (high mean) still does.
 //
 // MEASURED: calibration sweep over the 296-track audit set (146 vocal, 150
-// instrumental) shows this gate blocks 2 of 150 labeled instrumentals and is
-// inert at current levels: positive-class speech_mean median is 0.0006, orders
-// of magnitude below the 0.20 threshold. The gate design is sound; the threshold
+// instrumental) shows this gate blocks 2 of 150 labeled instrumentals and has
+// little effect on measured instrumental recovery: positive-class speech_mean
+// median is 0.0006, orders of magnitude below the 0.20 threshold. The gate design is sound; the threshold
 // is correct.
 const defaultSpeechMaxConfidence = 0.20
 

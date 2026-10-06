@@ -115,6 +115,9 @@ instrumental territory. Any threshold trades one error against the other.
 | `0.020` | 2.05% | 58.7% |
 | `0.030` (prior default) | 4.79% | 66.0% |
 
+During this sweep the music gate was held at `0.90` and the speech gate at
+`0.20`.
+
 `0.015` is chosen because it recovers the most true instrumentals available at
 its error level: it costs no additional false instrumentals over `0.010`, and
 the prior `0.030` misclassified 4.79% of known-vocal tracks.
@@ -151,9 +154,9 @@ An earlier analysis claimed the music gate capped recovery at roughly 79%. That
 figure was inferred from 32 of 150 negatives failing the `music_sum >= 0.90`
 gate, not directly measured. The sweep shows the real ceiling is about 61%:
 most of those 32 rows do not become recoverable when the gate lowers, because
-they fail on other grounds too. The speech gate blocks 2 of 150 and is inert at
-current levels (positive-class `speech_mean` median 0.0006, orders of magnitude
-below the 0.20 threshold).
+they fail on other grounds too. The speech gate blocks 2 of 150 and has little
+effect on measured instrumental recovery (positive-class `speech_mean` median
+0.0006, orders of magnitude below the 0.20 threshold).
 
 ### Applying a threshold change to rows already decided
 
@@ -191,8 +194,9 @@ re-scan via `scan reconcile`.
 The speech gate's `speech_max_confidence = 0.20` default (#403) is a different
 kind of value: it was chosen conservatively low (biased toward "not
 instrumental", preserving lyric protection) and has since been measured against
-the audit set (see the music-gate sweep above): it is inert at current levels,
-blocking 2 of 150 labeled instrumentals, so there is nothing to pin. Because the
+the audit set (see the music-gate sweep above): it has little effect on
+measured instrumental recovery, blocking 2 of 150 labeled instrumentals, so
+there is nothing to pin. Because the
 key is configurable, it can still be changed without a code change.
 
 ## Sidecar setup
@@ -276,8 +280,8 @@ If you do tune:
   direction). **Lowering** it marks fewer tracks instrumental (safer, but you may
   re-query genuine instrumentals).
 - **`speech_max_confidence`** controls the speech gate the same way, on the
-  summed Speech **mean**. Its `0.20` default is measured and inert at current
-  levels (see Calibration evidence): raising it tolerates more sustained speech
+  summed Speech **mean**. Its `0.20` default is has little effect on measured
+  instrumental recovery (see Calibration evidence): raising it tolerates more sustained speech
   as instrumental; lowering it blocks instrumental marking on less speech.
 - **`min_confidence`** rarely needs changing; lowering it admits non-music audio
   (field recordings, spoken word) as "instrumental".

@@ -490,8 +490,8 @@ min_similarity = 0.35
 
 # Maximum summed speech-class frame mean (0-1) tolerated before a track is
 # excluded from being instrumental. Conservative: biased toward "not
-# instrumental". Default 0.20 is measured to block 2 of 150 labeled instrumentals
-# and is inert at current levels (positive-class speech_mean median 0.0006).
+# instrumental". Default 0.20 blocks 2 of 150 labeled instrumentals and has
+# little effect on measured instrumental recovery (positive-class speech_mean median 0.0006).
 # Values outside (0, 1] reset to 0.20. Env: MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE.
 # speech_max_confidence = 0.20
 
