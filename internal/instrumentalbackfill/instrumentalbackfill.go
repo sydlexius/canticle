@@ -25,6 +25,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
+	"github.com/sydlexius/canticle/internal/ffmpeg"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -51,6 +52,14 @@ type Store interface {
 // Detector classifies a track from its audio. Satisfied by detector.Detector.
 type Detector interface {
 	Detect(ctx context.Context, path string) (detector.Result, error)
+}
+
+// FailureStore remembers audio files the detector could not sample, keyed on the
+// file's (mtime, size) so a repaired or replaced file is retried (#1149).
+// Satisfied by *scanfail.Store (scanfail.NewDetector); nil disables the memory.
+type FailureStore interface {
+	ShouldSkip(ctx context.Context, path string, mtimeNano, size int64) (bool, error)
+	RecordFailure(ctx context.Context, path string, mtimeNano, size int64, readErr error) error
 }
 
 // Writer writes the instrumental marker sidecar. Satisfied by lyrics.Writer.
@@ -121,11 +130,18 @@ type Result struct {
 	Instrumental    int // detector agreed  (verdict axis)
 	NotInstrumental int // detector disagreed (verdict axis)
 
-	MarkersWritten        int // marker sidecars written and still on disk
-	RowsSettled           int // rows settled instrumental and completed
-	RowsStamped           int // rows stamped not-instrumental, left deferred
-	SkippedDetectOff      int // rows whose detect decision was off
-	SkippedNoSource       int // rows with no readable source path
+	MarkersWritten   int // marker sidecars written and still on disk
+	RowsSettled      int // rows settled instrumental and completed
+	RowsStamped      int // rows stamped not-instrumental, left deferred
+	SkippedDetectOff int // rows whose detect decision was off
+	SkippedNoSource  int // rows with no readable source path
+	// SkippedMissing counts rows whose audio file no longer exists. That is a
+	// stale path for prune to retire, not a detector outcome, so it is not an
+	// Error (#1149). The row stays a candidate until prune removes it.
+	SkippedMissing int
+	// SkippedUnsampleable counts rows whose audio ffmpeg already failed to sample
+	// at the file's current (mtime, size); they are not re-attempted (#1149).
+	SkippedUnsampleable   int
 	SkippedClaimed        int // rows a serve-mode worker claimed mid-classification
 	SkippedAlreadySettled int // rows a PEER BACKFILL settled first (marker preserved)
 	// KeptOnDisk counts instrumental verdicts whose marker the writer refused
@@ -166,9 +182,17 @@ type Options struct {
 
 // Backfiller classifies never-scored rows.
 type Backfiller struct {
-	store Store
-	det   Detector
-	w     Writer
+	store    Store
+	det      Detector
+	w        Writer
+	failures FailureStore
+}
+
+// WithFailureStore remembers unsampleable audio so each file version is
+// attempted once, not every cycle (#1149). Returns b for chaining.
+func (b *Backfiller) WithFailureStore(fs FailureStore) *Backfiller {
+	b.failures = fs
+	return b
 }
 
 // New builds a Backfiller over store, classifying with det and writing with w.
@@ -224,9 +248,43 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			continue
 		}
 
+		// A file ffmpeg already failed on at this exact (mtime, size) would fail
+		// identically: skip it without touching the audio again (#1149). A stat or
+		// store failure just falls through to the attempt.
+		var mtimeNano, size int64
+		var haveVersion bool
+		if b.failures != nil {
+			if fi, statErr := os.Stat(src); statErr == nil {
+				mtimeNano, size, haveVersion = fi.ModTime().UnixNano(), fi.Size(), true
+				if skip, skipErr := b.failures.ShouldSkip(ctx, src, mtimeNano, size); skipErr == nil && skip {
+					res.SkippedUnsampleable++
+					continue
+				}
+			}
+		}
+
 		verdict, err := b.det.Detect(ctx, src)
 		if err != nil {
-			res.Errors++
+			switch {
+			case errors.Is(err, ffmpeg.ErrAudioMissing):
+				res.SkippedMissing++
+			case errors.Is(err, ffmpeg.ErrSampleFailed) && ctx.Err() == nil:
+				res.Errors++
+				// No path at Warn: it is private library metadata. The detector's own
+				// Warn names the file; this one names the row.
+				slog.Warn("instrumental backfill: audio could not be sampled; not retrying until the file changes",
+					"queue_id", item.ID, "cause", "unsampleable")
+				if haveVersion {
+					if recErr := b.failures.RecordFailure(ctx, src, mtimeNano, size, err); recErr != nil {
+						slog.Warn("instrumental backfill: could not record unsampleable file; it will be retried",
+							"queue_id", item.ID, "error", recErr)
+					}
+				}
+			default:
+				res.Errors++
+				slog.Warn("instrumental backfill: detection failed for row; will retry",
+					"queue_id", item.ID, "error", err)
+			}
 			continue
 		}
 		res.Checked++
