@@ -94,7 +94,7 @@ templ reportView(v ReportView) {
 		case "deferred-misses":
 			@tableFailures(v.FailureRows, "No deferred misses.")
 		case "review-queue":
-			@tableReviewQueue(v.ReviewQueueRows)
+			@tableReviewQueue(v.ReviewQueueRows, v.ReviewQueueWrongTimingHref)
 	}
 }
 
@@ -302,10 +302,15 @@ templ FailureGroupRows(view FailureGroupView) {
 	}
 }
 
-templ tableReviewQueue(rows []ReviewQueueRow) {
+templ tableReviewQueue(rows []ReviewQueueRow, wrongTimingHref string) {
 	if len(rows) == 0 {
 		@reportEmpty("No tracks awaiting a timing review.")
 	} else {
+		if wrongTimingHref != "" {
+			<p class="mx-report-sub mx-report-links">
+				<a class="mx-report-link" href={ templ.SafeURL(wrongTimingHref) }>View settled mis-synced tracks in the Work Queue</a>
+			</p>
+		}
 		<div class="mx-table-wrap">
 			<table class="mx-table">
 				<thead>
@@ -317,6 +322,7 @@ templ tableReviewQueue(rows []ReviewQueueRow) {
 						<th scope="col">Overrun (s)</th>
 						<th scope="col">Ratio</th>
 						<th scope="col">Evaluated</th>
+						<th scope="col">Lyrics</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -329,6 +335,11 @@ templ tableReviewQueue(rows []ReviewQueueRow) {
 							<td class="mx-cell-mono">{ r.OverrunSeconds }</td>
 							<td class="mx-cell-mono">{ r.Ratio }</td>
 							<td class="mx-cell-mono">{ r.EvaluatedAt }</td>
+							<td>
+								if r.PreviewHref != "" {
+									<a class="mx-report-link" href={ templ.SafeURL(r.PreviewHref) }>Preview</a>
+								}
+							</td>
 						</tr>
 					}
 				</tbody>

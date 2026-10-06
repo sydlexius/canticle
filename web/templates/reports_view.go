@@ -40,7 +40,10 @@ type ReportView struct {
 	InstrumentalRows []InstrumentalRow
 	FailureRows      []FailureRow
 	ReviewQueueRows  []ReviewQueueRow
-	AttentionRows    []AttentionRow
+	// ReviewQueueWrongTimingHref is the Work Queue view of the Mis-synced rows
+	// (#1237), shown above the review-queue table.
+	ReviewQueueWrongTimingHref string
+	AttentionRows              []AttentionRow
 }
 
 // RecentOutcomeRow is one recently-completed track with its derived result.
@@ -162,9 +165,13 @@ func FailureTruncatedNote(shown int) string {
 // session-gated Reports surface, not an externally scraped endpoint, and the
 // operator's whole reason to run the report is to find the specific track.
 type ReviewQueueRow struct {
-	Artist string
-	Title  string
-	Album  string
+	// PreviewHref is the /preview/{id} player link, set only for a row whose
+	// recorded tier is a settled word/line one (#1237; the file may be gone);
+	// empty renders no link.
+	PreviewHref string
+	Artist      string
+	Title       string
+	Album       string
 	// Outcome is the raw internal/timing TimingOutcome value ("mis_synced" or
 	// "categorical"), rendered verbatim like RecentOutcomeRow.Result.
 	Outcome string
