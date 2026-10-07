@@ -801,3 +801,19 @@ func TestExtractCues_MixedNullAndAbsentCueRange(t *testing.T) {
 		t.Errorf("ExtractCues error = %v, want transport-class: an explicit null is present here, so this is not an all-untimed payload", err)
 	}
 }
+
+// TestKnownUpstream pins the closed set of licensor tokens the lane writes into
+// [upstream:]; the reconcile-upstream backfill accepts nothing else.
+func TestKnownUpstream(t *testing.T) {
+	for v, want := range map[string]bool{
+		UpstreamMusixmatch: true,
+		UpstreamLyricFind:  true,
+		"":                 false,
+		"LyricFind":        false,
+		"innertube":        false,
+	} {
+		if got := KnownUpstream(v); got != want {
+			t.Errorf("KnownUpstream(%q) = %v, want %v", v, got, want)
+		}
+	}
+}
