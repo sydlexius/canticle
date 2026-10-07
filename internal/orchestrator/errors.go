@@ -51,14 +51,31 @@ var ErrTimingRefusedUntried = errors.New("orchestrator: only result is timing-re
 type RefusedUntriedError struct {
 	Lane  string
 	Cause string
+	// Blocked marks the variant where the carried-back answer was blocked by the
+	// operator (#1394) rather than timing-refused: there is no song to settle, so
+	// a spent wait budget falls back to the all-blocked deferral.
+	Blocked bool
 }
 
 func (e *RefusedUntriedError) Error() string {
+	if e.Blocked {
+		return fmt.Sprintf("orchestrator: only answer is blocked and a lane did not answer (untried lane %s: %s)", e.Lane, e.Cause)
+	}
 	return fmt.Sprintf("%v (untried lane %s: %s)", ErrTimingRefusedUntried, e.Lane, e.Cause)
 }
 
 // Unwrap makes errors.Is(err, ErrTimingRefusedUntried) hold.
 func (e *RefusedUntriedError) Unwrap() error { return ErrTimingRefusedUntried }
+
+// ErrAllResultsBlocked is returned by the dispatch (never by a lane) when at
+// least one lane answered with a lyric the operator blocked for this track
+// (#1394) and no lane produced anything usable: the rest were clean misses.
+// A lane that failed (or returned a hollow, truncated body) is NOT folded into it: that error is returned instead, even when another lane is untried,
+// because the lane may still hold the right lyric. A lane that did not answer
+// (breaker open, throttled) yields a RefusedUntriedError{Blocked: true}, which
+// parks just this row. It
+// classifies as a benign miss so no breaker trips and no global backoff is fed.
+var ErrAllResultsBlocked = errors.New("orchestrator: every lane's result is blocked for this track")
 
 // PartialFailureError is how the dispatch (never a lane) returns a lane's
 // transport-class failure when another lyrics lane ANSWERED the catalog
@@ -195,6 +212,7 @@ func ClassifyOutcome(err error) OutcomeClass {
 	// flagged in resolve.go -- this second site was found by sweeping for it.)
 	case musixmatch.IsBenignMiss(err),
 		errors.Is(err, ErrLaneBenignMiss),
+		errors.Is(err, ErrAllResultsBlocked),
 		// A petitlyrics miss is the same OUTCOME as a musixmatch miss. Without
 		// these the two provider lanes disagreed about what a miss is, and the
 		// worker (worker.go:1187) released the item on a different path depending

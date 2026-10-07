@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -148,12 +149,25 @@ const (
 	// exactly like candidateRetain, but kept distinct so the dispatch can tell a
 	// timing refusal from a script-guard rejection when deciding to wait (#950).
 	candidateRefused
+	// candidateBlocked: the operator blocked this body for the row identity
+	// (#1394). Never retained, held or committed: the remaining lanes are asked
+	// as for a categorical result, but no fallback song is kept, since the
+	// writer would otherwise land it.
+	candidateBlocked
 )
 
 // classifyCandidate judges a lane result ONCE: the script guard runs exactly
 // one time per result, as it did before #950, and the timing decision is the
 // writer's own (lyrics.DecidePromotion), so no threshold lives here.
-func classifyCandidate(song models.Song, track models.Track, guard ScriptGuard) candidate {
+func classifyCandidate(ctx context.Context, song models.Song, track models.Track, guard ScriptGuard, blocks lyrics.BlockChecker) candidate {
+	if blocks != nil {
+		// The block is keyed by the WORK QUEUE ROW's identity, carried on ctx
+		// (lyrics.WithBlockIdentity); never by the resolved query track passed here
+		// and never by the provider's song.Track.
+		if blocks.SongBlocked(ctx, lyrics.StampBlockIdentity(ctx, song)) {
+			return candidateBlocked
+		}
+	}
 	if !IsSuitable(song, guard) {
 		return candidateRetain
 	}
