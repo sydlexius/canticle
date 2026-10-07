@@ -189,6 +189,12 @@ The serve-mode sweeps live here too: `runTimingValidationSweep` (#443), which ap
 Cues pair only on equal normalized text (an empty one never pairs), and with repeated lines and a count mismatch the error is a lower bound.
 No MAE is reported for zero matches.
 
+### Project Overview
+
+Removed from the first sentence of the Project Overview paragraph (the clause after the module path):
+
+`github.com/sydlexius/canticle`, matching the repo after the transfer from the doxazo-net org to the sydlexius personal account;
+
 ### Second pass: history cut from the rest of CLAUDE.md
 
 The maintainer asked that any other ephemeral material in `CLAUDE.md` move here too.
