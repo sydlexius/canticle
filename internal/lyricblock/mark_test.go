@@ -14,6 +14,7 @@ import (
 	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/selfwrite"
 )
 
@@ -302,18 +303,37 @@ func TestMarkPartialUnlinkIsCompletedByRetry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir2, "song.lrc"), []byte(lrcBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir2, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir2, 0o755) })
-	res, err := f.svc.Mark(f.ctx, f.req(nil))
+	// The second file's removal must fail whatever the process privilege (a root
+	// CI container ignores directory modes): while the late pass reports it, turn
+	// its path into a non-empty directory, which os.Remove refuses. The extra
+	// line makes the late pass see a changed file and report it again.
+	bad := filepath.Join(dir2, "song.lrc")
+	calls := 0
+	res, err := f.svc.Mark(f.ctx, f.req(func(Backup) error {
+		calls++
+		switch calls {
+		case 2:
+			return os.WriteFile(bad, []byte(lrcBody+"[00:09.00]Extra line\n"), 0o600)
+		case 3:
+			if err := os.Remove(bad); err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Join(bad, "d"), 0o755); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
 	if err == nil || res.Removed != 1 || res.Reopened {
 		t.Fatalf("Mark = %+v, %v; want a partial failure with 1 removed and no reopen", res, err)
 	}
-	if f.count(t, `SELECT COUNT(*) FROM lyric_blocks`) != 1 || f.status(t) != "done" {
+	if f.count(t, `SELECT COUNT(*) FROM lyric_blocks`) != 2 || f.status(t) != "done" {
 		t.Error("blocks must stand and the row stay settled after a partial unlink")
 	}
-	if err := os.Chmod(dir2, 0o755); err != nil {
+	if err := os.RemoveAll(bad); err != nil { // the cause is cleared: the file is back
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte(lrcBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if res, err = f.svc.Mark(f.ctx, f.req(nil)); err != nil || res.Removed != 1 || res.NewBlocks != 0 || !res.Reopened {
@@ -344,6 +364,51 @@ func TestMarkAfterUnlinkBeforeReopenJustReopens(t *testing.T) {
 	}
 	if _, err := f.svc.Mark(f.ctx, f.req(nil)); !errors.Is(err, ErrNoSidecar) {
 		t.Errorf("a pending row with no file must still be ErrNoSidecar, got %v", err)
+	}
+}
+
+// A block alone is not proof of an interrupted mark: blocks outlive rows, so a
+// done row that settled with no file (outcome_type NULL here) and whose identity
+// was blocked earlier is ErrNoSidecar and is not reopened.
+func TestMarkFilelessSettledRowWithEarlierBlockIsNotReopened(t *testing.T) {
+	f := newFx(t)
+	f.write(t, "song.lrc", lrcBody)
+	if _, err := f.svc.Mark(f.ctx, f.req(nil)); err != nil {
+		t.Fatal(err)
+	}
+	f.mustExec(t, `UPDATE work_queue SET status = 'done', outcome_type = NULL`) // settled as a miss later
+	if _, err := f.svc.Mark(f.ctx, f.req(nil)); !errors.Is(err, ErrNoSidecar) {
+		t.Fatalf("err = %v, want ErrNoSidecar", err)
+	}
+	if got := f.status(t); got != "done" {
+		t.Errorf("status = %s, want done (not reopened)", got)
+	}
+}
+
+// ReopenDoneRowTx admits only a done row, so an ordinary pending or deferred row
+// is not reopened: Dequeue claims both once due. The mark must leave the status,
+// clear the stale file description, and the worker's next claim must return it.
+func TestMarkPendingAndDeferredRowsAreClaimedAgain(t *testing.T) {
+	for _, status := range []string{"pending", "deferred"} {
+		t.Run(status, func(t *testing.T) {
+			f := newFx(t)
+			f.write(t, "song.lrc", lrcBody)
+			f.mustExec(t, fmt.Sprintf(`UPDATE work_queue SET status = %q, next_attempt_at = '2000-01-01T00:00:00Z'`, status))
+			res, err := f.svc.Mark(f.ctx, f.req(nil))
+			if err != nil || res.Reopened || res.Removed != 1 || f.exists("song.lrc") {
+				t.Fatalf("Mark = %+v, %v", res, err)
+			}
+			if got := f.status(t); got != status {
+				t.Errorf("status = %s, want %s", got, status)
+			}
+			if f.count(t, `SELECT COUNT(*) FROM work_queue WHERE outcome_type IS NOT NULL OR sync_tier IS NOT NULL`) != 0 {
+				t.Error("the row still describes the removed file")
+			}
+			item, err := queue.NewDBQueue(f.db).Dequeue(f.ctx)
+			if err != nil || item.ID != f.id {
+				t.Fatalf("Dequeue = %d, %v; want the marked row %d", item.ID, err, f.id)
+			}
+		})
 	}
 }
 

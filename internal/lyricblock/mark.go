@@ -91,8 +91,11 @@ type MarkResult struct {
 
 type target struct {
 	artist, title, status, lane, upstream string
-	manual                                bool
-	outputs                               []models.OutputPath
+	// recordsFile is true when the row's own outcome_type says a .lrc/.txt was
+	// written (see Mark's recovery branch).
+	recordsFile bool
+	manual      bool
+	outputs     []models.OutputPath
 	// key is the row's own work_queue.artist_key/title_key, the identity blocks
 	// are stored under. cacheKeys are the identities to un-cache: the row's and
 	// each linked scan result's (the cache is keyed by those, not by key).
@@ -142,12 +145,16 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 		return MarkResult{}, err
 	}
 	if len(files) == 0 {
-		// A mark that died between the unlink and the reopen: finish it.
+		// A mark that died between the unlink and the reopen: finish it. The proof
+		// is the row's own record: it is settled, still says it holds a lyric file
+		// (Mark clears outcome_type only in the reopen), and the identity is blocked.
+		// A block alone is not proof: blocks outlive rows, and a row that settled
+		// with no file (a miss, blocked, instrumental) is ErrNoSidecar.
 		blocked, berr := s.anyBlocked(ctx, t)
 		if berr != nil {
 			return MarkResult{}, berr
 		}
-		if !blocked || t.status != queue.StatusDone {
+		if !blocked || t.status != queue.StatusDone || !t.recordsFile {
 			return MarkResult{}, ErrNoSidecar
 		}
 		res := MarkResult{DryRun: req.DryRun}
@@ -261,6 +268,11 @@ func (s *Service) block(ctx context.Context, id int64, t target, fps []string, c
 // the removed file goes: word verdict, upgrade trip, and the stamp columns
 // purge-provenance also resets. failure_class is left to migration 067's
 // trigger, which clears it when the reopen blanks last_error.
+//
+// ReopenDoneRowTx admits only a done row (and a word-recheck deferred one). An
+// ordinary pending or deferred row needs no reopen: Dequeue claims both once
+// next_attempt_at is due, on the row's own schedule, so Reopened stays false.
+// Its outcome_type is cleared here so it stops describing the removed file.
 func (s *Service) reopen(ctx context.Context, id int64, res *MarkResult) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -288,7 +300,7 @@ const (
 	clearEditMarks = `UPDATE work_queue SET lyric_offset_ms = NULL, lyric_edited_at = NULL, sync_tier = NULL` + guard
 	// clearSettledState is the word/upgrade state of the removed file plus the
 	// stamp columns purge-provenance also resets.
-	clearSettledState = `UPDATE work_queue SET word_timing_state = NULL, word_timing_generation = NULL, word_timing_checked_at = NULL,
+	clearSettledState = `UPDATE work_queue SET outcome_type = NULL, word_timing_state = NULL, word_timing_generation = NULL, word_timing_checked_at = NULL,
 		upgrade_checked_at = NULL, upgrade_queued = 0, upgrade_miss_count = 0,
 		timing_stamp_source = NULL, missync_recheck_generation = NULL` + guard
 )
@@ -339,13 +351,13 @@ func (s *Service) anyBlocked(ctx context.Context, t target) (bool, error) {
 func (s *Service) load(ctx context.Context, id int64) (target, error) {
 	var t target
 	var outdir, filename string
-	var outputPaths, markedAt, editedAt, tier sql.NullString
+	var outputPaths, markedAt, editedAt, tier, outcome sql.NullString
 	var offset sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT artist, title, artist_key, title_key, status, COALESCE(provider_lane, ''), COALESCE(upstream, ''), outdir, filename, output_paths,
-                manual_instrumental_at, lyric_edited_at, lyric_offset_ms, sync_tier
+                manual_instrumental_at, lyric_edited_at, lyric_offset_ms, sync_tier, outcome_type
            FROM work_queue WHERE id = ?`, id).
-		Scan(&t.artist, &t.title, &t.key[0], &t.key[1], &t.status, &t.lane, &t.upstream, &outdir, &filename, &outputPaths, &markedAt, &editedAt, &offset, &tier)
+		Scan(&t.artist, &t.title, &t.key[0], &t.key[1], &t.status, &t.lane, &t.upstream, &outdir, &filename, &outputPaths, &markedAt, &editedAt, &offset, &tier, &outcome)
 	if errors.Is(err, sql.ErrNoRows) {
 		return target{}, fmt.Errorf("work item %d: %w", id, ErrNotFound)
 	}
@@ -353,6 +365,7 @@ func (s *Service) load(ctx context.Context, id int64) (target, error) {
 		return target{}, fmt.Errorf("lyricblock: load work item %d: %w", id, err)
 	}
 	t.manual = markedAt.Valid
+	t.recordsFile = outcome.String == "synced" || outcome.String == "unsynced"
 	t.meta = map[string]string{}
 	if editedAt.Valid {
 		t.meta["lyric_edited_at"] = editedAt.String
