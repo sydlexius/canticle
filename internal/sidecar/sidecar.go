@@ -283,6 +283,29 @@ func (l Listing) Variants(candidate string) []string {
 	return out
 }
 
+// SymlinkVariants returns every symlink in the listing that is candidate's
+// sidecar under any extension case, the exact name included. Variants omits
+// these (it feeds os.Remove and only ever returns regular files for a case
+// variant), so a caller that must REFUSE a symlinked sidecar asks here. It
+// reuses the snapshot and the match rule of Variants, with no second read.
+func (l Listing) SymlinkVariants(candidate string) []string {
+	dir, base := filepath.Dir(candidate), filepath.Base(candidate)
+	if filepath.Clean(dir) != filepath.Clean(l.dir) {
+		return nil
+	}
+	idx := l.idx
+	if idx == nil {
+		idx = &variantIndex{entries: l.entries}
+	}
+	var out []string
+	for _, i := range idx.lookup(base) {
+		if e := l.entries[i]; e.Type()&os.ModeSymlink != 0 {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
+}
+
 // asciiEqualFold reports whether a and b are equal under ASCII-only case
 // folding; any non-ASCII byte must match exactly.
 func asciiEqualFold(a, b string) bool {
