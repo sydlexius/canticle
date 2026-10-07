@@ -157,16 +157,21 @@ const TierUnknownPredicate = `(sync_tier IS NULL
                       OR COALESCE(timing_outcome, '') IN ('categorical', 'mis_synced', 'degenerate')
                       OR word_timing_state = 'queued')`
 
-// finishedPredicate is wordTierPredicate restricted to settled synced rows:
-// the rows QueueSummary counts as Finished under TopRungWord.
-const finishedPredicate = `status = 'done' AND outcome_type = 'synced' AND ` + wordTierPredicate
+// manualMarkPredicate matches a hand-marked instrumental (#1218). No sweep will
+// ever upgrade it, so it is Finished under every rung (#1405), not
+// SettledUpgradable.
+const manualMarkPredicate = `manual_instrumental_at IS NOT NULL`
+
+// finishedPredicate is wordTierPredicate restricted to settled synced rows,
+// plus manual marks: the rows QueueSummary counts as Finished under TopRungWord.
+const finishedPredicate = `status = 'done' AND (` + manualMarkPredicate + ` OR (outcome_type = 'synced' AND ` + wordTierPredicate + `))`
 
 // lineFinishedPredicate is Finished under TopRungLine (#1275): a settled synced
 // row at the word OR line tier. A word row written before word sync was turned
 // off stays finished. Built from the same tier predicates, so the Settled
 // complement, the Line-synced chip and ResultsBreakdown cannot drift from it.
-const lineFinishedPredicate = `status = 'done' AND outcome_type = 'synced' AND ((` +
-	wordTierPredicate + `) OR (` + lineTierPredicate + `))`
+const lineFinishedPredicate = `status = 'done' AND (` + manualMarkPredicate + ` OR (outcome_type = 'synced' AND ((` +
+	wordTierPredicate + `) OR (` + lineTierPredicate + `))))`
 
 // finishedPredicates maps each rung to its Finished fragment: the ONE place a
 // rung becomes SQL. QueueSummary and the Finished/Settled buckets read it.
@@ -319,6 +324,9 @@ type RecentOutcome struct {
 	// updated at completion, which is what made every completed row read as
 	// synced before #379.
 	Result ResultClass
+	// ManualInstrumental is true for a row an operator marked instrumental by
+	// hand (manual_instrumental_at, #1218); ProviderLane is then "manual".
+	ManualInstrumental bool
 	// Detail is the recorded reason WITHIN the Result class (work_queue
 	// outcome_detail, #773) -- today the script guard's own verdict on a
 	// 'rejected' row, e.g. "foreign-script share 1.00 exceeds 0.05".
@@ -471,7 +479,8 @@ const recentSelect = `SELECT artist, title, album, completed_at, provider_lane, 
                 END
             ) AS detail,
             ` + recentTimingVerdictExpr + ` AS timing_verdict,
-            ` + recentResultExpr + ` AS result`
+            ` + recentResultExpr + ` AS result,
+            manual_instrumental_at IS NOT NULL`
 
 // recentTimingVerdictExpr is true for a row with a recorded timing verdict;
 // scanRecentOutcomes keeps such a row's lane, and the Source sort mirrors that.
@@ -538,8 +547,9 @@ func scanRecentOutcomes(rows *sql.Rows, err error) ([]RecentOutcome, error) {
 			lastError     string
 			timingVerdict bool
 			result        string
+			manual        bool
 		)
-		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &lastError, &detail, &timingVerdict, &result); err != nil {
+		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &lastError, &detail, &timingVerdict, &result, &manual); err != nil {
 			return nil, fmt.Errorf("reports: scan recent outcome: %w", err)
 		}
 		if completedAt.Valid && completedAt.String != "" {
@@ -552,6 +562,7 @@ func scanRecentOutcomes(rows *sql.Rows, err error) ([]RecentOutcome, error) {
 		o.ProviderLane = providerLane.String
 		o.Detail = detail.String
 		o.Result = ResultClass(result)
+		o.ManualInstrumental = manual
 		if o.Result == ResultUnknown {
 			// An unrecorded outcome has no trustworthy winning lane: a legacy
 			// row's lane column may be stale, and pairing it with a blank

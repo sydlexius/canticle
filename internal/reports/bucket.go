@@ -120,6 +120,8 @@ type BucketRow struct {
 	LineEditable bool
 	Edited       bool
 	OffsetMS     int64
+	// ManualInstrumental is the manual mark (manual_instrumental_at, #1218).
+	ManualInstrumental bool
 	// SortVal is the row's value under the listing's sort, encoded for a
 	// tablesort.Cursor ("n" when NULL or unsorted); the next page's cursor reads it.
 	SortVal string
@@ -389,6 +391,7 @@ func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, 
                 COALESCE(status = 'done' AND outcome_type = 'synced'
                  AND ((` + wordTierPredicate + `) OR (` + lineTierPredicate + `)), 0),
                 COALESCE(` + lineEditableSQL + `, 0), ` + editedPredicate + `, COALESCE(lyric_offset_ms, 0),
+                ` + manualMarkPredicate + `,
                 ` + spec.SelectExpr(o) + `
          FROM work_queue
          WHERE (` + pred + `)` + keyset + search + `
@@ -424,7 +427,7 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 		)
 		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
 			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable,
-			&it.LineEditable, &it.Edited, &it.OffsetMS, &sv); err != nil {
+			&it.LineEditable, &it.Edited, &it.OffsetMS, &it.ManualInstrumental, &sv); err != nil {
 			return nil, fmt.Errorf("reports: scan bucket row: %w", err)
 		}
 		it.SortVal = tablesort.EncodeValue(sv)

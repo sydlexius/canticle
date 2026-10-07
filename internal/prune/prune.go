@@ -1754,7 +1754,7 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	//
 	// A HAND-EDITED row is never resurrected (#1228): reopening it to 'pending'
 	// would re-fetch over the edit. relinkResurrectSQL carries the mark guard, so
-	// an edited row matches nothing there and takes relinkPathSQL+relinkEditedOnly
+	// an edited row matches nothing there and takes relinkPathSQL+relinkHeldOnly
 	// instead: its path still moves (it stays attached to its file), its status
 	// and stamps do not. The guard is in SQL, inside this write transaction, so
 	// an editor save that set the mark after gather is honored too. Prune never
@@ -1778,7 +1778,7 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 				relinkResurrectSQL,
 				target.filePath, target.outdir, target.filename, string(outputPathsJSON), resurrectNow, w.id, w.rawOutputPaths)
 			if err == nil && rowsAffected(res) == 0 {
-				res, err = tx.ExecContext(ctx, relinkPathSQL+relinkEditedOnly,
+				res, err = tx.ExecContext(ctx, relinkPathSQL+relinkHeldOnly,
 					target.filePath, target.outdir, target.filename, string(outputPathsJSON), w.id, w.rawOutputPaths)
 				if err == nil && rowsAffected(res) > 0 {
 					decision.editHeld++
@@ -2603,12 +2603,12 @@ const (
                      outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL,
                      ` + queue.ClearWordRecheckQueued + `
                  WHERE id = ? AND status != 'processing' AND output_paths IS ?
-                   AND lyric_edited_at IS NULL`
+                   ` + queue.NotHandProtected
 	// relinkPathSQL moves only the path columns: an ordinary relink, and (with
-	// relinkEditedOnly appended) a hand-edited row a resurrect skipped (#1228).
+	// relinkHeldOnly appended) a hand-edited or manually marked row a resurrect skipped (#1228, #1405).
 	relinkPathSQL = `UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?
                  WHERE id = ? AND status != 'processing' AND output_paths IS ?`
-	relinkEditedOnly      = ` AND lyric_edited_at IS NOT NULL`
+	relinkHeldOnly        = ` AND ` + queue.HandProtectedPredicate
 	retireUnresolvableSQL = `UPDATE work_queue
              SET status = 'done',
                  completed_at = ?,

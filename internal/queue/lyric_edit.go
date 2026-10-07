@@ -14,6 +14,14 @@ import (
 // gone-source move predicates. Leading AND.
 const notHandProtected = ` AND lyric_edited_at IS NULL AND manual_instrumental_at IS NULL`
 
+// NotHandProtected is notHandProtected for packages that write work_queue
+// themselves (prune), so they share this one fragment instead of a literal.
+const NotHandProtected = notHandProtected
+
+// HandProtectedPredicate is the positive form: true for a hand-edited or
+// manually marked row. No leading AND.
+const HandProtectedPredicate = `(lyric_edited_at IS NOT NULL OR manual_instrumental_at IS NOT NULL)`
+
 // SetLyricEdit records a hand edit of the row's .lrc: the net offset from the
 // original and the edit time. Non-fatal for the caller only in the sense that
 // the file is already written; the next save re-derives from .lrc.orig.
