@@ -48,6 +48,10 @@ type Orchestrator struct {
 	// minCommit is the lowest quality that may END an ordered dispatch
 	// (SetMinCommitQuality, #982). QualityNone, the zero value, is no gate.
 	minCommit Quality
+	// blocks, when non-nil, turns a result the operator blocked for the query
+	// track into candidateBlocked (#1394). Nil, the default and every fetch-mode
+	// build (no database), means no blocking.
+	blocks lyrics.BlockChecker
 }
 
 // New builds an orchestrator over lanes in priority order. mode must be "ordered"
@@ -78,6 +82,12 @@ func New(mode string, lanes ...*Lane) (*Orchestrator, error) {
 // own guard for the terminal policy-rejection path; this guard only governs
 // whether the orchestrator advances to the next lane.
 func (o *Orchestrator) SetGuard(g ScriptGuard) { o.guard = g }
+
+// SetBlockChecker installs the lyric-block check consulted for every lane
+// result (#1394). A nil checker disables blocking, which is what fetch mode
+// uses: it has no database, so blocks do not apply there. Call before the
+// orchestrator is shared.
+func (o *Orchestrator) SetBlockChecker(c lyrics.BlockChecker) { o.blocks = c }
 
 // LaneNames returns the names of all lanes the orchestrator dispatches over, in
 // priority order. Used by the worker miss-recording path to increment the miss
@@ -249,8 +259,21 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			// on that tie the earlier (higher-priority) lane keeps it. The rank
 			// is what the writer lands (landedQuality), so a provider
 			// instrumental carrying a subtitle line never replaces held words.
-			kind := classifyCandidate(song, track, o.guard)
+			kind := classifyCandidate(ctx, song, track, o.guard, o.blocks)
 			switch kind {
+			case candidateBlocked:
+				// An answer, but one that must not land: nothing is retained, so
+				// the remaining lanes are asked and resolve decides what an
+				// all-blocked dispatch returns.
+				r.blocked = true
+				// A blocked answer is not a provider miss: keep the lane out of the
+				// attribution (lane_attempts, provider_outcomes), and out of the word
+				// answer (a blocked word result does not settle a recheck absent).
+				attempted = attempted[:len(attempted)-1]
+				if answersWord(lane.WordCapable(), song, nil) {
+					r.wordAnswered--
+				}
+				continue
 			case candidateCommit:
 				if !r.haveHeld || landedQuality(song, track) > QualityUnsynced {
 					if gateQuality(song) < o.minCommit {
@@ -370,6 +393,9 @@ type dispatchResult struct {
 	// answered reports that a lyrics lane answered the catalog question with a
 	// clean miss (#1372), so a sibling's transport failure is not the whole story.
 	answered bool
+	// blocked reports that some lane answered with a blocked result (#1394).
+	// The result itself is never kept.
+	blocked bool
 	// unbounded reports a transport-class failure that left its lane's breaker
 	// closed: nothing stops the next row from meeting it again (noteTransport).
 	unbounded bool
@@ -514,6 +540,21 @@ func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.S
 			return models.Song{}, err
 		}
 		return models.Song{}, ErrLaneUnavailable
+	}
+	if r.blocked {
+		// A retained or held result returned above, so timing-refused handling is
+		// untouched. A lane that failed may still hold the right lyric, so its
+		// error wins; a lane that did NOT answer (breaker open, throttled) parks
+		// this one row through the same bounded wait a timing-refused result uses,
+		// rather than idling the whole drain pass on the untried lane's own class.
+		// Only clean misses and a detector outage (which says nothing about the
+		// lyric) leave the blocked answer as the whole story.
+		if r.untriedErr != nil {
+			return models.Song{}, &RefusedUntriedError{Lane: r.untriedLane, Cause: r.untriedErr.Error(), Blocked: true}
+		}
+		if r.topErr == nil || r.topClass == OutcomeBenignMiss || r.topClass == OutcomeLaneOutage {
+			return models.Song{}, ErrAllResultsBlocked
+		}
 	}
 	if r.topErr != nil {
 		// Only a failure whose lane is now open is lane-bounded. Any other

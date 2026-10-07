@@ -120,7 +120,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 				consulted = append(consulted, attemptedLane{name: res.name, local: res.local})
 				kind := candidateRetain
 				if res.err == nil {
-					kind = classifyCandidate(res.song, track, o.guard)
+					kind = classifyCandidate(ctx, res.song, track, o.guard, o.blocks)
 				}
 				switch {
 				case res.err == nil && (kind == candidateCommit || kind == candidateHold):
@@ -153,6 +153,14 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 					}
 					if upgrade == nil && pending > 0 {
 						upgrade = time.After(o.raceWait)
+					}
+				case res.err == nil && kind == candidateBlocked:
+					// Blocked (#1394): an answer that is neither held nor retained.
+					r.blocked = true
+					// Not a provider miss, not a word answer (see findOrdered).
+					consulted = consulted[:len(consulted)-1]
+					if answersWord(res.wordCapable, res.song, nil) {
+						wordAnswered--
 					}
 				case res.err == nil:
 					r.retainCandidate(res.song, res.name, retainQuality(res.song, track), kind)
