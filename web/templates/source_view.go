@@ -46,7 +46,21 @@ type SeriesData struct {
 // SeriesJSON serializes the series for the data-chart-series attribute.
 func (s SeriesData) SeriesJSON() string { return marshalJSON(s.Series) }
 
-// HasData reports whether any series has a non-nil, non-zero point.
+// HasPoint reports whether any series has a non-nil point. A real zero is data
+// here (a hit rate of 0% on a day of all misses), unlike HasData.
+func (s SeriesData) HasPoint() bool {
+	for _, se := range s.Series {
+		for _, p := range se.Data {
+			if p != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasData reports whether any series has a non-nil, non-zero point: for the
+// delivered-types chart, where all zeros means nothing landed.
 func (s SeriesData) HasData() bool {
 	for _, se := range s.Series {
 		for _, p := range se.Data {

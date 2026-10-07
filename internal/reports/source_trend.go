@@ -83,7 +83,7 @@ func BuildSourceTrend(rows []SourceEventCount, lane string, to time.Time, days i
 // was only active last month is a (gappy) chart, not "no history yet".
 func (r *Repo) SourceTrend(ctx context.Context, lane string, now time.Time, days int) (SourceTrend, error) {
 	end := now.UTC()
-	rows, err := r.SourceEvents(ctx, end.AddDate(0, 0, -(TrendMaxDays-1)), end)
+	rows, err := r.sourceEvents(ctx, end.AddDate(0, 0, -(TrendMaxDays-1)), end, lane)
 	if err != nil {
 		return SourceTrend{}, fmt.Errorf("reports: source trend: %w", err)
 	}

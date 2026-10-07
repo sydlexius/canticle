@@ -2,13 +2,13 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
-	"time"
 
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/providers"
@@ -97,12 +97,16 @@ func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]rep
 		return
 	}
 	view := buildSourceView(sb, u.reports.TopRung())
-	days := parseTrendRange(r.URL.Query()["range"])
+	days, err := parseTrendRange(r.URL.Query()["range"])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	view.Trend = templates.TrendView{Days: days, Ranges: trendRanges(r.URL.EscapedPath(), days)}
 	if sb.Unattributed {
 		// The recorder ignores an empty lane, so this group has no daily counters.
 		view.Trend.Note = "Daily history is not recorded for unattributed tracks: they have no source to count."
-	} else if tr, err := u.reports.SourceTrend(r.Context(), sb.Lane, time.Now(), days); err != nil {
+	} else if tr, err := u.reports.SourceTrend(r.Context(), sb.Lane, u.now(), days); err != nil {
 		slog.Error("source page: trend failed", "error", err)
 		http.Error(w, "source trend failed", http.StatusInternalServerError)
 		return
@@ -113,24 +117,43 @@ func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]rep
 }
 
 // trendRangeDays are the selectable windows; trendDefaultDays applies when the
-// range parameter is absent, unknown or repeated.
+// range parameter is absent or unknown. A repeated parameter is ambiguous and
+// rejected, as parseQueueViewState does.
 var trendRangeDays = []int{7, 30, 90}
 
 const trendDefaultDays = 30
 
-func parseTrendRange(vals []string) int {
+func parseTrendRange(vals []string) (int, error) {
+	if len(vals) > 1 {
+		return 0, errors.New("repeated parameter range")
+	}
+	// Only the canonical spelling selects a range: "+7" and "007" parse as 7.
 	if len(vals) == 1 {
-		if n, err := strconv.Atoi(vals[0]); err == nil && slices.Contains(trendRangeDays, n) {
-			return n
+		for _, d := range trendRangeDays {
+			if vals[0] == strconv.Itoa(d) {
+				return d, nil
+			}
 		}
 	}
-	return trendDefaultDays
+	return trendDefaultDays, nil
 }
 
 func trendRanges(path string, cur int) []templates.TrendRange {
 	var out []templates.TrendRange
 	for _, d := range trendRangeDays {
 		out = append(out, templates.TrendRange{Label: strconv.Itoa(d) + " days", Href: path + "?range=" + strconv.Itoa(d), Current: d == cur})
+	}
+	return out
+}
+
+// trendTypeLabels are the delivered-type series, the first four resultBuckets
+// (word, line, unsynced, instrumental: the worker's landing events). Deriving
+// them keeps the labels equal to the chart color keys, which
+// TestResultBucketsHaveChartColors pins for every resultBuckets label.
+func trendTypeLabels() []string {
+	out := make([]string, 0, 4)
+	for _, b := range resultBuckets[:4] {
+		out = append(out, b.Label)
 	}
 	return out
 }
@@ -144,7 +167,7 @@ func fillTrend(v *templates.TrendView, tr reports.SourceTrend) {
 	}
 	hit := templates.TrendSeries{Label: "Hit rate (%)"}
 	typ := map[string]*templates.TrendSeries{}
-	order := []string{"Word-synced", "Line-synced", "Unsynced", "Instrumental"}
+	order := trendTypeLabels()
 	for _, l := range order {
 		typ[l] = &templates.TrendSeries{Label: l}
 	}

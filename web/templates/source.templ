@@ -84,7 +84,7 @@ templ sourceTrend(t TrendView) {
 				}
 			</nav>
 			<h3 class="mx-source-subtitle">Hit rate by day</h3>
-			if t.Hit.HasData() {
+			if t.Hit.HasPoint() {
 				@dashTimeChart("mx-source-hit-chart", "line", "Hit rate by day", "%", t.Hit)
 			} else {
 				<p class="mx-dash-empty">No lookups recorded in this range. A day with no lookups is a gap, not 0%.</p>

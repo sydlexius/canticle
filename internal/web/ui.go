@@ -86,6 +86,9 @@ type UI struct {
 	// It is a func, not an orchestrator, so every request re-reads the CURRENT
 	// lanes (a rebuild swaps the orchestrator under it).
 	laneHealth func() []orchestrator.LaneState
+	// now is the clock the source trend page reads (#1302); tests pin it so a run
+	// cannot straddle a UTC midnight. NewUI defaults it to time.Now.
+	now func() time.Time
 
 	// --- settings write path (#288 Phase 2) ---
 	// configPath is the RESOLVED config file path the save handlers write through
@@ -314,9 +317,12 @@ func (u *UI) currentConfig(ctx context.Context) config.Config {
 	return cfg
 }
 
+// withClock pins the clock the source trend page reads (tests).
+func withClock(now func() time.Time) UIOption { return func(u *UI) { u.now = now } }
+
 // NewUI builds the web UI renderer from the effective config and build version.
 func NewUI(cfg config.Config, version string, opts ...UIOption) *UI {
-	u := &UI{cfg: cfg, version: version}
+	u := &UI{cfg: cfg, version: version, now: time.Now}
 	for _, opt := range opts {
 		opt(u)
 	}
