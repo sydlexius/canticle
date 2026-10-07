@@ -109,7 +109,7 @@ func templAttr(s string) string {
 	return strings.NewReplacer("&", "&amp;", `"`, "&#34;", "'", "&#39;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
-// queueColorKeys extracts the keys of the QUEUE_COLOR_VARS object literal from
+// queueColorKeys extracts the keys of the CAT_VARS object literal from
 // chart-init.js: bare identifiers or single/double-quoted strings.
 func queueColorKeys(t *testing.T) map[string]bool {
 	t.Helper()
@@ -117,9 +117,9 @@ func queueColorKeys(t *testing.T) map[string]bool {
 	if err != nil {
 		t.Fatalf("read chart-init.js: %v", err)
 	}
-	block := regexp.MustCompile(`(?s)var QUEUE_COLOR_VARS = \{(.*?)\};`).FindSubmatch(src)
+	block := regexp.MustCompile(`(?s)var CAT_VARS = \{(.*?)\};`).FindSubmatch(src)
 	if block == nil {
-		t.Fatal("chart-init.js: QUEUE_COLOR_VARS object literal not found")
+		t.Fatal("chart-init.js: CAT_VARS object literal not found")
 	}
 	entry := regexp.MustCompile(`(?m)^\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_$][\w$]*))\s*:\s*'--[\w-]+'`)
 	keys := map[string]bool{}
@@ -127,19 +127,19 @@ func queueColorKeys(t *testing.T) map[string]bool {
 		keys[string(m[1])+string(m[2])+string(m[3])] = true
 	}
 	if len(keys) == 0 {
-		t.Fatal("chart-init.js: QUEUE_COLOR_VARS parsed to no entries")
+		t.Fatal("chart-init.js: CAT_VARS parsed to no entries")
 	}
 	return keys
 }
 
 // TestQueueBucketsHaveChartColors asserts every chart label has a
-// QUEUE_COLOR_VARS entry. The map is keyed by label, so a rename on the Go side
+// CAT_VARS entry. The map is keyed by label, so a rename on the Go side
 // alone would otherwise fall back to the accent color silently.
 func TestQueueBucketsHaveChartColors(t *testing.T) {
 	keys := queueColorKeys(t)
 	for _, label := range buildQueueChart(distinctSummary).Labels {
 		if !keys[label] {
-			t.Errorf("chart label %q has no QUEUE_COLOR_VARS entry in chart-init.js", label)
+			t.Errorf("chart label %q has no CAT_VARS entry in chart-init.js", label)
 		}
 	}
 }
@@ -150,7 +150,7 @@ func TestResultBucketsHaveChartColors(t *testing.T) {
 	keys := queueColorKeys(t)
 	for _, b := range resultBuckets {
 		if !keys[b.Label] {
-			t.Errorf("result label %q has no QUEUE_COLOR_VARS entry in chart-init.js", b.Label)
+			t.Errorf("result label %q has no CAT_VARS entry in chart-init.js", b.Label)
 		}
 	}
 }
@@ -173,7 +173,7 @@ func TestQueueBucketsOrderAndNoProcessing(t *testing.T) {
 	keys := queueColorKeys(t)
 	for _, old := range []string{"Processing", "Pending", "Failed", "Deferred", "Unavailable"} {
 		if keys[old] {
-			t.Errorf("chart-init.js QUEUE_COLOR_VARS still carries retired label %q", old)
+			t.Errorf("chart-init.js CAT_VARS still carries retired label %q", old)
 		}
 	}
 }

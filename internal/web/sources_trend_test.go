@@ -80,6 +80,8 @@ func TestSourceTrend(t *testing.T) {
 		`data-chart-series="[{&#34;label&#34;:&#34;Hit rate (%)&#34;,&#34;data&#34;:[null,null,null,null,null,null,75]}]"`,
 		`&#34;label&#34;:&#34;Word-synced&#34;,&#34;data&#34;:[0,0,0,0,0,0,2]`,
 		`&#34;label&#34;:&#34;Instrumental&#34;`,
+		`data-chart-detail="[`,
+		`Hits 3  /  Misses 1`,
 		`<td>` + today + `</td>`,
 	} {
 		if !strings.Contains(body, want) {

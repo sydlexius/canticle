@@ -190,15 +190,23 @@
  * change. Status hues are semantic (success/error/warn) and intentionally
  * distinct from the blue accent so the queue doughnut segments stay legible. */
 .mx-dash-page {
-  --mx-chart-pending: #94a3b8;    /* slate-400: waiting, neutral */
-  --mx-chart-processing: #3b82f6; /* blue-500: active (matches --mx-accent) */
-  --mx-chart-finished: #22c55e;   /* green-500: success (word-synced, terminal) */
-  --mx-chart-settled: #2dd4bf;    /* teal-400: good, but can still be upgraded (#1139) */
-  --mx-chart-failed: var(--mx-status-failed);     /* red-500: failure (design-tokens.css) */
-  --mx-chart-deferred: var(--mx-status-deferred);   /* amber-500: no lyrics found yet, re-checked later (design-tokens.css) */
-  --mx-chart-unavailable: #8b5cf6; /* violet-500: exhausted-retired (#477); neither success nor active failure */
-  --mx-chart-grid: rgba(255, 255, 255, 0.08); /* matches --mx-surface-border */
-  --mx-chart-text: #94a3b8;       /* slate-400: axis/legend labels */
+  --mx-chart-pending: #8b9bb4;    /* neutral slate (Queued, Tier unknown, Not recorded) */
+  --mx-chart-processing: #7b8bff; /* periwinkle: Other */
+  --mx-chart-finished: #19e0a8;   /* aqua-green: word-synced / Finished */
+  --mx-chart-settled: #3fa9ff;    /* azure: line-synced / Settled */
+  --mx-chart-failed: #ff4d7a;     /* hot rose: errored */
+  --mx-chart-deferred: #ffb020;   /* amber: unsynced / retrying */
+  --mx-chart-unavailable: #b45cff; /* ultraviolet: instrumental / given up */
+  --mx-chart-hit: #19e0a8;        /* hit-rate legend swatch and strong end of the value ramp */
+  /* Upstream names: hues kept clear of every result-type color and the rose error hue. */
+  --mx-chart-up-lyricfind: #c4e538;   /* lime */
+  --mx-chart-up-musixmatch: #ff8a4c;  /* coral */
+  --mx-chart-up-a: #2ad4ee;           /* hashed fallbacks for other upstreams */
+  --mx-chart-up-b: #f472d0;
+  --mx-chart-up-c: #d9c7a0;
+  --mx-chart-grid: rgba(165, 180, 207, 0.12);
+  --mx-chart-text: #a9b8d2;       /* axis/legend labels, 8.6:1 on #0b1120 */
+  --mx-chart-ink: #f1f5f9;        /* doughnut center total */
 }
 
 /* Sized wrapper: Chart.js responsive sizing needs a bounded parent (the canvas
@@ -226,7 +234,7 @@
 
 .mx-source-block .mx-dash-chart-wrap {
   margin-top: 0;
-  flex: 0 1 18rem;
+  flex: 0 1 30rem; /* same basis as the dashboard queue doughnut wrapper (max-width 30rem) so both pages share proportions */
   width: 100%;
 }
 

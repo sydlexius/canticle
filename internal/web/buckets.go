@@ -31,7 +31,7 @@ func (b queueBucket) tooltip(top reports.TopRung) string {
 // (buildQueueChart) are
 // all derived from it, so a bucket cannot carry one name on a tile and another
 // on its chart segment. The chart color map in
-// web/static/js/chart-init.js (QUEUE_COLOR_VARS) is keyed by Label, so a rename
+// web/static/js/chart-init.js (CAT_VARS) is keyed by Label, so a rename
 // here must rename that key too; TestQueueBucketsHaveChartColors enforces it.
 //
 // Every value reads work_queue through reports.QueueSummary. Done is shown as

@@ -180,6 +180,7 @@ func fillTrend(v *templates.TrendView, tr reports.SourceTrend) {
 			p, cell = &r, strconv.FormatFloat(r, 'f', 1, 64)+"%"
 		}
 		hit.Data = append(hit.Data, p)
+		v.Hit.Details = append(v.Hit.Details, "Hits "+strconv.FormatInt(d.Hits, 10)+"  /  Misses "+strconv.FormatInt(d.Misses, 10))
 		cells := []string{cell, strconv.FormatInt(d.Hits, 10), strconv.FormatInt(d.Misses, 10)}
 		for i, n := range []int64{d.Word, d.Line, d.Unsynced, d.Instrumental} {
 			f := float64(n)

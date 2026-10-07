@@ -41,6 +41,8 @@ type TrendSeries struct {
 type SeriesData struct {
 	Labels []string
 	Series []TrendSeries
+	// Details is an optional per-day tooltip line, parallel to Labels.
+	Details []string
 }
 
 // SeriesJSON serializes the series for the data-chart-series attribute.

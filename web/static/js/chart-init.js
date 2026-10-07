@@ -36,17 +36,18 @@
     return;
   }
 
-  // Label -> design-token custom property: the queue doughnut statuses and the
-  // source page's result types. Labels not in this map (upstream names) take a
-  // stable hashed fallback color instead.
-  var QUEUE_COLOR_VARS = {
+  // THE one label -> token map (queue statuses, the source page's result types,
+  // the known upstream names). Doughnut slices, stacked bars and both legends all
+  // resolve a category through catColor(), so one category is one solid color
+  // everywhere. Labels not in the map (other upstream names) hash onto
+  // FALLBACK_COLOR_VARS, which holds no semantic (result-type or error) color.
+  var CAT_VARS = {
     Retrying: '--mx-chart-deferred',
     Errored: '--mx-chart-failed',
     Queued: '--mx-chart-pending',
     Finished: '--mx-chart-finished',
     'Settled (upgradable)': '--mx-chart-settled',
     'Given up': '--mx-chart-unavailable',
-    // Source page by-type doughnut (#1300): the Results tile labels.
     'Word-synced': '--mx-chart-finished',
     'Line-synced': '--mx-chart-settled',
     Unsynced: '--mx-chart-deferred',
@@ -54,12 +55,10 @@
     'Tier unknown': '--mx-chart-pending',
     Other: '--mx-chart-processing',
     'Not recorded': '--mx-chart-pending',
+    lyricfind: '--mx-chart-up-lyricfind',
+    musixmatch: '--mx-chart-up-musixmatch',
   };
-
-  // Unmapped labels (upstream names, #1300) hash onto these, so a label keeps its
-  // color when counts reorder; colors may repeat past the palette size.
-  var FALLBACK_COLOR_VARS = ['--mx-chart-processing', '--mx-chart-finished', '--mx-chart-settled',
-    '--mx-chart-deferred', '--mx-chart-unavailable', '--mx-chart-failed'];
+  var FALLBACK_COLOR_VARS = ['--mx-chart-up-a', '--mx-chart-up-b', '--mx-chart-up-c'];
 
   // hashLabel is a small stable string hash (djb2) for fallback color choice.
   function hashLabel(s) {
@@ -95,85 +94,177 @@
   // gridlines read correctly on the navy surface.
   var probe = document.querySelector('.mx-dash-page') || document.body;
   var textColor = resolveVar(probe, '--mx-chart-text', '#94a3b8');
+  var inkColor = resolveVar(probe, '--mx-chart-ink', '#f1f5f9');
   var accentColor = resolveVar(probe, '--mx-accent', '#3b82f6');
+  var surfaceBg = resolveVar(probe, '--mx-surface-bg', '#0f172a');
+  var gridColor = resolveVar(probe, '--mx-chart-grid', 'rgba(255,255,255,0.08)');
+  var hitColor = resolveVar(probe, '--mx-chart-hit', accentColor);
+  var reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   Chart.defaults.color = textColor;
   Chart.defaults.font.family = "'Inter', sans-serif";
   Chart.defaults.maintainAspectRatio = false;
+  var anim = reduceMotion ? false : { duration: 1100, easing: 'easeOutCubic' };
+
+  // catColor: the single resolver for a category's color.
+  function catColor(label) {
+    var v = CAT_VARS[label] || FALLBACK_COLOR_VARS[hashLabel(String(label)) % FALLBACK_COLOR_VARS.length];
+    return resolveVar(probe, v, accentColor);
+  }
+
+  function rgb(hex) {
+    var h = hex.replace('#', '');
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  function rgba(hex, a) { var c = rgb(hex); return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
+  // mix moves hex toward a target color by t (0..1).
+  function mix(hex, target, t) {
+    var a = rgb(hex), b = rgb(target);
+    return 'rgb(' + a.map(function (v, i) { return Math.round(v + (b[i] - v) * t); }).join(',') + ')';
+  }
+
+  // The hit-rate line is shaded by value: weak (rose) -> mid (amber) -> strong (hit).
+  var WEAK = catColor('Errored'), MID = catColor('Unsynced'), STRONG = hitColor;
+  function rampColor(v) {
+    var t = Math.max(0, Math.min(100, v)) / 100;
+    return t < 0.5 ? mix(WEAK, MID, t * 2) : mix(MID, STRONG, (t - 0.5) * 2);
+  }
+
+  // legendLabels is THE legend component for every chart: a 12px rounded swatch
+  // filled with the series' solid color (colors[] is indexed by slice or dataset),
+  // never a pattern, gradient or line sample, so a legend swatch always equals the
+  // mark it names.
+  function legendLabels(colors, doughnut) {
+    return {
+      boxWidth: 12, boxHeight: 12, padding: 12, useBorderRadius: true, borderRadius: 4,
+      generateLabels: function (chart) {
+        var gen = doughnut ? Chart.overrides.doughnut.plugins.legend.labels.generateLabels : Chart.defaults.plugins.legend.labels.generateLabels;
+        var items = gen(chart);
+        items.forEach(function (it) {
+          var c = colors[doughnut ? it.index : it.datasetIndex];
+          it.fillStyle = c; it.strokeStyle = c; it.lineWidth = 0;
+        });
+        return items;
+      },
+    };
+  }
+
+  function tooltipBase(callbacks) {
+    return {
+      backgroundColor: 'rgba(8,13,28,0.96)', borderColor: 'rgba(255,255,255,0.14)', borderWidth: 1,
+      titleColor: '#e2e8f0', bodyColor: '#cbd5e1', padding: 10, cornerRadius: 8, boxPadding: 4,
+      titleFont: { weight: '600' }, callbacks: callbacks,
+    };
+  }
+
+  // Center total inside the doughnut hole.
+  var centerPlugin = {
+    id: 'mxCenter',
+    afterDatasetsDraw: function (chart) {
+      var meta = chart.getDatasetMeta(0);
+      if (!meta.data.length) return;
+      var total = chart.data.datasets[0].data.reduce(function (a, b) { return a + b; }, 0);
+      var el = meta.data[0], c = chart.ctx;
+      c.save();
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillStyle = inkColor;
+      c.font = '700 ' + Math.max(18, Math.round(el.innerRadius * 0.55)) + "px 'Inter', sans-serif";
+      c.fillText(String(total), el.x, el.y - el.innerRadius * 0.12);
+      c.fillStyle = textColor;
+      c.font = '500 ' + Math.max(10, Math.round(el.innerRadius * 0.2)) + "px 'Inter', sans-serif";
+      c.fillText('TOTAL', el.x, el.y + el.innerRadius * 0.38);
+      c.restore();
+    },
+  };
 
   function renderDoughnut(canvas, labels, values) {
-    var colors = labels.map(function (label) {
-      var varName = QUEUE_COLOR_VARS[label] || FALLBACK_COLOR_VARS[hashLabel(String(label)) % FALLBACK_COLOR_VARS.length];
-      return resolveVar(canvas, varName, accentColor);
-    });
+    var colors = labels.map(catColor);
     return new Chart(canvas, {
       type: 'doughnut',
+      plugins: [centerPlugin],
       data: {
         labels: labels,
-        datasets: [{
-          data: values,
-          backgroundColor: colors,
-          borderColor: resolveVar(canvas, '--mx-surface-bg', '#0f172a'),
-          borderWidth: 2,
-        }],
+        datasets: [{ data: values, backgroundColor: colors, borderWidth: 0, borderRadius: 12, spacing: 4, hoverOffset: 8 }],
       },
       options: {
-        cutout: '62%',
+        cutout: '74%', animation: anim,
         plugins: {
-          legend: { position: 'right', labels: { boxWidth: 12, padding: 12 } },
+          legend: { position: 'right', labels: legendLabels(colors, true) },
+          tooltip: tooltipBase({ label: function (c) {
+            var t = c.dataset.data.reduce(function (a, b) { return a + b; }, 0);
+            return ' ' + c.label + ': ' + c.parsed + (t ? ' (' + Math.round(c.parsed * 100 / t) + '%)' : '');
+          } }),
         },
       },
     });
   }
 
-  // Fill patterns (solid, stripes, dots, crosshatch) so stacked series differ
-  // by texture as well as color. Drawn on a small canvas; no inline style.
-  function makePattern(color, index, bg) {
-    if (index === 0) return color;
-    var tile = document.createElement('canvas');
-    tile.width = tile.height = 8;
-    var g = tile.getContext('2d');
-    g.fillStyle = bg;
-    g.fillRect(0, 0, 8, 8);
-    g.fillStyle = color;
-    g.strokeStyle = color;
-    g.lineWidth = 2;
-    if (index === 1 || index === 3) {
-      g.beginPath(); g.moveTo(0, 8); g.lineTo(8, 0); g.moveTo(-2, 2); g.lineTo(2, -2); g.moveTo(6, 10); g.lineTo(10, 6); g.stroke();
-    }
-    if (index === 3) {
-      g.beginPath(); g.moveTo(0, 0); g.lineTo(8, 8); g.moveTo(-2, 6); g.lineTo(2, 10); g.moveTo(6, -2); g.lineTo(10, 2); g.stroke();
-    }
-    if (index === 2) {
-      g.beginPath(); g.arc(4, 4, 2, 0, Math.PI * 2); g.fill();
-    }
-    return g.createPattern(tile, 'repeat');
+  // topRadius rounds only the top-most non-zero segment of a stacked column.
+  function topRadius(r) {
+    return function (ctx) {
+      var ds = ctx.chart.data.datasets, i = ctx.dataIndex;
+      for (var k = ctx.datasetIndex + 1; k < ds.length; k++) {
+        if (ds[k].data[i]) return 0;
+      }
+      return { topLeft: r, topRight: r, bottomLeft: 0, bottomRight: 0 };
+    };
   }
 
   // renderTime draws the multi-series UTC-day charts (#1302). A null point is a
-  // gap: spanGaps stays false so a no-attempt day breaks the line.
-  function renderTime(canvas, type, labels, series, suffix) {
-    var grid = resolveVar(canvas, '--mx-chart-grid', 'rgba(255,255,255,0.08)');
-    var bg = resolveVar(canvas, '--mx-surface-bg', '#0f172a');
+  // gap: spanGaps stays false so a no-attempt day breaks the line. Bars are SOLID
+  // category colors (no pattern fill); the non-color cues are the tooltip, the
+  // legend order (= stack order) and the daily-numbers table. details is the
+  // per-day tooltip line (data-chart-detail), or null.
+  function renderTime(canvas, type, labels, series, suffix, details) {
     var stacked = type === 'stacked-bar';
+    var colors = series.map(function (se) { return stacked ? catColor(se.label) : hitColor; });
     var datasets = series.map(function (se, i) {
-      var varName = QUEUE_COLOR_VARS[se.label] || '--mx-chart-processing';
-      var color = resolveVar(canvas, varName, accentColor);
       if (stacked) {
-        return { label: se.label, data: se.data, backgroundColor: makePattern(color, i, bg), borderColor: color, borderWidth: 1 };
+        return { label: se.label, data: se.data, backgroundColor: colors[i], borderWidth: 0, borderSkipped: false, borderRadius: topRadius(6), maxBarThickness: 24 };
       }
-      return { label: se.label, data: se.data, borderColor: color, backgroundColor: color, borderWidth: 2,
-        pointStyle: ['circle', 'rectRot', 'triangle', 'rect'][i % 4], pointRadius: 4, borderDash: [[], [6, 3], [2, 3], [8, 3, 2, 3]][i % 4],
-        spanGaps: false };
+      // Value-shaded line over a soft fill; the gradient spans the chart area.
+      function ramp(stop) {
+        return function (ctx) {
+          var a = ctx.chart.chartArea;
+          if (!a) return STRONG;
+          var g = ctx.chart.ctx.createLinearGradient(0, a.bottom, 0, a.top);
+          g.addColorStop(0, stop(WEAK, 1)); g.addColorStop(0.5, stop(MID, 1)); g.addColorStop(1, stop(STRONG, 1));
+          return g;
+        };
+      }
+      return { label: se.label, data: se.data, spanGaps: false, borderWidth: 3, tension: 0.25, cubicInterpolationMode: 'monotone',
+        pointRadius: 3, pointHoverRadius: 7, pointBorderColor: surfaceBg, pointBorderWidth: 1.5,
+        pointBackgroundColor: function (ctx) { return ctx.raw === null || ctx.raw === undefined ? STRONG : rampColor(ctx.raw); },
+        borderColor: ramp(function (c) { return c; }), fill: 'origin',
+        backgroundColor: ramp(function (c) { return rgba(c, 0.18); }) };
     });
-    var yScale = { beginAtZero: true, grid: { color: grid }, stacked: stacked, ticks: { precision: 0 } };
+    var yScale = { beginAtZero: true, stacked: stacked, grid: { color: gridColor, borderDash: [2, 5] }, border: { display: false }, ticks: { precision: 0, padding: 8 } };
     if (!stacked) { yScale.max = 100; yScale.ticks.callback = function (v) { return v + suffix; }; }
     return new Chart(canvas, {
       type: stacked ? 'bar' : 'line',
       data: { labels: labels, datasets: datasets },
       options: {
-        scales: { x: { stacked: stacked, grid: { color: grid }, ticks: { autoSkip: true, maxTicksLimit: 6, maxRotation: 0 } }, y: yScale },
-        plugins: { legend: { position: 'bottom', labels: { boxWidth: 14, padding: 12 } } },
+        animation: anim, interaction: { mode: 'index', intersect: false },
+        scales: { x: { stacked: stacked, grid: { display: false }, border: { display: false }, ticks: { autoSkip: true, maxTicksLimit: 6, maxRotation: 0 } }, y: yScale },
+        plugins: {
+          legend: { position: 'bottom', labels: legendLabels(colors, false) },
+          tooltip: tooltipBase({
+            label: function (c) {
+              if (c.parsed.y === null) return '';
+              return ' ' + c.dataset.label + ': ' + (stacked ? c.parsed.y : c.parsed.y + suffix);
+            },
+            afterBody: function (items) {
+              if (!items.length) return '';
+              if (stacked) {
+                var tot = 0;
+                items[0].chart.data.datasets.forEach(function (d) { tot += d.data[items[0].dataIndex] || 0; });
+                return 'Total landings: ' + tot;
+              }
+              return details ? (details[items[0].dataIndex] || '') : '';
+            },
+          }),
+        },
       },
     });
   }
@@ -191,7 +282,8 @@
         return;
       }
       try {
-        renderTime(canvas, type, labels, series, canvas.getAttribute('data-chart-suffix') || '');
+        renderTime(canvas, type, labels, series, canvas.getAttribute('data-chart-suffix') || '',
+          canvas.hasAttribute('data-chart-detail') ? parseAttr(canvas, 'data-chart-detail') : null);
       } catch (e) {
         console.error('dashboard charts: failed to render #' + canvas.id, e);
       }

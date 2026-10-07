@@ -140,6 +140,9 @@ templ dashTimeChart(canvasID, kind, ariaLabel, suffix string, c SeriesData) {
 			data-chart-suffix={ suffix }
 			data-chart-labels={ marshalJSON(c.Labels) }
 			data-chart-series={ c.SeriesJSON() }
+			if len(c.Details) > 0 {
+				data-chart-detail={ marshalJSON(c.Details) }
+			}
 		></canvas>
 	</div>
 }
