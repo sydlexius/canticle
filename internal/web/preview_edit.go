@@ -322,6 +322,7 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert, a
 		// Nothing to build; the error is mapped below.
 	case !accept:
 		lines = lyrics.ShiftLines(orig, offset)
+		tags = lyrics.WithOffsetTag(tags, offset) // redundant record of the shift (#1385)
 	default:
 		if lines, err = lyrics.RetimeLines(orig, starts); err != nil {
 			badField = "lines"

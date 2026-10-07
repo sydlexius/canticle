@@ -697,3 +697,23 @@ func TestPreviewEditRefusesStaleOrig(t *testing.T) {
 		t.Error("a refused save left the edit mark")
 	}
 }
+
+// The handler must write the [offset:] header (#1385): the lyrics tests call
+// WithOffsetTag themselves, so only this one covers the wiring.
+func TestPreviewEditWritesAndReplacesOffsetTag(t *testing.T) {
+	e := newEditEnv(t)
+	rec := e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"600"}, "mtime": {e.mtime(t)}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", rec.Code, rec.Body)
+	}
+	if got := strings.Count(e.lrc(t), "[offset:"); got != 1 || !strings.Contains(e.lrc(t), "[offset:600]") {
+		t.Fatalf("first save: want exactly one [offset:600], got %d:\n%s", got, e.lrc(t))
+	}
+	rec = e.post("/preview/"+e.id+"/offset", url.Values{"offset_ms": {"-500"}, "mtime": {e.mtime(t)}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second save = %d %s", rec.Code, rec.Body)
+	}
+	if got := strings.Count(e.lrc(t), "[offset:"); got != 1 || !strings.Contains(e.lrc(t), "[offset:-500]") || strings.Contains(e.lrc(t), "[offset:600]") {
+		t.Fatalf("second save: want exactly one [offset:-500] replacing 600, got %d:\n%s", got, e.lrc(t))
+	}
+}
