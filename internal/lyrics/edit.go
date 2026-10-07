@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,96 @@ func ShiftLines(lines []TimedLine, offsetMS int) []TimedLine {
 			l.StartMS = 0
 		}
 		out[i] = l
+	}
+	return out
+}
+
+// isOffsetTag reports whether a header line is an [offset:] ID tag, classified
+// by lrcnormalize like every other tag (no second parser). A line is an offset
+// tag only when it is exactly ONE tag: lrcnormalize reads "[offset:10][foo:bar]"
+// as a single tag whose value is "10][foo:bar", and treating that as an offset
+// would drop or replace the neighboring tag with it.
+func isOffsetTag(line string) (value string, ok bool) {
+	for _, tg := range lrcnormalize.ParseBody(line).Tags {
+		if strings.EqualFold(strings.TrimSpace(tg.Key), "offset") {
+			if strings.ContainsAny(tg.Value, "[]") {
+				return "", false
+			}
+			return tg.Value, true
+		}
+	}
+	return "", false
+}
+
+// WithOffsetTag returns headerTags with an [offset:<ms>] tag recording shiftMS,
+// the shift the editor REQUESTED (#1385), summed with any value the original
+// already carried. It REPLACES an existing [offset:] in place, never stacking a
+// second; with none it appends one. A zero shiftMS returns the tags untouched,
+// so a zero-shift save or a revert reproduces the original, including an
+// [offset:] the original carried itself. An existing [offset:] whose value is
+// not an integer is left untouched and no new tag is written: the original
+// value is never destroyed by guessing it was zero.
+//
+// The header is the requested shift, not a measurement of what moved: when
+// ShiftLines clamps a line at zero (a large negative shift) that line moved
+// less than the header says, so a clamped save is a lossy edit and the header
+// then matches no single line's movement.
+//
+// SIGN CONVENTION: positive means the timestamps were moved LATER (the same
+// sign as ShiftLines and the editor's offset field), so the header is exactly
+// the number applied, with no inversion to get wrong. The LRC convention most
+// players follow is the opposite (positive = lyrics appear sooner), Symfonium
+// may read it the other way again, and Emby is unverified (#1240).
+//
+// RESIDUAL DOUBLE-APPLY RISK: this is a record, not an instruction. The stamps
+// are already shifted, so a player that also honors [offset:] shifts a second
+// time (or, under the common convention, undoes the edit). That cannot be
+// prevented from inside the file; it is accepted because the alternative
+// (omitting the record) leaves the applied correction invisible to a reader.
+func WithOffsetTag(headerTags []string, shiftMS int) []string {
+	if shiftMS == 0 {
+		return headerTags
+	}
+	for _, tag := range headerTags {
+		if v, ok := isOffsetTag(tag); ok {
+			if _, err := strconv.Atoi(strings.TrimSpace(v)); err != nil {
+				return headerTags
+			}
+			break
+		}
+	}
+	out := make([]string, 0, len(headerTags)+1)
+	at, total := -1, shiftMS
+	for _, tag := range headerTags {
+		v, ok := isOffsetTag(tag)
+		if !ok {
+			out = append(out, tag)
+			continue
+		}
+		if at < 0 {
+			at = len(out)
+			out = append(out, "")
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				total += n
+			}
+		}
+	}
+	tagLine := "[offset:" + strconv.Itoa(total) + "]"
+	if at < 0 {
+		return append(out, tagLine)
+	}
+	out[at] = tagLine
+	return out
+}
+
+// dropOffsetTags removes every [offset:] tag: a retimed file's stamps no longer
+// relate to the recorded shift.
+func dropOffsetTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if _, ok := isOffsetTag(t); !ok {
+			out = append(out, t)
+		}
 	}
 	return out
 }
@@ -413,7 +504,8 @@ func skeletonOf(body []byte) editSkeleton {
 				cues = append(cues, stamped{c.Time.Total, text})
 			}
 		case len(doc.Tags) > 0:
-			if line != timingMarker { // the aligner marker is canticle's own addition
+			// The aligner marker and the [offset:] record are canticle's own additions.
+			if _, isOff := isOffsetTag(line); line != timingMarker && !isOff {
 				sk.tags = append(sk.tags, line)
 			}
 		default:
@@ -515,6 +607,7 @@ func ApplyEdit(path string, lines []TimedLine, headerTags []string, opts EditOpt
 		for _, tg := range doc.Tags {
 			headerTags = append(headerTags, tg.Raw)
 		}
+		headerTags = dropOffsetTags(headerTags) // the retime supersedes a recorded shift (#1385)
 		ge := *g
 		if g.WordsFor != nil {
 			var ok bool

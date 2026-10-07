@@ -270,3 +270,46 @@ func TestIndexedSettledRowIsStillUpgradeable(t *testing.T) {
 		t.Errorf("after --upgrade status = %q; want %q -- the indexed row is frozen out of upgrades", got, scan.StatusPending)
 	}
 }
+
+// FIX 3 OF #740, ANSWERED BY COMPOSITION RATHER THAN A NEW COMMAND. The issue
+// asked how rows ALREADY retired by a shipped build (before the name tier
+// existed) get back: their old row is 'done', no row exists at the new path,
+// and the moved file arrived with its .txt sidecar. This runs that exact state
+// through the real serve-mode path -- a real scan with the index seam (#787),
+// then the Directory-granularity periodic sweep serve runs -- and asserts the
+// row is relinked to the moved file and reopened to 'pending'. The row is
+// retired by a direct UPDATE, not by a sweep, so nothing this build wrote
+// (directory state, gone marks) is present: only what a shipped build left.
+func TestShippedBuildRetirementIsRecoveredByScanThenSweep(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+
+	gone := filepath.Join(root, "Old Artist Name", "Album", "01. Winterlight.flac")
+	moved := filepath.Join(root, "New Artist Name", "Album", "01. Winterlight.flac")
+
+	seedNamedGoneRow(t, ctx, sqlDB, libID, gone)
+	if _, err := sqlDB.ExecContext(ctx,
+		`UPDATE work_queue SET status = 'done', completed_at = '2026-08-05T00:00:00Z', last_error = ?
+		 WHERE source_path = ?`, unresolvableGoneError, gone,
+	); err != nil {
+		t.Fatalf("retire as a shipped build would: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "Old Artist Name")); err != nil {
+		t.Fatalf("remove old tree: %v", err)
+	}
+	writeSettledMovedFileExt(t, moved, "New Artist Name", goneTitle, ".txt")
+
+	scanAndPersist(t, ctx, sqlDB, libID, root, true)
+
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Directory})
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(res.Relinked) != 1 || res.Relinked[0].NewPath != moved {
+		t.Fatalf("Relinked = %+v, want one relink onto %q: a shipped-build retirement must be recovered "+
+			"by the periodic sweep once the scan has indexed the moved file", res.Relinked, moved)
+	}
+	status, lastErr, _ := rowStateOf(t, ctx, sqlDB, moved)
+	if status != "pending" || lastErr == unresolvableGoneError {
+		t.Errorf("relinked row status=%q last_error=%q, want pending with the sentinel cleared", status, lastErr)
+	}
+}

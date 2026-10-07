@@ -500,11 +500,13 @@ func TestRecentOutcomesExcludesRemediatedTier(t *testing.T) {
 }
 
 // TestRecentOutcomesQueuedRowKeepsStaleTierAsSynced is the #1085 review's
-// finding 1 applied to RecentOutcomes: prune.retireUnresolvable's retired row
-// (status='done', word_timing_state='queued' kept per #1039) can carry a
-// NON-NULL sync_tier from before the recheck it interrupted. It must classify
-// as plain ResultSynced, not ResultWordSynced/ResultLineSynced, exactly like a
-// timing-remediated row (TestRecentOutcomesExcludesRemediatedTier).
+// finding 1 applied to RecentOutcomes: a done row with word_timing_state='queued'
+// can carry a NON-NULL sync_tier from before the recheck it interrupted. It must
+// classify as plain ResultSynced, not ResultWordSynced/ResultLineSynced, exactly
+// like a timing-remediated row (TestRecentOutcomesExcludesRemediatedTier). The
+// shape that motivated it, prune.retireUnresolvable's retired row (#1039), also
+// carries the retirement sentinel and is no longer listed at all (#740); the
+// fixture omits the sentinel so the defensive guard stays pinned.
 func TestRecentOutcomesQueuedRowKeepsStaleTierAsSynced(t *testing.T) {
 	ctx := context.Background()
 	sqlDB := openTestDB(t)

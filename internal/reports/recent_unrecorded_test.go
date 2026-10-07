@@ -72,6 +72,10 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 	for _, o := range got {
 		byTitle[o.Title] = o
 	}
+	// A prune retirement is bookkeeping, not a fetch outcome (#740): absent.
+	if _, ok := byTitle["prune-retired"]; ok {
+		t.Error("prune-retired row listed in Recent outcomes; a retirement is not a fetch outcome")
+	}
 	for _, tc := range []struct {
 		title      string
 		wantResult reports.ResultClass
@@ -81,7 +85,6 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 		{"legacy-stale-lane", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
 		{"legacy-whitespace-error", reports.ResultUnknown, "", reports.LegacyNoOutcomeDetail},
 		{"legacy-error", reports.ResultUnknown, "", `output dir "<path>": permission denied`},
-		{"prune-retired", reports.ResultUnknown, "", queue.UnresolvableGoneError},
 		{"quarantined", reports.ResultUnknown, "musixmatch", "timing refused: categorical"},
 		{"remediated", reports.ResultUnknown, "petitlyrics", "timing refused: mis_synced"},
 		{"synced", reports.ResultSynced, "musixmatch", ""},
@@ -98,6 +101,46 @@ func TestRecentOutcomesUnrecordedBlanksLaneAndExplains(t *testing.T) {
 		if o.Result != tc.wantResult || o.ProviderLane != tc.wantLane || o.Detail != tc.wantDetail {
 			t.Errorf("%s: got result=%q lane=%q detail=%q; want result=%q lane=%q detail=%q",
 				tc.title, o.Result, o.ProviderLane, o.Detail, tc.wantResult, tc.wantLane, tc.wantDetail)
+		}
+	}
+}
+
+// TestRecentOutcomesExcludesRetirementsBeforeTheLimit pins #740's operator
+// harm, which an absence check alone does not: a sweep stamps completed_at on
+// every row it retires, so a batch of retirements is the NEWEST thing in the
+// table and, if filtered only after the limit, would push every genuine fetch
+// outcome out of the window. Both entry points share recentWhere; each is
+// asserted so a future split cannot drop the exclusion from one. The retired
+// row keeps a stale word-synced outcome, as retireUnresolvable leaves it.
+func TestRecentOutcomesExcludesRetirementsBeforeTheLimit(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	repo := reports.New(sqlDB)
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "fetched", status: "done",
+		completedAt: "2026-08-16T04:00:00Z", outcomeType: "synced", syncTier: "line",
+	})
+	insertWorkItem(t, sqlDB, workItem{
+		artist: "A", title: "retired", status: "done",
+		completedAt: "2026-08-16T05:00:00Z", outcomeType: "synced", syncTier: "word",
+		lastError: queue.UnresolvableGoneError,
+	})
+
+	plain, err := repo.RecentOutcomes(ctx, 1)
+	if err != nil {
+		t.Fatalf("RecentOutcomes: %v", err)
+	}
+	sorted, err := repo.RecentOutcomesSorted(ctx, 1, reports.RecentOutcomesSpec.Default)
+	if err != nil {
+		t.Fatalf("RecentOutcomesSorted: %v", err)
+	}
+	for name, got := range map[string][]reports.RecentOutcome{"RecentOutcomes": plain, "RecentOutcomesSorted": sorted} {
+		if len(got) != 1 || got[0].Title != "fetched" {
+			titles := make([]string, len(got))
+			for i, o := range got {
+				titles[i] = o.Title
+			}
+			t.Errorf("%s(limit 1) = %v, want [fetched]: a newer prune retirement must not occupy the window", name, titles)
 		}
 	}
 }
