@@ -71,8 +71,8 @@ var queueBuckets = []queueBucket{
 	{
 		Key:         reports.BucketSettled,
 		Label:       "Settled (upgradable)",
-		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, detected or provider-flagged instrumental, or tier not yet recorded). Not finished: a later run may still improve them. Hand-marked instrumentals are not here.",
-		LineTooltip: "Completed tracks below line sync (unsynced, detected or provider-flagged instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync. Hand-marked instrumentals are not here.",
+		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, detected or provider-flagged instrumental, or tier not yet recorded). Not finished: a later run may still improve them. Hand-marked instrumentals are not here. Also holds tracks whose every result you blocked: nothing is on disk, and they wait until you unblock them.",
+		LineTooltip: "Completed tracks below line sync (unsynced, detected or provider-flagged instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync. Hand-marked instrumentals are not here. Also holds tracks whose every result you blocked: nothing is on disk, and they wait until you unblock them.",
 		Value:       func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{

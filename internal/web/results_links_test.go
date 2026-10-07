@@ -208,6 +208,14 @@ func TestBlockedTileAndBucketPage(t *testing.T) {
 	seedLinkRow(t, sqlDB, "bl-one", "done", "blocked", "", "", "", "", "")
 	seedLinkRow(t, sqlDB, "bl-two", "done", "blocked", "", "", "", "", "")
 	seedLinkRow(t, sqlDB, "plain", "done", "unsynced", "", "", "", "", "")
+	// A blocked row carries a fixed outcome_detail and no last_error; a settled
+	// row's outcome_detail must NOT surface in the Reason cell.
+	for title, detail := range map[string]string{"bl-one": queue.OutcomeDetailBlocked, "bl-two": queue.OutcomeDetailBlocked, "plain": "settled-detail-text"} {
+		if _, err := sqlDB.ExecContext(context.Background(),
+			`UPDATE work_queue SET outcome_detail = ? WHERE title = ?`, detail, title); err != nil {
+			t.Fatal(err)
+		}
+	}
 	mux := newReportsUIServer(t, sqlDB)
 
 	dash := getQueue(t, mux, "/dashboard", false)
@@ -238,5 +246,12 @@ func TestBlockedTileAndBucketPage(t *testing.T) {
 	}
 	if !strings.Contains(pb, ">Blocked<") {
 		t.Error("/queue/blocked has no Blocked heading")
+	}
+	if strings.Count(pb, queue.OutcomeDetailBlocked) != 2 || strings.Contains(pb, queue.NoReasonRecorded) {
+		t.Errorf("/queue/blocked Reason cells should read %q, not %q:\n%s", queue.OutcomeDetailBlocked, queue.NoReasonRecorded, pb)
+	}
+	settled := getQueue(t, mux, "/queue/settled", false).Body.String()
+	if strings.Contains(settled, "settled-detail-text") || !strings.Contains(settled, queue.NoReasonRecorded) {
+		t.Error("/queue/settled Reason cell must keep last_error only, not outcome_detail")
 	}
 }

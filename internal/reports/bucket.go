@@ -108,7 +108,8 @@ type BucketLibrary struct {
 }
 
 // BucketRow is one work_queue row in a drill-down. Reason is the shared
-// failsig-normalized last_error (queue.NoReasonRecorded when none). Libraries
+// failsig-normalized last_error (queue.NoReasonRecorded when none); a blocked
+// row, which has no last_error, shows its fixed outcome_detail instead. Libraries
 // lists EVERY library the row is linked to through work_queue_scan_results; it
 // is empty for a CLI-enqueued row with no scan link.
 type BucketRow struct {
@@ -419,7 +420,8 @@ func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, 
 	// pred, the sort expressions and the keyset text come from constant maps,
 	// never from caller input; every caller value is a bound parameter.
 	query := `SELECT id, artist, title, album, status,
-                COALESCE(NULLIF(last_error, ''), ?),
+                COALESCE(NULLIF(last_error, ''),
+                         CASE WHEN outcome_type = 'blocked' THEN NULLIF(outcome_detail, '') END, ?),
                 COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, ''),
                 COALESCE(status = 'done' AND outcome_type = 'synced'
                  AND ((` + wordTierPredicate + `) OR (` + lineTierPredicate + `)), 0),

@@ -82,6 +82,9 @@ func TestSourcePages(t *testing.T) {
 				t.Errorf("missing %q", want)
 			}
 		}
+		if strings.Contains(body, "/queue/blocked") {
+			t.Error("the Blocked tile must not link on a per-source page: a blocked row keeps no lane")
+		}
 		if strings.Contains(body, "<table") {
 			t.Error("the result-type block has tiles, not a table")
 		}

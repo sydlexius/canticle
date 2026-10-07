@@ -53,7 +53,7 @@
     Unsynced: '--mx-chart-deferred',
     Instrumental: '--mx-chart-unavailable',
     'Tier unknown': '--mx-chart-pending',
-    Blocked: '--mx-chart-pending',
+    Blocked: '--mx-chart-failed',
     Other: '--mx-chart-processing',
     'Not recorded': '--mx-chart-pending',
     lyricfind: '--mx-chart-up-lyricfind',

@@ -194,7 +194,7 @@
   --mx-chart-processing: #7b8bff; /* periwinkle: Other */
   --mx-chart-finished: #19e0a8;   /* aqua-green: word-synced / Finished */
   --mx-chart-settled: #3fa9ff;    /* azure: line-synced / Settled */
-  --mx-chart-failed: #ff4d7a;     /* hot rose: errored */
+  --mx-chart-failed: #ff4d7a;     /* hot rose: errored, Blocked (no other label in the type chart uses it) */
   --mx-chart-deferred: #ffb020;   /* amber: unsynced / retrying */
   --mx-chart-unavailable: #b45cff; /* ultraviolet: instrumental / given up */
   --mx-chart-hit: #19e0a8;        /* hit-rate legend swatch, strong end of the value ramp and the mini hit-rate bar fill */

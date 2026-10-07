@@ -49,7 +49,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketDeferred:    {"Retrying", "Tracks waiting for the worker to try again: lookups that found nothing yet, and word-sync rechecks."},
 	reports.BucketFailed:      {"Errored", "Tracks whose last lookup hit an error; they are retried automatically."},
 	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, plus tracks marked instrumental by hand: nothing further to gain."},
-	reports.BucketSettled:     {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to word sync."},
+	reports.BucketSettled:     {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to word sync. Also holds tracks whose every result you blocked, which wait until you unblock them."},
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
 	reports.BucketBlocked:     {"Blocked", "Tracks where every lyric result found was one you marked wrong, so nothing is on disk."},
 }
@@ -58,7 +58,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 // (reports.TopRungLine, #1275, #1350: word sync off or no word-capable lane): line-synced is the best result there.
 var lineTopBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, plus tracks marked instrumental by hand: the best result available here."},
-	reports.BucketSettled:  {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to line sync."},
+	reports.BucketSettled:  {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to line sync. Also holds tracks whose every result you blocked, which wait until you unblock them."},
 }
 
 // bucketInfo is the bucket's heading and meaning under rung top.

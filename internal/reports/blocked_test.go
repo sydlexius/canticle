@@ -254,57 +254,83 @@ func TestBlockedPredicateKeepsKeysetAndPlan(t *testing.T) {
 		}
 	}
 
-	for _, bucket := range []Bucket{BucketBlocked, BucketSettled} {
-		plan := func(sql string, args []any) []string {
-			rows, err := d.Query("EXPLAIN QUERY PLAN "+sql, args...)
-			if err != nil {
-				t.Fatalf("explain: %v", err)
+	// work_queue access line (SCAN/SEARCH) of a statement's plan.
+	access := func(sql string, args []any) []string {
+		rows, err := d.Query("EXPLAIN QUERY PLAN "+sql, args...)
+		if err != nil {
+			t.Fatalf("explain: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var out []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
 			}
-			defer func() { _ = rows.Close() }()
-			var out []string
-			for rows.Next() {
-				var id, parent, unused int
-				var detail string
-				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-					t.Fatal(err)
-				}
+			if strings.HasPrefix(detail, "SCAN work_queue") || strings.HasPrefix(detail, "SEARCH work_queue") {
 				out = append(out, detail)
 			}
-			return out
 		}
-		q, args, err := bucketQuery(bucket, TopRungWord, BucketFilter{}, tablesort.Order{}, tablesort.Cursor{ID: 5}, 5)
-		if err != nil {
+		return out
+	}
+	same := func(name, sql string, args []any) {
+		t.Helper()
+		with, without := access(sql, args), access(strings.Replace(sql, blockedExistsSQL, "0", 1), args)
+		if len(with) == 0 || fmt.Sprint(with) != fmt.Sprint(without) {
+			t.Errorf("%s: work_queue access changed: %q, want %q", name, with, without)
+		}
+	}
+	for _, bucket := range append(Buckets(), BucketBlocked) {
+		var orders []tablesort.Order
+		orders = append(orders, tablesort.Order{})
+		for key := range BucketSpec(bucket).Columns {
+			orders = append(orders, tablesort.Order{Key: key}, tablesort.Order{Key: key, Desc: true})
+		}
+		for _, o := range orders {
+			for _, f := range []BucketFilter{{}, {LibraryID: 1}} {
+				q, args, err := bucketQuery(bucket, TopRungWord, f, o, tablesort.Cursor{ID: 5, Val: "s1"}, 5)
+				if err != nil {
+					t.Fatal(err)
+				}
+				same(fmt.Sprintf("%s sort=%+v library=%d", bucket, o, f.LibraryID), q, args)
+			}
+		}
+	}
+	// Both Recent outcomes statements, at every sort the panel offers.
+	same("RecentOutcomes", recentSelect+" FROM work_queue WHERE "+recentWhere+" ORDER BY "+
+		RecentOutcomesSpec.OrderBy(RecentOutcomesSpec.Default)+" LIMIT ?", []any{5})
+	for key := range RecentOutcomesSpec.Columns {
+		o := tablesort.Order{Key: key}
+		same("RecentOutcomesSorted "+key, recentSelect+" FROM work_queue WHERE id IN (SELECT id FROM work_queue WHERE "+
+			recentWhere+" ORDER BY "+RecentOutcomesSpec.OrderBy(RecentOutcomesSpec.Default)+" LIMIT ?) ORDER BY "+
+			RecentOutcomesSpec.OrderBy(o), []any{5})
+	}
+	// The correlated lyric_blocks probe must still go through its identity index.
+	q, args, err := bucketQuery(BucketBlocked, TopRungWord, BucketFilter{}, tablesort.Order{}, tablesort.Cursor{ID: 5}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := d.Query("EXPLAIN QUERY PLAN "+q, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	probed := false
+	for rows.Next() {
+		var id, parent, unused int
+		var l string
+		if err := rows.Scan(&id, &parent, &unused, &l); err != nil {
 			t.Fatal(err)
 		}
-		with := plan(q, args)
-		without := plan(strings.Replace(q, blockedExistsSQL+",", "0,", 1), args)
-		t.Logf("%s plan with column:    %q", bucket, with)
-		t.Logf("%s plan without column: %q", bucket, without)
-		var outerWith, outerWithout []string
-		for _, l := range with {
-			if strings.HasPrefix(l, "SCAN work_queue") || strings.HasPrefix(l, "SEARCH work_queue") {
-				outerWith = append(outerWith, l)
+		if strings.Contains(l, "lyric_blocks") {
+			probed = true
+			if !strings.Contains(l, "SEARCH") || !strings.Contains(l, "artist_key=?") || !strings.Contains(l, "title_key=?") {
+				t.Errorf("lyric_blocks probed as %q, want an index SEARCH on artist_key and title_key", l)
 			}
 		}
-		for _, l := range without {
-			if strings.HasPrefix(l, "SCAN work_queue") || strings.HasPrefix(l, "SEARCH work_queue") {
-				outerWithout = append(outerWithout, l)
-			}
-		}
-		if len(outerWith) == 0 || fmt.Sprint(outerWith) != fmt.Sprint(outerWithout) {
-			t.Errorf("%s: work_queue access changed: %q, want %q", bucket, outerWith, outerWithout)
-		}
-		probed := false
-		for _, l := range with {
-			if strings.Contains(l, "lyric_blocks") {
-				probed = true
-				if !strings.Contains(l, "SEARCH") || !strings.Contains(l, "artist_key=?") || !strings.Contains(l, "title_key=?") {
-					t.Errorf("%s: lyric_blocks probed as %q, want an index SEARCH on artist_key and title_key", bucket, l)
-				}
-			}
-		}
-		if !probed {
-			t.Errorf("%s: plan never probes lyric_blocks: %q", bucket, with)
-		}
+	}
+	if !probed {
+		t.Error("plan never probes lyric_blocks")
 	}
 }
