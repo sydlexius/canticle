@@ -14,6 +14,11 @@ import (
 // miss: no miss_count, attempts or lane attempt is charged, and nothing retries
 // it on a timer. Only clearing the block reopens it (queue.ReopenBlockedTx).
 //
+// The settle is PERMANENT until the block is cleared. A lane that missed, or was
+// in outage, when the others answered blocked is NOT retried: the issue asks for
+// no timer retry, and a timer would re-ask the blocked lanes forever for a body
+// the operator has already rejected. Clearing the block is the only way back.
+//
 // Combined with an open breaker or an unanswered lane, the dispatch first parks
 // just this row through the bounded refused-wait (deferRefusedUntried); once that
 // budget is spent the same all-blocked error arrives here and the row settles.
@@ -26,10 +31,8 @@ func (w *Worker) settleBlocked(ctx context.Context, item queue.WorkItem) error {
 	}
 	noCancel := context.WithoutCancel(ctx)
 	w.stampDetectorMissTelemetry(noCancel, item.ID)
-	// Nothing lands, so no word verdict or tier may describe a file (as on the
-	// guard path). Both are best-effort and precede the atomic settle.
-	w.clearWordTiming(noCancel, item)
-	w.clearSyncTier(noCancel, item)
+	// Nothing lands, so the settle statement itself clears the lane, tier and
+	// word verdict (queue.SettleBlocked): no best-effort pre-clear is needed.
 	outcome, err := w.queue.SettleBlocked(noCancel, item.ID)
 	if err != nil {
 		return w.fail(ctx, item, fmt.Errorf("worker: settle blocked item %d: %w", item.ID, err))

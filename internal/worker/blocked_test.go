@@ -11,11 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/normalize"
+	"github.com/sydlexius/canticle/internal/petitlyrics"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/scan"
@@ -443,5 +445,122 @@ func TestBlocked_WordRecheck_ReleasedAfterBudgetKeepsRecord(t *testing.T) {
 	rig.assertUntouched(t)
 	if after := fileRecord(t, rig.db, rig.id); after != before {
 		t.Fatalf("file record changed:\n before %s\n after  %s", before, after)
+	}
+}
+
+// scriptedWriter answers WriteLRC call i with errs[i] (nil past the end).
+type scriptedWriter struct {
+	errs  []error
+	calls int
+}
+
+func (w *scriptedWriter) WriteLRC(models.Song, string, string) error {
+	i := w.calls
+	w.calls++
+	if i < len(w.errs) {
+		return w.errs[i]
+	}
+	return nil
+}
+
+// blockAll is a BlockChecker that blocks every body, for fakeQueue tests.
+type blockAll struct{}
+
+func (blockAll) SongBlocked(context.Context, models.Song) bool { return true }
+
+// twoPathWorker is a fakeQueue worker whose one item has two output paths.
+func twoPathWorker(q *fakeQueue, wr lyrics.Writer) *Worker {
+	track := models.Track{ArtistName: "Synthetic Artist", TrackName: "Synthetic Title"}
+	q.items = []queue.WorkItem{{ID: 77, Inputs: models.Inputs{Track: track, OutputPaths: []models.OutputPath{
+		{Outdir: "out", Filename: "a.lrc"}, {Outdir: "out2", Filename: "b.lrc"},
+	}}}}
+	return New(q, &fakeCache{}, &fakeFetcher{song: models.Song{Track: track, Lyrics: models.Lyrics{LyricsBody: "words"}}}, wr)
+}
+
+// The writer backstop settles blocked only while NO output path holds a file from
+// this pass. Path 1 landed, path 2 refused: the row has a file, so it takes the
+// ordinary failure path and is never labeled blocked (#1395 review).
+func TestBlocked_WriterBackstop_AfterLandedPathFailsOrdinarily(t *testing.T) {
+	q := &fakeQueue{}
+	wr := &scriptedWriter{errs: []error{nil, lyrics.ErrBlocked}}
+	w := twoPathWorker(q, wr)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v", err)
+	}
+	if wr.calls != 2 {
+		t.Fatalf("writer calls = %d; want both paths tried", wr.calls)
+	}
+	if q.outcomeTypes[77] == queue.OutcomeBlocked || len(q.completed) != 0 {
+		t.Fatalf("outcomes %v completed %v; a row holding a landed file must not settle blocked", q.outcomeTypes, q.completed)
+	}
+	if len(q.failed) != 1 || q.failed[0] != 77 || !errors.Is(q.failCauses[0], lyrics.ErrBlocked) {
+		t.Fatalf("failed = %v causes %v; want the ordinary failure path carrying ErrBlocked", q.failed, q.failCauses)
+	}
+}
+
+// A KEPT path is a file on disk too: path 1 kept a better file, path 2 refused.
+// Settling blocked would drop the tier of a row that still has a file, so the
+// row takes the ordinary failure path (#1395 review).
+func TestBlocked_WriterBackstop_AfterKeptPathFailsOrdinarily(t *testing.T) {
+	q := &fakeQueue{}
+	wr := &scriptedWriter{errs: []error{lyrics.ErrKeptBetter, lyrics.ErrBlocked}}
+	w := twoPathWorker(q, wr)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v", err)
+	}
+	if q.outcomeTypes[77] == queue.OutcomeBlocked || len(q.completed) != 0 {
+		t.Fatalf("outcomes %v completed %v; a row holding a kept file must not settle blocked", q.outcomeTypes, q.completed)
+	}
+	if len(q.failed) != 1 || q.failed[0] != 77 {
+		t.Fatalf("failed = %v; want the ordinary failure path", q.failed)
+	}
+}
+
+// A blocked row has no file: a sync tier, word verdict and lane left from an
+// earlier result end cleared after the settle (#1395 review).
+func TestBlocked_Settle_ClearsStaleTierVerdictAndLane(t *testing.T) {
+	song := fallthroughSong(90, "wrong words")
+	rig, w := newCacheLaneRig(t, &fakeFetcher{song: song})
+	w.SetBlockChecker(blockBody(t, rig.db, "Synthetic Artist", "Synthetic Title", song))
+	if _, err := rig.db.Exec(`UPDATE work_queue SET sync_tier = 'word', word_timing_state = 'served', provider_lane = 'musixmatch' WHERE id = ?`, rig.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if outcome := rowOutcome(t, rig.db, rig.id); outcome != queue.OutcomeBlocked {
+		t.Fatalf("outcome = %q; want blocked", outcome)
+	}
+	var tier, state, lane, detail sql.NullString
+	if err := rig.db.QueryRow(`SELECT sync_tier, word_timing_state, provider_lane, outcome_detail FROM work_queue WHERE id = ?`, rig.id).Scan(&tier, &state, &lane, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if tier.Valid || state.Valid || lane.Valid {
+		t.Fatalf("sync_tier=%v word_timing_state=%v provider_lane=%v; want all NULL on a blocked row", tier, state, lane)
+	}
+	if detail.String != queue.OutcomeDetailBlocked {
+		t.Fatalf("outcome_detail = %q; want %q", detail.String, queue.OutcomeDetailBlocked)
+	}
+}
+
+// The detector's not-instrumental telemetry from this pass is stamped on the
+// blocked path too, so the next pass reuses it instead of re-running inference.
+func TestBlocked_Settle_StampsDetectorMissTelemetry(t *testing.T) {
+	q := &fakeQueue{}
+	w := refusedUntriedFakeWorker(q)
+	w.SetFallbackProviders(providers.New(providers.PetitLyrics, &fakeFetcher{err: petitlyrics.ErrNoMatch}))
+	w.SetBlockChecker(blockAll{})
+	w.EnableAudioDetector(&fakeStoredDecider{version: "v1", detectRes: detector.Result{
+		Instrumental: false, Version: "v1", Confidence: 0.4, VocalConfidence: 0.7, WinningVocalClass: "Singing", Reusable: true,
+	}})
+	w.SetInstrumentalDetectionDefault(true)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v", err)
+	}
+	if q.outcomeTypes[91] != queue.OutcomeBlocked {
+		t.Fatalf("outcomes = %v; want row 91 settled blocked", q.outcomeTypes)
+	}
+	if len(q.instrumentalStamps) != 1 || q.instrumentalStamps[0].Tel.DetectorVersion != "v1" {
+		t.Fatalf("instrumentalStamps = %+v; want the v1 telemetry stamped on the blocked settle", q.instrumentalStamps)
 	}
 }

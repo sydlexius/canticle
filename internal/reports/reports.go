@@ -289,8 +289,9 @@ const (
 	// re-fetching yields the same wrong-script result. Counting it as coverage
 	// would overstate what the library actually has.
 	ResultRejected ResultClass = "rejected"
-	// ResultUnknown means the row could not be classified: a NULL outcome_type
-	// that is not a miss. That is a legacy row that predates the column, or a row
+	// ResultUnknown means the row could not be classified: an outcome_type this
+	// classifier has no arm for (a NULL one that is not a miss, or 'blocked',
+	// #1395, whose own class is a later slice). That is a legacy row that predates the column, or a row
 	// the timing guard quarantined or remediation retired (Detail carries
 	// "timing refused: ..."). A row prune retired as unresolvable never reaches
 	// this classifier: Recent outcomes, its only caller, does not list it (#740).
@@ -395,7 +396,8 @@ type RecentOutcome struct {
 // remediated (timing_outcome 'categorical'/'mis_synced'/'degenerate'), which reads
 // ResultSynced regardless of its stale sync_tier, per ResultLineSynced's
 // doc comment; 'unsynced'/'instrumental'/'rejected' map to the matching
-// ResultClass unchanged; a NULL outcome_type -> unknown. An 'unavailable' row
+// ResultClass unchanged; any other outcome_type (a NULL one, or 'blocked',
+// #1395, whose own class is a later slice) -> unknown. An 'unavailable' row
 // always has a NULL outcome_type (RetireMiss never stamps one) and the miss
 // sentinel, so it always classifies as 'miss', never 'unknown'. output_paths is
 // no longer consulted -- it holds the stale enqueue-time .lrc plan, which is

@@ -209,3 +209,50 @@ func TestReopenBlockedTx(t *testing.T) {
 		}
 	})
 }
+
+// A blocked row has no file, so the settle clears every column describing a
+// result IN the same statement: a stale lane would count the row as that lane's
+// latest served track and attribute it in the source breakdown (#1395). The fixed
+// outcome_detail is what Recent outcomes shows for it.
+func TestDBQueue_SettleBlocked_ClearsLaneTierAndVerdicts(t *testing.T) {
+	ctx := context.Background()
+	q, id, _ := blockedRow(t)
+	if _, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue SET provider_lane = 'petitlyrics', upstream = 'licensor', sync_tier = 'word',
+             word_timing_state = 'served', word_timing_generation = 3, word_timing_checked_at = '2026-01-01T00:00:00Z',
+             timing_outcome = 'ok', overrun_magnitude = 2.5, overrun_ratio = 1.1, evaluated_at = '2026-01-01T00:00:00Z'
+         WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	// Control: the same stale lane on a done row IS served-track evidence, so the
+	// absence asserted below comes from the settle and not from the fixture.
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = 'done', last_error = '', completed_at = '2026-01-02T00:00:00Z' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if track, found, err := q.LatestServedTrack(ctx, "petitlyrics"); err != nil || !found || track.TrackName != "Title" {
+		t.Fatalf("setup: LatestServedTrack = (%+v, %v, %v); want the seeded row", track, found, err)
+	}
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET status = ? WHERE id = ?`, StatusProcessing, id); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := q.SettleBlocked(ctx, id); err != nil || outcome != Settled {
+		t.Fatalf("SettleBlocked = (%v, %v)", outcome, err)
+	}
+	for _, col := range []string{"provider_lane", "upstream", "sync_tier", "word_timing_state", "word_timing_generation",
+		"word_timing_checked_at", "timing_outcome", "overrun_magnitude", "overrun_ratio", "evaluated_at"} {
+		var v sql.NullString
+		if err := q.db.QueryRowContext(ctx, `SELECT CAST(`+col+` AS TEXT) FROM work_queue WHERE id = ?`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		if v.Valid {
+			t.Errorf("%s = %q after a blocked settle; want NULL", col, v.String)
+		}
+	}
+	if track, found, err := q.LatestServedTrack(ctx, "petitlyrics"); err != nil || found {
+		t.Fatalf("LatestServedTrack = (%+v, %v, %v); a blocked row must not count as the lane's latest served track", track, found, err)
+	}
+	var detail string
+	if err := q.db.QueryRowContext(ctx, `SELECT outcome_detail FROM work_queue WHERE id = ?`, id).Scan(&detail); err != nil || detail != OutcomeDetailBlocked {
+		t.Fatalf("outcome_detail = %q (%v); want %q", detail, err, OutcomeDetailBlocked)
+	}
+}

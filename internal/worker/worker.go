@@ -1825,9 +1825,12 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	landed := false
 	for _, p := range paths {
 		err := write(song, p.Filename, p.Outdir)
-		if errors.Is(err, lyrics.ErrBlocked) && !landed {
+		if errors.Is(err, lyrics.ErrBlocked) && !landed && len(kept) == 0 {
 			// The backstop caught a block marked mid-pass: settle as for an
 			// all-blocked dispatch (an upgrade trip keeps its file record; #1395).
+			// Only while NO output path holds a file from this pass, landed or
+			// kept: a blocked row has no file, so with one it takes the ordinary
+			// failure path below instead.
 			return w.settleBlocked(ctx, item)
 		}
 		if errors.Is(err, lyrics.ErrKeptBetter) {
