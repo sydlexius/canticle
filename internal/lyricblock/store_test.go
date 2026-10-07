@@ -208,3 +208,25 @@ func TestStore_AnyBlockedFailsOpen(t *testing.T) {
 		}
 	}
 }
+
+func TestStore_ListFiltersEachKeyIndependently(t *testing.T) {
+	s, d, _ := newStore(t)
+	addFP(t, s, d, "a", "t1", "f1")
+	addFP(t, s, d, "a", "t2", "f2")
+	addFP(t, s, d, "b", "t1", "f3")
+	for _, tc := range []struct {
+		name string
+		f    ListFilter
+		want int
+	}{
+		{"artist only", ListFilter{ArtistKey: "a"}, 2},
+		{"title only", ListFilter{TitleKey: "t1"}, 2},
+		{"both", ListFilter{ArtistKey: "a", TitleKey: "t1"}, 1},
+		{"neither", ListFilter{}, 3},
+	} {
+		got, err := s.List(context.Background(), tc.f)
+		if err != nil || len(got) != tc.want {
+			t.Errorf("%s: got %d (%v), want %d", tc.name, len(got), err, tc.want)
+		}
+	}
+}

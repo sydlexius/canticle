@@ -63,7 +63,7 @@ func SongFingerprints(s models.Song) []string {
 		return nil
 	}
 	orig, tr := s.Subtitles.Lines, s.TranslationSubtitles.Lines
-	cands := []string{hashLines(orig), Fingerprint(s.Lyrics.LyricsBody)}
+	cands := []string{hashLines(timeSorted(orig)), Fingerprint(s.Lyrics.LyricsBody)}
 	if len(tr) > 0 && len(orig) > 0 {
 		cands = slices.Insert(cands, 1, hashLines(interleave(orig, tr)))
 	}
@@ -73,6 +73,15 @@ func SongFingerprints(s models.Song) []string {
 			out = append(out, fp)
 		}
 	}
+	return out
+}
+
+// timeSorted returns a copy of lines stably sorted by timestamp, the order
+// ParseBody reads the written file back in (the writer emits slice order, a
+// provider may hand it lines out of order). The caller's slice is not touched.
+func timeSorted(lines []models.Lines) []models.Lines {
+	out := slices.Clone(lines)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Total < out[j].Time.Total })
 	return out
 }
 

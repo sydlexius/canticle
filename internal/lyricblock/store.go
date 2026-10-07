@@ -106,9 +106,13 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Block, error) {
 		q += ` AND b.work_queue_id = ?`
 		args = append(args, f.WorkItemID)
 	}
-	if f.ArtistKey != "" || f.TitleKey != "" {
-		q += ` AND b.artist_key = ? AND b.title_key = ?`
-		args = append(args, normalize.NormalizeKey(f.ArtistKey), normalize.NormalizeKey(f.TitleKey))
+	if f.ArtistKey != "" {
+		q += ` AND b.artist_key = ?`
+		args = append(args, normalize.NormalizeKey(f.ArtistKey))
+	}
+	if f.TitleKey != "" {
+		q += ` AND b.title_key = ?`
+		args = append(args, normalize.NormalizeKey(f.TitleKey))
 	}
 	if f.Orphans {
 		q += ` AND NOT EXISTS (SELECT 1 FROM work_queue w WHERE w.artist_key = b.artist_key AND w.title_key = b.title_key)`
