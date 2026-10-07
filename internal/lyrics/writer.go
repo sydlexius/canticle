@@ -127,6 +127,9 @@ type LRCWriter struct {
 	selfWrites *selfwrite.Registry
 	// force disables the no-downgrade guard (#553); set from --update only.
 	force bool
+	// allowManual lets a write replace a manual instrumental marker; set only by
+	// WriteManualMarker (manualguard.go).
+	allowManual bool
 	// bumpAudioMtime opts into the #505 audio mtime bump (see mtimebump.go).
 	bumpAudioMtime bool
 	// chtimes, when non-nil, replaces os.Chtimes. TEST-ONLY, to fail the bump.
@@ -501,6 +504,9 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	// candidate on a lower rung than that is refused unless forced (--update).
 	// It judges exactly that removal set (staleSidecars and companion.removes,
 	// the same values the mutations below consume), nothing the write leaves.
+	if k := w.refuseManualMarker(fp, listing); k != nil {
+		return k
+	}
 	if !w.force {
 		if have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion); got < have.OnDisk {
 			slog.Debug("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),

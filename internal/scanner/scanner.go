@@ -1231,7 +1231,9 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// [upgrade_sweep] (serve mode, off by default; it bypasses the cache
 			// and the detector refuses telemetry from an older model version, so
 			// inference runs again) or scan reconcile, not a scan side effect.
-			if !reopen.Unsynced {
+			// A manual marker (#1218) is never reopened; the probe runs only once
+			// a reopen is granted, so an ordinary scan reads nothing extra.
+			if !reopen.Unsynced || lyrics.ManualMarkerOnDisk(txtPath) {
 				// Index it if the scan index has never seen this path (#786). In
 				// serve mode this is the FIRST branch a lone .txt matches, so
 				// leaving it unwired would keep every moved instrumental track
