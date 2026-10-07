@@ -5,7 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/lyricblock"
@@ -43,23 +46,65 @@ func assertNotWritten(t *testing.T, path string) {
 	}
 }
 
-// Ordinary fetch: every answer is blocked; the row is deferred (no hot loop, no
-// failure backoff) and nothing is written.
-func TestBlocked_OrdinaryFetch_AllBlockedDefers(t *testing.T) {
+// rowCounters reads the columns a blocked settle must not move.
+func rowCounters(t *testing.T, d *sql.DB, id int64) string {
+	t.Helper()
+	var miss, attempts, laneRows int
+	if err := d.QueryRow(`SELECT miss_count, attempts FROM work_queue WHERE id = ?`, id).Scan(&miss, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueryRow(`SELECT COUNT(*) FROM lane_attempts WHERE queue_id = ?`, id).Scan(&laneRows); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("miss_count=%d attempts=%d lane_attempts=%d", miss, attempts, laneRows)
+}
+
+func rowOutcome(t *testing.T, d *sql.DB, id int64) string {
+	t.Helper()
+	var o sql.NullString
+	if err := d.QueryRow(`SELECT outcome_type FROM work_queue WHERE id = ?`, id).Scan(&o); err != nil {
+		t.Fatal(err)
+	}
+	return o.String
+}
+
+// Ordinary fetch: every answer is blocked; the row settles done/blocked with its
+// miss, attempt and lane-attempt counters unchanged, nothing is written, and no
+// failure backoff is fed (#1395). It is then not retried: a later pass finds
+// nothing to do.
+func TestBlocked_OrdinaryFetch_AllBlockedSettlesBlocked(t *testing.T) {
 	song := fallthroughSong(90, "wrong words")
 	rig, w := newCacheLaneRig(t, &fakeFetcher{song: song})
+	// History the settle must not disturb.
+	if _, err := rig.db.Exec(`UPDATE work_queue SET miss_count = 3 WHERE id = ?`, rig.id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.db.Exec(`INSERT INTO lane_attempts (queue_id, lane, hit, attempted_at) VALUES (?, 'musixmatch', 0, '2026-01-01T00:00:00Z')`, rig.id); err != nil {
+		t.Fatal(err)
+	}
+	w.consecutiveFailures = 2
 	w.SetBlockChecker(blockBody(t, rig.db, "Synthetic Artist", "Synthetic Title", song))
+	before := rowCounters(t, rig.db, rig.id)
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	assertNotWritten(t, rig.lrc)
-	if status := rowStatus(t, rig.db, rig.id); status != queue.StatusDeferred {
-		t.Fatalf("status = %q; want %q (an all-blocked row is deferred, not settled, in this slice)", status, queue.StatusDeferred)
+	if status, outcome := rowStatus(t, rig.db, rig.id), rowOutcome(t, rig.db, rig.id); status != queue.StatusDone || outcome != queue.OutcomeBlocked {
+		t.Fatalf("row = (%q, %q); want (done, blocked)", status, outcome)
+	}
+	if after := rowCounters(t, rig.db, rig.id); after != before {
+		t.Fatalf("counters %s -> %s; a blocked settle must move none", before, after)
+	}
+	if err := w.RunOnce(context.Background()); !errors.Is(err, errQueueEmpty) {
+		t.Fatalf("second RunOnce = %v; want errQueueEmpty (a blocked row is not retried)", err)
 	}
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; a blocked result is not a provider failure", w.consecutiveFailures)
 	}
-	assertNoLaneMiss(t, rig.db, rig.id)
+	var misses int
+	if err := rig.db.QueryRow(`SELECT COALESCE(SUM(misses), 0) FROM provider_outcomes`).Scan(&misses); err != nil || misses != 0 {
+		t.Fatalf("provider_outcomes misses = %d (%v); a blocked answer is not a miss", misses, err)
+	}
 }
 
 // assertNoLaneMiss: a blocked answer is not a provider miss, so neither
@@ -101,7 +146,7 @@ func TestBlocked_FallThrough_BlockedLaneIsNotAMiss(t *testing.T) {
 // One lane's answer is blocked and the other lane did not answer (auth failure,
 // breaker open): just THIS row is parked through the bounded wait, the drain pass
 // continues, and no lane miss is charged. With the budget spent the row takes the
-// all-blocked deferral and nothing is written.
+// all-blocked settle (done/blocked) and nothing is written.
 func TestBlocked_UntriedSiblingParksTheRowOnly(t *testing.T) {
 	ctx := context.Background()
 	blocked := fallthroughSong(90, "wrong words")
@@ -148,8 +193,12 @@ func TestBlocked_UntriedSiblingParksTheRowOnly(t *testing.T) {
 			t.Fatalf("pass %d: %v", i+1, err)
 		}
 	}
-	if status := rowStatus(t, rig.db, rig.id); status != queue.StatusDeferred {
-		t.Fatalf("row 1 after the budget = %q; want the all-blocked deferral, never done", status)
+	if status, outcome := rowStatus(t, rig.db, rig.id), rowOutcome(t, rig.db, rig.id); status != queue.StatusDone || outcome != queue.OutcomeBlocked {
+		t.Fatalf("row 1 after the budget = (%q, %q); want (done, blocked): the wait budget is spent and the row must not stall the drain", status, outcome)
+	}
+	read()
+	if misses != 0 || attempts != 0 {
+		t.Fatalf("miss_count %d, attempts %d after the settle; want 0, 0", misses, attempts)
 	}
 	for _, s := range rig.writer.songs {
 		if s.Subtitles.Lines[0].Text == "wrong words" {
@@ -167,10 +216,14 @@ func TestBlocked_WordRecheck_DispatchBlockDefers(t *testing.T) {
 	song := recheckSong("word line", true, models.WordAnswerServed)
 	rig, w := newRecheckRig(t, &fakeFetcher{song: song}, nil, false)
 	w.SetBlockChecker(blockBody(t, rig.db, "Synthetic Artist", "Synthetic Title", song))
+	before := fileRecord(t, rig.db, rig.id)
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	rig.assertUntouched(t)
+	if after := fileRecord(t, rig.db, rig.id); after != before {
+		t.Fatalf("file record changed:\n before %s\n after  %s", before, after)
+	}
 	if row := rig.recheckRow(t); row.state != "queued" {
 		t.Fatalf("word_timing_state = %q; want queued (a blocked result must not settle the recheck absent)", row.state)
 	}
@@ -285,9 +338,34 @@ func TestBlocked_CacheHit_WriterBackstop(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNotWritten(t, rig.lrc)
-	if status := rowStatus(t, rig.db, rig.id); status == "done" {
-		t.Fatalf("status = %q after a refused write", status)
+	if status, outcome := rowStatus(t, rig.db, rig.id), rowOutcome(t, rig.db, rig.id); status != queue.StatusDone || outcome != queue.OutcomeBlocked {
+		t.Fatalf("row = (%q, %q) after a refused write; want (done, blocked)", status, outcome)
 	}
+}
+
+// fileRecord is every column that describes the settled file on disk, with
+// NULLs distinguished from empty strings, so a before/after comparison is exact.
+func fileRecord(t *testing.T, d *sql.DB, id int64) string {
+	t.Helper()
+	cols := []string{"outcome_type", "outcome_detail", "sync_tier", "provider_lane", "upstream", "timing_outcome", "completed_at", "fetched_at", "miss_count"}
+	vals := make([]sql.NullString, len(cols))
+	dest := make([]any, len(cols))
+	for i := range vals {
+		dest[i] = &vals[i]
+	}
+	q := "SELECT CAST(" + strings.Join(cols, " AS TEXT), CAST(") + " AS TEXT) FROM work_queue WHERE id = ?"
+	if err := d.QueryRow(q, id).Scan(dest...); err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for i, c := range cols {
+		if vals[i].Valid {
+			out = append(out, fmt.Sprintf("%s=%q", c, vals[i].String))
+		} else {
+			out = append(out, c+"=NULL")
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 // Upgrade trip: the backstop refuses the blocked re-fetch; file and row record
@@ -296,8 +374,15 @@ func TestBlocked_UpgradeTrip_KeepsFileRecord(t *testing.T) {
 	song := fallthroughSong(90, "wrong words")
 	r := newUpgradeRig(t, &fakeFetcher{song: song})
 	r.lw.SetBlockChecker(blockBody(t, r.db, "Track Artist feat. X", "Song", song)) // the ROW identity, not the album artist
+	before := fileRecord(t, r.db, r.id)
 	r.run(t)
 	r.kept(t)
+	if after := fileRecord(t, r.db, r.id); after != before {
+		t.Fatalf("file record changed:\n before %s\n after  %s", before, after)
+	}
+	if got := rowOutcome(t, r.db, r.id); got != "unsynced" {
+		t.Fatalf("outcome_type = %q; an upgrade trip meeting a block must not relabel the row", got)
+	}
 }
 
 // Word recheck: the backstop refuses a blocked word result; the .lrc is untouched.
@@ -305,10 +390,14 @@ func TestBlocked_WordRecheck_KeepsSettledLRC(t *testing.T) {
 	song := recheckSong("word line", true, models.WordAnswerServed)
 	rig, w := newRecheckRig(t, &fakeFetcher{song: song}, nil, false)
 	w.writer.(*lyrics.LRCWriter).SetBlockChecker(blockBody(t, rig.db, "Synthetic Artist", "Synthetic Title", song))
+	before := fileRecord(t, rig.db, rig.id)
 	if err := w.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	rig.assertUntouched(t)
+	if after := fileRecord(t, rig.db, rig.id); after != before {
+		t.Fatalf("file record changed:\n before %s\n after  %s", before, after)
+	}
 	if row := rig.recheckRow(t); row.state != "queued" {
 		t.Fatalf("word_timing_state = %q; want the row still queued after a refused write", row.state)
 	}
@@ -329,5 +418,30 @@ func TestBlocked_WordRecheck_WriterBlockDoesNotFeedFailureCounter(t *testing.T) 
 	rig.assertUntouched(t)
 	if row := rig.recheckRow(t); row.state != "queued" {
 		t.Fatalf("word_timing_state = %q; want queued", row.state)
+	}
+}
+
+// Word recheck that keeps meeting the block spends only its wait budget, then
+// the row is released back to done with the settled file record and file
+// untouched; no miss is charged and it is not relabeled blocked (#1395).
+func TestBlocked_WordRecheck_ReleasedAfterBudgetKeepsRecord(t *testing.T) {
+	song := recheckSong("word line", true, models.WordAnswerServed)
+	rig, w := newRecheckRig(t, &fakeFetcher{song: song}, nil, false)
+	w.SetBlockChecker(blockBody(t, rig.db, "Synthetic Artist", "Synthetic Title", song))
+	before := fileRecord(t, rig.db, rig.id)
+	for i := 0; i < maxWordRecheckWaits+1; i++ {
+		if _, err := rig.db.Exec(`UPDATE work_queue SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, rig.id); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.RunOnce(context.Background()); err != nil && !errors.Is(err, errQueueEmpty) {
+			t.Fatalf("pass %d: %v", i+1, err)
+		}
+	}
+	if status := rowStatus(t, rig.db, rig.id); status != queue.StatusDone {
+		t.Fatalf("status = %q after the wait budget; want the row released to done", status)
+	}
+	rig.assertUntouched(t)
+	if after := fileRecord(t, rig.db, rig.id); after != before {
+		t.Fatalf("file record changed:\n before %s\n after  %s", before, after)
 	}
 }
