@@ -32,6 +32,10 @@ type LaneState struct {
 	Trips int
 	// EverSucceeded reports any successful resolve on this lane this session.
 	EverSucceeded bool
+	// Refused reports that the lane's last provider answer was a refusal (HTTP
+	// 403): while State is open or half-open, the lane is refused, not
+	// throttled (#1372). The next resolve that is not a refusal clears it.
+	Refused bool
 }
 
 // LaneHealth reports every lane's circuit state in lane (priority) order.
@@ -55,6 +59,7 @@ func (o *Orchestrator) LaneHealth() []LaneState {
 			OpenUntil:     s.OpenUntil,
 			Trips:         s.Trips,
 			EverSucceeded: s.EverSucceeded,
+			Refused:       l.refused.Load(),
 		})
 	}
 	return out

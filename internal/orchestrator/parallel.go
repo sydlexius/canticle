@@ -23,6 +23,8 @@ type laneResult struct {
 	instrumentalOnly bool
 	// wordCapable mirrors Lane.WordCapable() for the word-answer aggregate.
 	wordCapable bool
+	// open is the lane's breaker read right after it reported (noteTransport).
+	open bool
 }
 
 // findParallel dispatches every lane concurrently and races the results:
@@ -52,7 +54,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 		lane := lane
 		go func() {
 			song, err := lane.FindLyrics(childCtx, track, sourcePath)
-			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local(), instrumentalOnly: lane.instrumentalOnly, wordCapable: lane.WordCapable()}
+			results <- laneResult{song: song, err: err, name: lane.Name(), local: lane.Local(), instrumentalOnly: lane.instrumentalOnly, wordCapable: lane.WordCapable(), open: lane.open()}
 		}()
 	}
 
@@ -155,6 +157,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 				case res.err == nil:
 					r.retainCandidate(res.song, res.name, retainQuality(res.song, track), kind)
 				default:
+					r.noteTransport(class, res.open)
 					r.rankErr(res.err, class)
 				}
 			}

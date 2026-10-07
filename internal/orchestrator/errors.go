@@ -60,6 +60,22 @@ func (e *RefusedUntriedError) Error() string {
 // Unwrap makes errors.Is(err, ErrTimingRefusedUntried) hold.
 func (e *RefusedUntriedError) Unwrap() error { return ErrTimingRefusedUntried }
 
+// PartialFailureError is how the dispatch (never a lane) returns a lane's
+// transport-class failure when another lyrics lane ANSWERED the catalog
+// question with a clean miss AND every transport-failing lane's breaker is
+// open after the dispatch (#1372): later rows skip that lane. That is a 403 on
+// any provider, or an innertube stale client version (HTTP 400). The row is not charged a miss and the worker
+// does not feed its global backoff. A transport failure that leaves its lane
+// closed (5xx, bad body, dial/TLS/timeout) is returned plain and feeds that
+// backoff as before; bounding those is #1375. It renders and unwraps as the
+// lane's error, so its class and stored text are unchanged.
+type PartialFailureError struct{ Err error }
+
+func (e *PartialFailureError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes the lane's error to errors.Is and ClassifyOutcome.
+func (e *PartialFailureError) Unwrap() error { return e.Err }
+
 // OutcomeClass classifies a lane's outcome for cross-lane precedence (design
 // doc Gap 4). The precedence rule is "least-certain-negative wins": any signal
 // that we did not truly learn the track is absent (auth, rate-limit, transport,
@@ -152,6 +168,8 @@ func ClassifyOutcome(err error) OutcomeClass {
 		// not a credential or throttle condition, and no amount of waiting or
 		// rotation fixes it; bucketing it here would repeat the #495
 		// misdiagnosis. It falls to OutcomeTransport, which is correct.
+		// musixmatch.ErrForbidden (an address-level refusal, #1372) is absent for
+		// the same reason: its lane opens, but it is not a throttle or auth signal.
 		errors.Is(err, petitlyrics.ErrProviderUnavailable),
 		// A miss while that outage is still latched (#1195) is the same OUTCOME
 		// for the row: the credential is judged dead, so the catalog answer is

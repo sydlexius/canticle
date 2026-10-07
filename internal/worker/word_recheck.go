@@ -336,6 +336,13 @@ func (w *Worker) classifyWordRecheckFailure(cause error) error {
 		w.consecutiveFailures = 0
 		return errThrottled
 	case orchestrator.OutcomeTransport:
+		var partial *orchestrator.PartialFailureError
+		if errors.As(cause, &partial) {
+			// The failing lane is now open and another word lane answered
+			// (#1372): no global backoff, as on the ordinary path.
+			w.consecutiveFailures = 0
+			return nil
+		}
 		w.consecutiveFailures++
 	case orchestrator.OutcomeSuccess, orchestrator.OutcomeBenignMiss, orchestrator.OutcomeLaneOutage,
 		orchestrator.OutcomeLaneNotReady, orchestrator.OutcomeRefusedUntried:

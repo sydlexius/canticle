@@ -278,6 +278,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			continue
 		}
 
+		r.noteTransport(class, lane.open())
 		r.rankErr(err, class)
 	}
 
@@ -366,6 +367,12 @@ type dispatchResult struct {
 	haveGated    bool
 	// wordAnswered counts word-capable lanes that answered the word question.
 	wordAnswered int
+	// answered reports that a lyrics lane answered the catalog question with a
+	// clean miss (#1372), so a sibling's transport failure is not the whole story.
+	answered bool
+	// unbounded reports a transport-class failure that left its lane's breaker
+	// closed: nothing stops the next row from meeting it again (noteTransport).
+	unbounded bool
 }
 
 // gate keeps song as the below-gate commit candidate if it lands strictly
@@ -384,10 +391,13 @@ func (r *dispatchResult) gate(song models.Song, laneName string, q Quality) {
 // cannot turn a refused lyric into words, and an open detector breaker is
 // reported before the lane even checks whether detection is enabled for the
 // item, so counting it would park rows that can never run it (#950 review I2).
+// It also notes a lyrics lane's clean miss as an answer (answered, #1372); a
+// hollow (truncated) response stays a benign miss but is not an answer.
 func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName string, instrumentalOnly bool) {
 	if instrumentalOnly {
 		return
 	}
+	r.answered = r.answered || (class == OutcomeBenignMiss && !errors.Is(err, musixmatch.ErrTruncatedResponse))
 	switch class {
 	case OutcomeUnavailable, OutcomeAuthRateLimit, OutcomeLaneNotReady:
 		if r.untriedErr == nil {
@@ -395,6 +405,15 @@ func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName str
 		}
 	case OutcomeSuccess, OutcomeBenignMiss, OutcomeLaneOutage, OutcomeTransport, OutcomeRefusedUntried:
 	}
+}
+
+// noteTransport records whether a lane's transport-class failure is bounded by
+// its own breaker. laneOpen is read after the lane reported; the lane was
+// callable when the dispatch began; what matters is that the lane is open
+// after the dispatch (a 403 or an innertube stale client version, #1372), so
+// later rows skip it.
+func (r *dispatchResult) noteTransport(class OutcomeClass, laneOpen bool) {
+	r.unbounded = r.unbounded || (class == OutcomeTransport && !laneOpen)
 }
 
 // retainCandidate is retain plus the bookkeeping of WHY the kept result is not
@@ -497,6 +516,12 @@ func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.S
 		return models.Song{}, ErrLaneUnavailable
 	}
 	if r.topErr != nil {
+		// Only a failure whose lane is now open is lane-bounded. Any other
+		// transport fault (5xx, bad body, dial/TLS/timeout) keeps feeding the
+		// worker's global backoff as before; bounding those is #1375.
+		if r.topClass == OutcomeTransport && r.answered && !r.unbounded {
+			return models.Song{}, &PartialFailureError{Err: r.topErr}
+		}
 		return models.Song{}, r.topErr
 	}
 	// No lanes configured at all.

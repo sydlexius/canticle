@@ -56,6 +56,11 @@ var (
 	// ErrRateLimited indicates HTTP 429 from the Musixmatch API. Treat as a
 	// circuit-breaker signal.
 	ErrRateLimited = errors.New("musixmatch: rate limited")
+	// ErrForbidden indicates HTTP 403 on a lookup: the provider (or its edge)
+	// refused the request outright, usually because the egress address is
+	// blocked (#1372). It is kept apart from ErrRateLimited and
+	// ErrUnauthorized: it is not handled as throttling or as a token rejection.
+	ErrForbidden = errors.New("musixmatch: forbidden")
 	// ErrNotFound indicates HTTP 404 or an inner status_code 404 from the
 	// Musixmatch API meaning no matching track or lyrics were found.
 	ErrNotFound = errors.New("musixmatch: no results found")
@@ -380,9 +385,18 @@ func (c *Client) tokenRenewer() TokenRenewer {
 
 // NewClient creates a new Musixmatch API client.
 func NewClient(token string) *Client {
+	return NewClientWithHTTP(token, &http.Client{Timeout: 30 * time.Second})
+}
+
+// NewClientWithHTTP is NewClient over the caller's HTTP client, so a test in
+// another package can route the client without touching http.DefaultTransport.
+func NewClientWithHTTP(token string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &Client{
 		Token:      token,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: httpClient,
 		now:        time.Now,
 		sleep:      ctxSleep,
 	}
@@ -661,6 +675,25 @@ func (c *Client) FindLyrics(ctx context.Context, track models.Track) (models.Son
 	return c.findLyricsOnce(ctx, track)
 }
 
+// forbiddenError is ErrForbidden carrying the generic non-200 text, so the
+// stored reason keeps the shape the failure reports already group on.
+type forbiddenError struct{ msg string }
+
+func (e forbiddenError) Error() string { return e.msg }
+
+func (forbiddenError) Is(target error) bool { return target == ErrForbidden }
+
+// errorBodyPrefix reads a short, bounded, single-line prefix of a non-200
+// response body for an error message. The text is logged and stored in
+// work_queue.last_error, and an edge refusal answers with a whole HTML page.
+func errorBodyPrefix(body io.Reader) string {
+	const maxPrefix = 120
+	b, _ := io.ReadAll(io.LimitReader(body, maxPrefix))
+	// The byte limit can split a multi-byte rune, and a body may carry invalid
+	// bytes; drop both so the stored text is valid UTF-8.
+	return strings.Join(strings.Fields(strings.ToValidUTF8(string(b), "")), " ")
+}
+
 // findLyricsOnce performs a single lookup with the currently installed token.
 func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models.Song, error) {
 	if err := c.pace(ctx); err != nil {
@@ -779,9 +812,10 @@ func (c *Client) findLyricsOnce(ctx context.Context, track models.Track) (models
 			return song, fmt.Errorf("%w: increase the cooldown time and try again in a few minutes", ErrRateLimited)
 		case http.StatusNotFound:
 			return song, ErrNotFound
+		case http.StatusForbidden:
+			return song, forbiddenError{msg: fmt.Sprintf("musixmatch API error: status 403, body: %s", errorBodyPrefix(res.Body))}
 		default:
-			errBody, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
-			return song, fmt.Errorf("musixmatch API error: status %d, body: %s", res.StatusCode, strings.TrimSpace(string(errBody)))
+			return song, fmt.Errorf("musixmatch API error: status %d, body: %s", res.StatusCode, errorBodyPrefix(res.Body))
 		}
 	}
 

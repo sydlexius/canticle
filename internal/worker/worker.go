@@ -1551,7 +1551,16 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			return nil
 		}
 		slog.Warn("worker song resolution failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
-		return w.fail(ctx, item, err)
+		failErr := w.fail(ctx, item, err)
+		var partial *orchestrator.PartialFailureError
+		if failErr == nil && errors.As(err, &partial) {
+			// One lane failed and is now open, and another answered (#1372): the
+			// row keeps its own retry (queue.Fail, no miss charged), while the
+			// worker-global backoff is not fed; later rows skip the open lane.
+			// Rows the answering lanes miss meanwhile are charged a miss (#1374).
+			w.consecutiveFailures = 0
+		}
+		return failErr
 	}
 	// A gate-positive detector verdict (whether terminal-suitable with telemetry,
 	// or merely best-available when every other lane also missed) flows back

@@ -76,6 +76,18 @@ func providerClassifier(l *Lane, err error) error {
 		return err
 	}
 
+	// A provider refusal (#1372): HTTP 403 on the lookup, as when the provider's
+	// edge blocks the egress address. It is not handled as throttling (no pacer
+	// ratchet), and an unchanged request is unlikely to succeed, so the lane opens
+	// instead of being asked on every row; the half-open probe closes it once the
+	// provider answers again. The other lanes carry on meanwhile.
+	if errors.Is(err, musixmatch.ErrForbidden) {
+		res := l.breaker.Trip()
+		slog.Warn("lane circuit opened: request refused by the provider (HTTP 403); a blocked egress address is the usual cause",
+			"provider", l.Name(), "trips", res.Trips, "cause", err, "backoff", res.Window, "next_retry", res.OpenUntil)
+		return err
+	}
+
 	// Petit Lyrics fault sentinels. These are handled separately from the
 	// musixmatch block above rather than folded into it, because the two
 	// providers do not share a throttle model: musixmatch distinguishes a
