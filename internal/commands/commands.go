@@ -160,6 +160,7 @@ type ScanCmd struct {
 	PurgeProvenance                  *ScanPurgeProvenanceCmd                  `arg:"subcommand:purge-provenance" help:"bulk-delete .lrc/.txt sidecars by provenance (--source or --no-source) and requeue for re-fetch (issue #474), or restore aligner-retimed lyrics (--generated)"`
 	ReconcileWordSync                *ScanReconcileWordSyncCmd                `arg:"subcommand:reconcile-word-sync" help:"queue settled line-synced tracks for a word-timing re-check by a running serve worker; dry-run prints the count and minimum drain time (issue #982)"`
 	ReconcileSyncTier                *ScanReconcileSyncTierCmd                `arg:"subcommand:reconcile-sync-tier" help:"classify existing .lrc sidecars by on-disk sync tier (word/line/unsynced) and record it, resolving 'tier unknown' rows on the dashboard (issue #1075)"`
+	ReconcileUpstream                *ScanReconcileUpstreamCmd                `arg:"subcommand:reconcile-upstream" help:"fill the upstream licensor on settled rows from the [upstream:] tag in their sidecar (issue #1298)"`
 	ReconcileRemediated              *ScanReconcileRemediatedCmd              `arg:"subcommand:reconcile-remediated" help:"re-describe synced rows whose sidecar is gone or demoted (reset for re-fetch, unsynced, or record tier), draining 'tier unknown' (issue #1143)"`
 	ReconcileEditorTag               *ScanReconcileEditorTagCmd               `arg:"subcommand:reconcile-editor-tag" help:"backfill [re:canticle] onto existing canticle-written .lrc/.elrc files (issue #483)"`
 }
@@ -179,6 +180,15 @@ type ScanReconcileSyncTierCmd struct {
 type ScanReconcileRemediatedCmd struct {
 	Yes        bool   `arg:"--yes" help:"actually apply the changes (without it, prints what would change)"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of changed rows (default: <db-dir>/reconcile-remediated-backup-<ts>.jsonl)" default:""`
+	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// ScanReconcileUpstreamCmd fills work_queue.upstream for rows settled before
+// the column existed, from each sidecar's [upstream:] tag (#1298). Dry-run
+// unless --yes.
+type ScanReconcileUpstreamCmd struct {
+	Yes        bool   `arg:"--yes" help:"actually record the upstream (without it, prints what would change)"`
+	Backup     string `arg:"--backup" help:"path for the JSONL backup of filled rows (default: <db-dir>/reconcile-upstream-backup-<ts>.jsonl)" default:""`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -2761,6 +2771,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileSyncTier(ctx, out, sub)
+	case args.ReconcileUpstream != nil:
+		sub := *args.ReconcileUpstream
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileUpstream(ctx, out, sub)
 	case args.ReconcileRemediated != nil:
 		sub := *args.ReconcileRemediated
 		if sub.ConfigPath == "" {

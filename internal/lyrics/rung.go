@@ -217,10 +217,12 @@ func readRegularNoFollow(path string, limit ...int64) ([]byte, error) {
 	return b, err
 }
 
-// readRegularNoFollowInfo is readRegularNoFollow that also returns the
-// FileInfo of the handle the bytes came from, so a caller can later tell
-// whether the entry at path is still that file (os.SameFile).
-func readRegularNoFollowInfo(path string, limit ...int64) ([]byte, os.FileInfo, error) {
+// openRegularNoFollow opens path for reading only if it is a regular file that
+// is not a symlink: an Lstat first (so a FIFO or device is never opened), the
+// no-follow open, then a handle check that the opened file is the one Lstat saw
+// (os.SameFile), which holds where openNoFollow is a plain os.Open. The caller
+// closes the returned file.
+func openRegularNoFollow(path string) (*os.File, os.FileInfo, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, nil, err
@@ -232,14 +234,27 @@ func readRegularNoFollowInfo(path string, limit ...int64) ([]byte, os.FileInfo, 
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() { _ = f.Close() }()
 	hfi, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return nil, nil, err
 	}
 	if !hfi.Mode().IsRegular() || !os.SameFile(fi, hfi) {
+		_ = f.Close()
 		return nil, nil, errNotRegular
 	}
+	return f, hfi, nil
+}
+
+// readRegularNoFollowInfo is readRegularNoFollow that also returns the
+// FileInfo of the handle the bytes came from, so a caller can later tell
+// whether the entry at path is still that file (os.SameFile).
+func readRegularNoFollowInfo(path string, limit ...int64) ([]byte, os.FileInfo, error) {
+	f, hfi, err := openRegularNoFollow(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = f.Close() }()
 	if len(limit) > 0 {
 		// One byte past the cap tells "exactly at" from "over".
 		b, err := io.ReadAll(io.LimitReader(f, limit[0]+1))

@@ -339,6 +339,19 @@ canticle scan reconcile-remediated --yes
 - **Aggregate-only output,** and each applied row's prior outcome, tier, timing verdict and status are written to `<db-dir>/reconcile-remediated-backup-<timestamp>.jsonl` (or `--backup`) and fsynced before the row commits. That is enough to undo an `unsynced` or tier change by hand; for a reset it is an audit record only, since the reset also clears word-timing and upgrade state it does not save, and restoring it would bring back a row claiming a missing synced file.
 - **Busy database:** a row that hits `SQLITE_BUSY` is counted as `write_failed` (exit 1) and is not retried, so the backup never gets a duplicate record; rerun the command, which is idempotent.
 
+## Reconcile upstream
+
+`scan reconcile-upstream` (#1298) fills `work_queue.upstream` (the licensor an `innertube` result was served from) for rows settled before the column existed, by reading the `[upstream:]` tag from each row's sidecar. Dry run by default; `--yes` applies. On demand only: there is no serve-startup pass or sweep.
+
+```sh
+canticle scan reconcile-upstream
+canticle scan reconcile-upstream --yes
+```
+
+- **Candidates come from the database,** never a directory walk: done rows with a recorded lane that can report an upstream (`innertube`) and no upstream yet. The sidecar is derived from the row's audio path (`.lrc`, else the Canticle-owned `.elrc` (a foreign one is skipped), else `.txt`, each with an extension-case fallback); a symlink is never read.
+- **A row is filled only when the sidecar's `[source:]` equals the row's lane.** Everything else stays NULL and is counted on the `skipped:` line: `source_mismatch`, `no_sidecar`, `unreadable`, `no_tags` (no tag block, e.g. a file written before the tags existed; never guessed), `no_upstream` (a `[source:]` with no `[upstream:]`), `unknown_upstream` (an `[upstream:]` token Canticle never writes; only `musixmatch` and `lyricfind` are accepted), `processing` (in flight), and `raced` (the row changed between plan and apply; the write is guarded in SQL on still-done, same lane, upstream still NULL).
+- **Aggregate-only output** (no library path, artist or title; the one path printed is the backup file's, beside the database, and only when a row was filled), and each filled row's id, lane and value are written to `<db-dir>/reconcile-upstream-backup-<timestamp>.jsonl` (or `--backup`, 0600) and fsynced before the row commits. Restoring is setting `upstream` back to NULL. On a quiescent database a dry run reports the same counts the apply then produces; `raced` and `write_failed` can only be non-zero on apply.
+
 ## Purge provenance
 
 `scan purge-provenance` selects sidecars by a header tag. Dry run by default; `--yes` applies. Exactly one selector is required: `--source <name>`, `--no-source` or `--generated`. `--library` limits the run to one library.

@@ -50,6 +50,42 @@ func ReadProvenanceTags(path string) (ProvenanceTags, error) {
 	if err != nil {
 		return ProvenanceTags{}, err
 	}
+	return provenanceFromTags(tags), nil
+}
+
+// MaxHeaderBytes bounds ReadProvenanceHeader: tag blocks sit at the top of a
+// sidecar, so nothing past this is ever a tag.
+const MaxHeaderBytes = 32 << 10
+
+// ReadProvenanceHeader is ReadProvenanceTags for a caller that must not trust
+// the file: an Lstat plus a no-follow open (O_NOFOLLOW|O_NONBLOCK where the
+// platform has them) whose handle must be the same regular file (a symlink,
+// FIFO or device swapped in is refused, never blocked on), and it reads at most
+// MaxHeaderBytes.
+func ReadProvenanceHeader(path string) (ProvenanceTags, error) {
+	tags, err := readHeaderTags(path)
+	if err != nil {
+		return ProvenanceTags{}, err
+	}
+	return provenanceFromTags(tags), nil
+}
+
+// readHeaderTags is the bounded, no-follow, regular-file-only header read
+// shared by ReadProvenanceHeader and the ownership probe.
+func readHeaderTags(path string) ([]lrcTag, error) {
+	f, _, err := openRegularNoFollow(path)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	tags, _, err := parseLRCHeaderFrom(io.LimitReader(f, MaxHeaderBytes))
+	if err != nil {
+		return nil, fmt.Errorf("scan: %w", err)
+	}
+	return tags, nil
+}
+
+func provenanceFromTags(tags []lrcTag) ProvenanceTags {
 	var pt ProvenanceTags
 	for _, t := range tags {
 		if t.key == "" {
@@ -74,7 +110,7 @@ func ReadProvenanceTags(path string) (ProvenanceTags, error) {
 			pt.Timing = strings.TrimSpace(t.value)
 		}
 	}
-	return pt, nil
+	return pt
 }
 
 // lrcTag represents a parsed LRC header tag.
