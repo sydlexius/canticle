@@ -71,12 +71,19 @@ func TestSourcePages(t *testing.T) {
 		for _, want := range []string{
 			`href="/queue/finished?lane=musixmatch"`,
 			`href="/queue/settled?lane=musixmatch&amp;tier=line"`,
-			`data-chart-labels="[&#34;Word-synced&#34;,&#34;Line-synced&#34;,&#34;Unsynced&#34;]"`,
-			`data-chart-values="[2,1,1]"`,
+			`data-chart-labels="[&#34;Word-synced&#34;,&#34;Line-synced&#34;,&#34;Unsynced&#34;,&#34;Instrumental&#34;,&#34;Tier unknown&#34;,&#34;Other&#34;]"`,
+			`data-chart-values="[2,1,1,0,0,0]"`,
+			`<div class="mx-dash-tiles" role="list">`,
+			`<span class="mx-dash-tile-label">Word-synced</span>`,
+			`<span class="mx-dash-tile-value">2</span>`,
+			`<span class="mx-dash-tile-label">Instrumental</span>`,
 		} {
 			if !strings.Contains(body, want) {
 				t.Errorf("missing %q", want)
 			}
+		}
+		if strings.Contains(body, "<table") {
+			t.Error("the result-type block has tiles, not a table")
 		}
 		if strings.Contains(body, "By upstream") {
 			t.Error("a single-source lane must not render the upstream block")
@@ -102,6 +109,9 @@ func TestSourcePages(t *testing.T) {
 		if code != http.StatusOK || !strings.Contains(body, "no recorded source") || strings.Contains(body, "/queue/") {
 			t.Errorf("status %d; want 200, blurb, and no queue links", code)
 		}
+		if !strings.Contains(body, `<span class="mx-dash-tile-label">Unsynced</span>`) || !strings.Contains(body, `<span class="mx-dash-tile-value">1</span>`) {
+			t.Error("unattributed page is missing its plain tiles")
+		}
 	})
 
 	t.Run("detector rows are plain text", func(t *testing.T) {
@@ -118,6 +128,9 @@ func TestSourcePages(t *testing.T) {
 		}
 		for _, want := range []string{
 			"By upstream",
+			`<span class="mx-dash-tile-label">lyricfind</span>`,
+			`<span class="mx-dash-tile-label">Not recorded</span>`,
+			`aria-label="By upstream by type"`,
 			`data-chart-labels="[&#34;lyricfind&#34;,&#34;musixmatch&#34;,&#34;Not recorded&#34;]"`,
 			`data-chart-values="[2,1,1]"`,
 		} {

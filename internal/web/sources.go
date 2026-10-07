@@ -239,14 +239,14 @@ func buildSourceView(sb reports.SourceBreakdown, top reports.TopRung) templates.
 		return v
 	}
 	labels, vals := typeCellsFor(sb.Counts, top)
-	t := templates.SourceTable{Heading: "By result type", FirstCol: "Type", Cols: []string{"Tracks"}, ChartID: "mx-source-type-chart",
+	t := templates.SourceTable{Heading: "By result type", ChartID: "mx-source-type-chart",
 		Blurb: "Total " + strconv.FormatInt(sb.Counts.Total(), 10) + " completed tracks."}
+	// Every type is a tile and a legend entry, zero included, as on the dashboard.
 	for i, l := range labels {
-		t.Rows = append(t.Rows, templates.SourceRow{Label: l, Cells: []string{strconv.FormatInt(vals[i], 10)}, Href: sourceTypeLink(sb, l, top)})
-		if vals[i] > 0 {
-			t.Chart.Labels = append(t.Chart.Labels, l)
-			t.Chart.Values = append(t.Chart.Values, float64(vals[i]))
-		}
+		n := strconv.FormatInt(vals[i], 10)
+		t.Tiles = append(t.Tiles, templates.StatTile{Label: l, Value: n, Href: sourceTypeLink(sb, l, top)})
+		t.Chart.Labels = append(t.Chart.Labels, l)
+		t.Chart.Values = append(t.Chart.Values, float64(vals[i]))
 	}
 	v.Types = t
 	if len(sb.Upstreams) == 0 || sb.Unattributed || !slices.Contains(providers.UpstreamLanes(), sb.Lane) {
@@ -266,6 +266,7 @@ func buildSourceView(sb reports.SourceBreakdown, top reports.TopRung) templates.
 			cells = append(cells, strconv.FormatInt(n, 10))
 		}
 		up.Rows = append(up.Rows, templates.SourceRow{Label: name, Cells: cells})
+		up.Tiles = append(up.Tiles, templates.StatTile{Label: name, Value: cells[0]})
 		up.Chart.Labels = append(up.Chart.Labels, name)
 		up.Chart.Values = append(up.Chart.Values, float64(ub.Counts.Total()))
 	}

@@ -1,22 +1,23 @@
 package templates
 
-// SourceRow is one table row; an empty Href renders plain text.
+// SourceRow is one table row.
 type SourceRow struct {
 	Label string
 	Cells []string
-	Href  string
 }
 
-// SourceTable is one chart-plus-table block (#1300); the table carries every number.
+// SourceTable is one tiles-plus-doughnut block (#1300); Rows, when set, add a
+// per-type table (the By upstream block) that the tiles cannot carry.
 type SourceTable struct {
 	Heading string
-	// FirstCol heads the label column ("Type" or "Upstream").
+	Blurb   string
+	ChartID string
+	Tiles   []StatTile
+	Chart   ChartData
+	// FirstCol, Cols and Rows describe the optional table.
 	FirstCol string
-	Blurb    string
-	ChartID  string
 	Cols     []string
 	Rows     []SourceRow
-	Chart    ChartData
 }
 
 // SourceView is the /sources/{lane} page; Upstream is set only for a multiplexing source.

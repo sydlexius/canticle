@@ -180,6 +180,11 @@
     },
   };
 
+  // zeroSquare gives a zero-value slice no rounded caps (they would draw as a dot).
+  function zeroSquare(r) {
+    return function (ctx) { return ctx.raw ? r : 0; };
+  }
+
   function renderDoughnut(canvas, labels, values) {
     var colors = labels.map(catColor);
     return new Chart(canvas, {
@@ -187,7 +192,7 @@
       plugins: [centerPlugin],
       data: {
         labels: labels,
-        datasets: [{ data: values, backgroundColor: colors, borderWidth: 0, borderRadius: 12, spacing: 4, hoverOffset: 8 }],
+        datasets: [{ data: values, backgroundColor: colors, borderWidth: 0, borderRadius: zeroSquare(12), spacing: 4, hoverOffset: 8 }],
       },
       options: {
         cutout: '74%', animation: anim,
