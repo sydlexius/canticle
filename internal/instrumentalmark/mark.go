@@ -32,6 +32,12 @@ var (
 	// be neither followed nor backed up, so the mark refuses before changing
 	// anything.
 	ErrSymlinkedSidecar = errors.New("instrumentalmark: a lyric file is a symlink")
+	// ErrNoBackupSink is returned when a non-dry-run mark has a lyric file to
+	// replace but Options.Report is nil: the replacement would leave no record.
+	ErrNoBackupSink = errors.New("instrumentalmark: lyric files to replace but no Report to back them up")
+	// ErrMarkWithdrawn is returned when the row's mark was cleared (an unmark)
+	// after this call settled it; nothing further is written.
+	ErrMarkWithdrawn = errors.New("instrumentalmark: the mark was withdrawn while marking; no further files were written")
 )
 
 // Outcome is the result class of a Mark call.
@@ -51,7 +57,8 @@ type Options struct {
 	DryRun bool
 	// Report receives one Record per file about to be replaced, BEFORE
 	// anything changes. It must make the record durable (see AppendRecord);
-	// an error aborts the mark with nothing changed.
+	// an error aborts the mark with nothing changed. Required (else
+	// ErrNoBackupSink) for a non-dry-run mark that has a file to replace.
 	Report func(Record) error
 }
 
@@ -111,11 +118,16 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	if t.marked && markerPresent {
+	// A no-op needs nothing left to back up or replace: a lyric file beside the
+	// marker (a .lrc, or a case variant on a case-sensitive filesystem) is work.
+	if t.marked && markerPresent && len(files) == 0 {
 		return Result{Outcome: OutcomeAlreadyMarked}, nil
 	}
 	if opts.DryRun {
 		return Result{Outcome: OutcomeDryRun, FilesBackedUp: len(files)}, nil
+	}
+	if len(files) > 0 && opts.Report == nil {
+		return Result{}, ErrNoBackupSink
 	}
 	reported := make(map[string]bool)
 	for _, p := range files {
@@ -132,9 +144,19 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 	// the row marked with no marker written; a retry of Mark repairs it. A file
 	// created between this inventory and the writer's rename can still be lost:
 	// there is no per-stem lock.
+	//
+	// The mark can also be withdrawn (an unmark) between settle and the writes.
+	// It is re-read before the late backups and before each marker write, which
+	// narrows the window to the gap between that read and the write; it does not
+	// close it.
 	late, _, err := inventory(t, dirs)
 	if err != nil {
 		return Result{}, fmt.Errorf("instrumentalmark: work item %d is marked but no marker was written; retry the mark to repair: %w", id, err)
+	}
+	if len(late) > 0 {
+		if err := m.stillMarked(ctx, id); err != nil {
+			return Result{}, err
+		}
 	}
 	for _, p := range late {
 		if rerr := backup(id, p, opts.Report, reported); rerr != nil {
@@ -147,6 +169,9 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 		WinningLane: lyrics.ManualLaneName,
 	}
 	for i, o := range t.outputs {
+		if err := m.stillMarked(ctx, id); err != nil {
+			return Result{}, err
+		}
 		if werr := m.w.WriteManualMarker(song, o.Filename, dirs[i]); werr != nil {
 			werr = fmt.Errorf("instrumentalmark: write marker for work item %d: %w", id, stripPath(werr))
 			if written > 0 {
@@ -162,7 +187,30 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 		}
 		written++
 	}
-	return Result{Outcome: OutcomeMarked, FilesBackedUp: len(files)}, nil
+	// The writer removes the opposite-extension variants but not a same-extension
+	// one (a Song.TXT beside song.txt on a case-sensitive filesystem). Remove what
+	// was backed up and is still there, after the backup and the settle.
+	for p := range reported {
+		if sidecar.KindOf(p) != sidecar.KindUnsynced {
+			continue
+		}
+		if rerr := m.w.RemoveReplacedSidecar(p); rerr != nil {
+			return Result{}, fmt.Errorf("instrumentalmark: work item %d is marked but a backed-up lyric file could not be removed; retry the mark to repair: %w", id, stripPath(rerr))
+		}
+	}
+	return Result{Outcome: OutcomeMarked, FilesBackedUp: len(reported)}, nil
+}
+
+// stillMarked returns ErrMarkWithdrawn when the row no longer carries a mark.
+func (m *Marker) stillMarked(ctx context.Context, id int64) error {
+	var at sql.NullString
+	if err := m.db.QueryRowContext(ctx, `SELECT manual_instrumental_at FROM work_queue WHERE id = ?`, id).Scan(&at); err != nil {
+		return fmt.Errorf("instrumentalmark: re-read mark for work item %d: %w", id, err)
+	}
+	if !at.Valid {
+		return ErrMarkWithdrawn
+	}
+	return nil
 }
 
 func (m *Marker) load(ctx context.Context, id int64) (target, error) {
@@ -254,6 +302,9 @@ func inventory(t target, dirs []string) (files []string, allMarked bool, err err
 			} else {
 				txtFp = fp
 			}
+			if len(l.SymlinkVariants(fp)) > 0 {
+				return nil, false, ErrSymlinkedSidecar
+			}
 			for _, v := range l.Variants(fp) {
 				fi, serr := os.Lstat(v)
 				if serr != nil {
@@ -291,8 +342,11 @@ func backup(id int64, path string, report func(Record) error, reported map[strin
 	if reported[path] {
 		return nil
 	}
+	if report == nil {
+		return ErrNoBackupSink
+	}
 	rec, err := readRecord(id, path)
-	if err == nil && report != nil {
+	if err == nil {
 		err = report(rec)
 	}
 	if err == nil {

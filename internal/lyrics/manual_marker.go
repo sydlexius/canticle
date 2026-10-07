@@ -2,6 +2,7 @@ package lyrics
 
 import (
 	"bytes"
+	"os"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/sidecar"
@@ -54,4 +55,21 @@ func OwnedCompanions(fp string, l sidecar.Listing) []string { return ownedCompan
 // manual-mark backup, which must not follow a symlink swapped in after a stat.
 func ReadRegularNoFollow(path string, limit int64) ([]byte, error) {
 	return readRegularNoFollow(path, limit)
+}
+
+// RemoveReplacedSidecar removes a lyric file the manual mark backed up and the
+// marker write left behind (a same-extension case variant such as Song.TXT,
+// which the writer's own cleanup does not touch). It records the path with the
+// writer's selfwrite registry first, never removes a manual marker, and uses
+// os.Remove so a symlink is unlinked, never followed. A missing file is not an
+// error.
+func (w *LRCWriter) RemoveReplacedSidecar(path string) error {
+	w.selfWrites.Record(path)
+	if ManualMarkerOnDisk(path) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

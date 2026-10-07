@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/db"
@@ -260,7 +261,7 @@ func TestMarkWriteFailureUnmarksTheRow(t *testing.T) {
 		t.Errorf("original lyrics lost: %v", err)
 	}
 	// A retry recovers.
-	if res, err := f.m.Mark(f.ctx, f.id, Options{}); err != nil || res.Outcome != OutcomeMarked {
+	if res, err := f.m.Mark(f.ctx, f.id, Options{Report: (&recorder{}).report}); err != nil || res.Outcome != OutcomeMarked {
 		t.Errorf("retry = %+v, %v", res, err)
 	}
 }
@@ -306,8 +307,12 @@ func TestMarkBacksUpAFileThatAppearsAfterTheFirstInventory(t *testing.T) {
 		}
 		return rec.report(r)
 	}
-	if _, err := f.m.Mark(f.ctx, f.id, Options{Report: report}); err != nil {
+	res, err := f.m.Mark(f.ctx, f.id, Options{Report: report})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if res.FilesBackedUp != 2 {
+		t.Errorf("FilesBackedUp = %d; want 2 (the .lrc and the late .txt)", res.FilesBackedUp)
 	}
 	var got bool
 	for _, r := range rec.recs {
@@ -373,11 +378,112 @@ func TestMarkBackupErrorCarriesNoPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
-	_, err := f.m.Mark(f.ctx, f.id, Options{})
+	_, err := f.m.Mark(f.ctx, f.id, Options{Report: (&recorder{}).report})
 	if err == nil {
 		t.Fatal("want a backup error")
 	}
 	if strings.Contains(err.Error(), f.dir) || strings.Contains(err.Error(), "song") {
 		t.Errorf("error leaks a path: %q", err)
+	}
+}
+
+// caseSensitiveDir skips the test unless dir's filesystem tells names apart by case.
+func caseSensitiveDir(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, "casesensitiveprobe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(probe) }()
+	if _, err := os.Lstat(filepath.Join(dir, "CASESENSITIVEPROBE")); err == nil {
+		t.Skip("case-insensitive filesystem")
+	}
+}
+
+func TestMarkRequiresABackupSinkWhenThereIsAFileToReplace(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, "song.lrc", "[00:01.00]hi\n")
+	if _, err := f.m.Mark(f.ctx, f.id, Options{}); !errors.Is(err, ErrNoBackupSink) {
+		t.Fatalf("err = %v; want ErrNoBackupSink", err)
+	}
+	if !f.exists("song.lrc") || f.exists("song.txt") || f.marked(t) {
+		t.Error("a mark without a Report changed something")
+	}
+	if res, err := f.m.Mark(f.ctx, f.id, Options{DryRun: true}); err != nil || res.Outcome != OutcomeDryRun {
+		t.Errorf("dry run without Report = %+v, %v; want ok", res, err)
+	}
+}
+
+func TestMarkFinishesAMarkedRowWhoseLyricFileIsStillThere(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.m.Mark(f.ctx, f.id, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	f.write(t, "song.lrc", "[00:01.00]back\n")
+	rec := &recorder{}
+	res, err := f.m.Mark(f.ctx, f.id, Options{Report: rec.report})
+	if err != nil || res.Outcome != OutcomeMarked || len(rec.recs) != 1 || f.exists("song.lrc") {
+		t.Errorf("Mark = %+v, %v, %d records, lrc present=%v; want the stray .lrc backed up and removed", res, err, len(rec.recs), f.exists("song.lrc"))
+	}
+}
+
+func TestMarkRemovesASameExtensionCaseVariantItBackedUp(t *testing.T) {
+	f := newFixture(t)
+	caseSensitiveDir(t, f.dir)
+	f.write(t, "song.TXT", "upper case lyrics\n")
+	rec := &recorder{}
+	res, err := f.m.Mark(f.ctx, f.id, Options{Report: rec.report})
+	if err != nil || res.FilesBackedUp != 1 || len(rec.recs) != 1 {
+		t.Fatalf("Mark = %+v, %v, %d records", res, err, len(rec.recs))
+	}
+	if f.exists("song.TXT") || !lyrics.ManualMarkerOnDisk(filepath.Join(f.dir, "song.txt")) {
+		t.Errorf("song.TXT present=%v; want the backed-up variant removed beside the marker", f.exists("song.TXT"))
+	}
+}
+
+func TestMarkRefusesAnExtensionCaseSymlink(t *testing.T) {
+	f := newFixture(t)
+	caseSensitiveDir(t, f.dir)
+	target := filepath.Join(t.TempDir(), "elsewhere.lrc")
+	if err := os.WriteFile(target, []byte("[00:01.00]x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(f.dir, "song.LRC")); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	if _, err := f.m.Mark(f.ctx, f.id, Options{Report: rec.report}); !errors.Is(err, ErrSymlinkedSidecar) {
+		t.Fatalf("err = %v; want ErrSymlinkedSidecar", err)
+	}
+	if f.marked(t) || f.exists("song.txt") {
+		t.Error("the mark proceeded past a song.LRC symlink")
+	}
+}
+
+func TestMarkStopsWhenTheMarkIsWithdrawnMidway(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, "song.lrc", "[00:01.00]hi\n")
+	n := 0
+	report := func(Record) error {
+		n++
+		if n == 1 {
+			f.write(t, "song.txt", "late\n") // forces the second pass to report
+			return nil
+		}
+		tx, err := f.db.BeginTx(f.ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := queue.UnmarkManualInstrumentalTx(f.ctx, tx, f.id, time.Now()); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if _, err := f.m.Mark(f.ctx, f.id, Options{Report: report}); !errors.Is(err, ErrMarkWithdrawn) {
+		t.Fatalf("err = %v; want ErrMarkWithdrawn", err)
+	}
+	if lyrics.ManualMarkerOnDisk(filepath.Join(f.dir, "song.txt")) || f.marked(t) {
+		t.Error("a marker was written beside an unmarked row")
 	}
 }
