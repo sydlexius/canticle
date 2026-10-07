@@ -189,6 +189,127 @@ The serve-mode sweeps live here too: `runTimingValidationSweep` (#443), which ap
 Cues pair only on equal normalized text (an empty one never pairs), and with repeated lines and a count mismatch the error is a lower bound.
 No MAE is reported for zero matches.
 
+### Second pass: history cut from the rest of CLAUDE.md
+
+The maintainer asked that any other ephemeral material in `CLAUDE.md` move here too.
+Each line below was removed from `CLAUDE.md` (as it stood in commit 14ca0ce), one sentence or clause per line, grouped by the section or catalog entry it came from.
+Where only an issue-number citation was dropped from a sentence that otherwise stayed, the citation is recorded with that sentence.
+
+#### `musixmatch`
+
+- An HTTP 403 on a lookup is `ErrForbidden` (a provider refusal, #1372).
+
+#### `providers`
+
+- Also `WordCapable` and `WordCapabilityRevision`, which expires a "no word data" verdict when the word-capable lane set changes (#982).
+
+#### `orchestrator`
+
+- A result ends the dispatch only if it is suitable AND `lyrics.DecidePromotion` would promote it as-is (#950); a categorical result falls through to the other lanes.
+- A provider refusal (`ErrForbidden`, HTTP 403) trips that lane's breaker and sets `LaneState.Refused` (#1372).
+
+#### `lyrics`
+
+- Owns the accept-time timing guard (`DecidePromotion`, #439): the duration judged against is `Song.AudioDurationSeconds`, which callers stamp from the AUDIO FILE, never `Track.TrackLength`; unknown duration always fails open.
+
+#### `lrcnormalize`
+
+- The shared foundation for the LRC-text parse lanes and the write/backfill path (#470).
+
+#### `scanner`
+
+- An instrumental marker of any provenance reopens on `--upgrade` like any `.txt` (#553).
+
+#### `cache`
+
+- an entry is the `lyrics.EncodeCachedSong` envelope (#1207).
+
+#### `audiodur`
+
+- A miss is `unknown_duration`, never an error (#441), and `revalidate` fails open on one rather than remediating.
+
+#### `revalidate`
+
+- re-judges `.lrc` files ALREADY on disk against their companion audio's exact duration and plans remediation (#442): demote a `MisSynced` lyric's words to `.txt`, quarantine a `Categorical` one.
+
+- `Plan` and `Apply` are separate calls, so the dry-run default writes nothing; unknown duration never remediates.
+
+#### `queue`
+
+- An `Enqueue` collision keeps a settled or in-flight row's paths, except a gone-source row moves to its same-stem replacement (#1262; never a `processing` row) and `Inputs.ReopenCategorical` (#972) reopens a categorical `done` row.
+
+- `work_queue.upstream` (#1297) is written in the SAME statement as `provider_lane` and follows the lane, NOT the file.
+
+#### `scan`
+
+- `Enqueuer.RepointSettled` (#1262) hands just-indexed settled files to `queue.RepointGoneSource`.
+
+#### `worker`
+
+- On `ErrTimingRefusedUntried` (#950) it parks ONLY that row via `queue.DeferRefused` and keeps draining.
+- A row with `word_timing_state='queued'` takes the word-recheck path (`runWordRecheck`, #982): word-capable lanes only, never the cache, and it writes ONLY a result that passes `lyrics.HasQualifyingWords` and promotes as-is, so a recheck can never downgrade a settled `.lrc`.
+
+- On an `orchestrator.PartialFailureError` (#1372) the row takes `queue.Fail` but the global backoff is reset, not fed.
+
+#### `reports`
+
+- `finishedPredicates` is the one rung-to-SQL map (#1275).
+
+- `TestLibraryPredicateUsesPrefixProbe` pins the plan.
+
+#### `watcher`
+
+- Consults `selfwrite` in `translate` to drop canticle's own sidecar-write events (#685).
+
+#### `prune`
+
+- rows whose source audio file has vanished are deleted (`os.Stat` is the sole authority; an in-flight guard defers `processing` rows), or relinked when a unique MBID/ISRC, a single same-stem sibling (#1262, never a directory read), or an exact-title match resolves them; a row also linked to a PRESENT file elsewhere is retained (#1293).
+- In the periodic sweep a row gone inside a surviving directory is deleted only by AGE-OUT (`prune_gone_since`, confirmed by a second sweep).
+
+#### `purgeprovenance`
+
+- bulk-deletes `.lrc`/`.txt` sidecars matching a provenance filter (`--source <name>` or `--no-source`) and resets the coupled `work_queue`/`scan_results` rows so the next scan re-fetches (#474).
+
+#### `identityrepair`
+
+- re-reads each `scan_results` file's tags (via the injected `IdentityReader` seam) to correct run-together multi-value artist rows (#466), re-keying the coupled `work_queue` row.
+
+#### `web`
+
+- `flacfallback.go` (#1243, opt-in `server.preview_flac_fallback`) serves `/preview/{id}/audio.flac` through the same session guard and `os.Root` confinement as `/preview/{id}/audio`; ffmpeg is handed the confined handle, never the library path.
+
+#### `timing`
+
+- sole owner of `TimingOutcome`/`Evaluate`, `IsDecorative`, and the calibrated `Tolerance`/`CategoricalRatio` constants (#438).
+
+#### `config`
+
+- Owns `[timing_validation]` (#443): `enabled` AND `revalidate_existing` are both required.
+
+#### `realign`
+
+- a filesystem heuristic (title-only name guard plus a `min_margin` runner-up rule, #672)
+
+- `Apply` also carries the remediation kinds (`KindDemote`/`KindQuarantine`/`KindPurge`, #442), so `revalidate` reuses this one apply path.
+
+#### `commands`
+
+- `runTimingValidationSweep` (#443) applies BEFORE it stamps so a failed remediation stays in the backlog
+
+#### `timingacc`
+
+- pure line-start accuracy measurement for `timing-accuracy` (#1117)
+
+- With repeated lines and a count mismatch the error is a lower bound; no MAE is reported for zero matches.
+
+#### Quality gating and CI
+
+- (Pattern from sydlexius/stillwater `lint-config.instructions.md`.)
+
+#### Architecture (one-paragraph orientation)
+
+- The parenthetical "(`revalidate` over the timing watermark, #443)" now reads "(`revalidate`)".
+
 ## 2026-10-06 - detail moved out of the CLAUDE.md package catalog (#1378)
 
 `CLAUDE.md` is loaded into every session and every spawned agent, and its package catalog had grown to carry dated measurements, review citations, per-issue fix narratives and blow-by-blow edge-case mechanics.
