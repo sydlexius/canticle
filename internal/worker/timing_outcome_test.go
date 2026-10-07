@@ -150,7 +150,7 @@ func TestStampTimingOutcome_PersistsVerdict(t *testing.T) {
 	w := &Worker{queue: q, now: func() time.Time { return testNow }}
 	item := queue.WorkItem{ID: 7, Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}}
 
-	w.stampTimingOutcome(t.Context(), item, syncedSong(tLine(120, "a")), 100)
+	w.stampTimingOutcome(t.Context(), item, syncedSong(tLine(120, "a")), 100, nil)
 	rec, ok := q.timingOutcomes[7]
 	if !ok {
 		t.Fatal("no timing outcome stamped")
@@ -166,7 +166,7 @@ func TestStampTimingOutcome_PersistsVerdict(t *testing.T) {
 	q2 := &fakeQueue{}
 	w2 := &Worker{queue: q2, now: func() time.Time { return testNow }}
 	w2.stampTimingOutcome(t.Context(), queue.WorkItem{ID: 8},
-		models.Song{Lyrics: models.Lyrics{LyricsBody: "words"}}, 100)
+		models.Song{Lyrics: models.Lyrics{LyricsBody: "words"}}, 100, nil)
 	if len(q2.timingOutcomes) != 0 {
 		t.Errorf("stamped %d outcomes for a non-synced settle, want 0", len(q2.timingOutcomes))
 	}
@@ -178,7 +178,7 @@ func TestStampTimingOutcome_StampFailureIsNonFatal(t *testing.T) {
 	q := &fakeQueue{timingOutcomeErr: errStamp}
 	w := &Worker{queue: q, now: func() time.Time { return testNow }}
 	// Must not panic and must return normally.
-	w.stampTimingOutcome(t.Context(), queue.WorkItem{ID: 9}, syncedSong(tLine(120, "a")), 100)
+	w.stampTimingOutcome(t.Context(), queue.WorkItem{ID: 9}, syncedSong(tLine(120, "a")), 100, nil)
 }
 
 // TestStampTimingOutcome_LogsOnlyNonCompliant pins the "log overruns" half of
@@ -208,7 +208,7 @@ func TestStampTimingOutcome_LogsOnlyNonCompliant(t *testing.T) {
 			q := &fakeQueue{}
 			w := &Worker{queue: q, now: func() time.Time { return testNow }}
 			w.stampTimingOutcome(t.Context(), queue.WorkItem{ID: 1,
-				Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}}, tt.song, tt.duration)
+				Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}}, tt.song, tt.duration, nil)
 
 			logged := strings.Contains(buf.String(), "timing overruns the audio")
 			if logged != tt.wantLog {
@@ -243,7 +243,7 @@ func TestStampTimingOutcome_DegenerateLogsAccurately(t *testing.T) {
 	song := syncedSong(tLine(0, "a"), tLine(0, "b"))
 
 	w.stampTimingOutcome(t.Context(), queue.WorkItem{ID: 11,
-		Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}}, song, 100)
+		Inputs: models.Inputs{Track: models.Track{ArtistName: "A", TrackName: "T"}}}, song, 100, nil)
 
 	// The verdict is persisted like any other.
 	rec, ok := q.timingOutcomes[11]
