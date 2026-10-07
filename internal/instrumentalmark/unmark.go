@@ -3,10 +3,8 @@ package instrumentalmark
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sync"
 
-	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/sidecar"
 )
@@ -55,12 +53,19 @@ func (r *rowLocks) lock(id int64) func() {
 // still on disk (the writer refuses to replace a manual marker, so a worker
 // fetching such a row could never write its result): (1) refuse a missing or
 // in-flight row; (2) a row that is not marked is a no-op (OutcomeNotMarked),
-// even if a manual marker file sits on disk; (3) find the manual marker files
-// (confined to the row's library root as Mark confines its writes); (4) hand
-// each to opts.Report (OpUnmark) BEFORE anything changes; (5) remove each, the
-// writer re-checking immediately before the unlink that it is still a manual
-// marker, so a .txt that became real lyrics since is left alone; (6) one
-// transaction clears the mark and re-queues the row.
+// even if a manual marker file sits on disk; (3) inventory every lyric file
+// beside the audio with Mark's inventory (confined to the row's library root;
+// a symlinked lyric file is refused with ErrSymlinkedSidecar); (4) hand each to
+// opts.Report (OpUnmark) BEFORE anything changes; (5) remove each that is a
+// manual marker, the writer re-checking immediately before the unlink that it
+// still is one, so a .txt that became real lyrics since is left alone; (6) one
+// transaction clears the mark, invalidates the track's cache entries and
+// re-queues the row.
+//
+// After an unmark the track is fetched like any other, so a lyric file left
+// beside it (real lyrics the operator wrote over the marker) can be replaced by
+// the fetch; that is why every lyric file is backed up, not only the markers.
+// Only manual markers are removed; a real lyric file is backed up and left.
 //
 // Partial failures: a backup failure leaves row and files untouched. A removal
 // failure after some markers were removed leaves the row marked with some or
@@ -73,8 +78,8 @@ func (r *rowLocks) lock(id int64) func() {
 //
 // Unmark does NOT restore the lyrics Mark backed up: the row goes back through
 // the queue and is fetched afresh. Restoring from the mark's JSONL record
-// stays an operator action. Result.FilesBackedUp counts the marker files backed
-// up (and in a dry run, the ones that would be).
+// stays an operator action. Result.FilesBackedUp counts every file backed up
+// (and in a dry run, the ones that would be).
 //
 // Mark and Unmark on the same row, through the same Marker, are serialized by
 // a per-row lock, so within one process a concurrent pair cannot leave a marker
@@ -97,34 +102,37 @@ func (m *Marker) Unmark(ctx context.Context, id int64, opts Options) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	markers, err := manualMarkers(t, dirs)
+	files, _, err := inventory(t, dirs, true)
 	if err != nil {
 		return Result{}, err
 	}
 	if opts.DryRun {
-		return Result{Outcome: OutcomeDryRun, FilesBackedUp: len(markers)}, nil
+		return Result{Outcome: OutcomeDryRun, FilesBackedUp: len(files)}, nil
 	}
-	if len(markers) > 0 && opts.Report == nil {
+	if len(files) > 0 && opts.Report == nil {
 		return Result{}, ErrNoBackupSink
 	}
 	reported := make(map[string]bool)
-	for _, p := range markers {
+	for _, p := range files {
 		if rerr := backup(OpUnmark, id, p, opts.Report, reported); rerr != nil {
 			return Result{}, fmt.Errorf("instrumentalmark: backup of work item %d failed, nothing changed: %w", id, rerr)
 		}
 	}
 	removed := 0
-	for _, p := range markers {
+	for _, p := range files {
+		if sidecar.KindOf(p) != sidecar.KindUnsynced {
+			continue
+		}
 		ok, rerr := m.w.RemoveManualMarker(p)
 		if rerr != nil {
-			return Result{}, fmt.Errorf("instrumentalmark: work item %d is still marked and %d of %d markers were removed; retry the unmark to finish: %w",
-				id, removed, len(markers), stripPath(rerr))
+			return Result{}, fmt.Errorf("instrumentalmark: work item %d is still marked and %d markers were removed; retry the unmark to finish: %w",
+				id, removed, stripPath(rerr))
 		}
 		if ok {
 			removed++
 		}
 	}
-	changed, err := m.unmark(ctx, id)
+	changed, err := m.unmark(ctx, id, t.keys)
 	if err != nil {
 		return Result{}, fmt.Errorf("instrumentalmark: work item %d is still marked with %d markers removed; retry the unmark to finish: %w", id, removed, err)
 	}
@@ -132,26 +140,4 @@ func (m *Marker) Unmark(ctx context.Context, id int64, opts Options) (Result, er
 		return Result{Outcome: OutcomeNotMarked}, nil
 	}
 	return Result{Outcome: OutcomeUnmarked, FilesBackedUp: len(reported)}, nil
-}
-
-// manualMarkers lists the files beside each output that are manual instrumental
-// markers right now: every case variant of the unsynced sidecar for which
-// ManualMarkerOnDisk holds. A symlink reads as "not a marker" and is skipped.
-func manualMarkers(t target, dirs []string) ([]string, error) {
-	var out []string
-	seen := make(map[string]bool)
-	for i, o := range t.outputs {
-		name, err := lyrics.SidecarName(t.artist, t.title, o.Filename, false)
-		if err != nil {
-			return nil, fmt.Errorf("instrumentalmark: sidecar name: %w", err)
-		}
-		fp := filepath.Join(dirs[i], name)
-		for _, v := range sidecar.List(dirs[i]).Variants(fp) {
-			if !seen[v] && lyrics.ManualMarkerOnDisk(v) {
-				seen[v] = true
-				out = append(out, v)
-			}
-		}
-	}
-	return out, nil
 }

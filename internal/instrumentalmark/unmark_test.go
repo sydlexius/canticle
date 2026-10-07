@@ -2,6 +2,7 @@ package instrumentalmark
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
 )
@@ -134,17 +136,46 @@ func TestUnmarkRequiresABackupSinkAndAbortsOnBackupFailure(t *testing.T) {
 	}
 }
 
-func TestUnmarkLeavesATxtThatIsNoLongerAManualMarker(t *testing.T) {
+func TestUnmarkLeavesATxtThatIsNoLongerAManualMarkerButBacksItUp(t *testing.T) {
 	f := newFixture(t)
 	f.markFirst(t)
 	f.write(t, "song.txt", "real lyrics now\n")
 	rec := &recorder{}
 	res, err := f.m.Unmark(f.ctx, f.id, Options{Report: rec.report})
-	if err != nil || res.Outcome != OutcomeUnmarked || len(rec.recs) != 0 {
-		t.Fatalf("Unmark = %+v, %v, %d records; want unmarked with nothing to back up", res, err, len(rec.recs))
+	if err != nil || res.Outcome != OutcomeUnmarked || res.FilesBackedUp != 1 {
+		t.Fatalf("Unmark = %+v, %v; want unmarked with 1 file backed up", res, err)
+	}
+	if len(rec.recs) != 1 || rec.recs[0].Op != OpUnmark || string(rec.recs[0].Content) != "real lyrics now\n" {
+		t.Fatalf("records = %+v; want the real lyrics backed up before the re-queue", rec.recs)
 	}
 	if b, _ := os.ReadFile(f.marker()); string(b) != "real lyrics now\n" || f.marked(t) {
 		t.Errorf("txt = %q marked=%v; want the real lyrics kept and the row unmarked", b, f.marked(t))
+	}
+}
+
+func TestUnmarkBacksUpALyricFileBesideTheMarker(t *testing.T) {
+	f := newFixture(t)
+	f.markFirst(t)
+	f.write(t, "song.lrc", "[00:01.00]hi\n")
+	rec := &recorder{}
+	res, err := f.m.Unmark(f.ctx, f.id, Options{Report: rec.report})
+	if err != nil || res.FilesBackedUp != 2 || len(rec.recs) != 2 || !f.exists("song.lrc") || f.exists("song.txt") {
+		t.Errorf("Unmark = %+v, %v, %d records, lrc kept=%v; want 2 records, lrc kept, marker gone", res, err, len(rec.recs), f.exists("song.lrc"))
+	}
+}
+
+func TestUnmarkInvalidatesACacheEntryStoredAfterTheMark(t *testing.T) {
+	f := newFixture(t)
+	f.markFirst(t)
+	c := cache.New(f.db)
+	if err := c.Store(f.ctx, "Artist", "Title", 0, "stored after the mark"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Unmark(f.ctx, f.id, Options{Report: (&recorder{}).report}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.Lookup(f.ctx, "Artist", "Title", 0); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("cache after unmark = %q, %v; want no entry (a stale one would satisfy the re-queued row)", got, err)
 	}
 }
 
@@ -238,7 +269,7 @@ func TestUnmarkRemovalFailureKeepsRowMarkedAndRetryFinishes(t *testing.T) {
 	}
 }
 
-func TestUnmarkNeverFollowsASymlinkAtTheMarkerPath(t *testing.T) {
+func TestUnmarkRefusesASymlinkedLyricFileAndTouchesNothing(t *testing.T) {
 	f := newFixture(t)
 	f.markFirst(t)
 	body, err := os.ReadFile(f.marker())
@@ -256,8 +287,11 @@ func TestUnmarkNeverFollowsASymlinkAtTheMarkerPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := &recorder{}
-	if _, err := f.m.Unmark(f.ctx, f.id, Options{Report: rec.report}); err != nil {
-		t.Fatal(err)
+	if _, err := f.m.Unmark(f.ctx, f.id, Options{Report: rec.report}); !errors.Is(err, ErrSymlinkedSidecar) {
+		t.Fatalf("err = %v; want ErrSymlinkedSidecar (the shared inventory refuses a symlink, as Mark does)", err)
+	}
+	if !f.marked(t) {
+		t.Error("a refused unmark must leave the row marked")
 	}
 	if fi, err := os.Lstat(f.marker()); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("the symlink was removed or replaced: %v", err)
@@ -291,5 +325,70 @@ func TestMarkWaitsForAnUnmarkOnTheSameRow(t *testing.T) {
 	}
 	if got, want := lyrics.ManualMarkerOnDisk(f.marker()), f.marked(t); got != want || !got {
 		t.Errorf("marker on disk = %v, row marked = %v; want both (the Mark ran last)", got, want)
+	}
+}
+
+// waitBlocked polls until a goroutine is queued behind the held lock for id
+// (rowLock.n counts the holder plus waiters); the deadline is only a failure bound.
+func waitBlocked(t *testing.T, m *Marker, id int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		m.locks.mu.Lock()
+		l := m.locks.m[id]
+		n := 0
+		if l != nil {
+			n = l.n
+		}
+		m.locks.mu.Unlock()
+		if n >= 2 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the call never queued behind the row lock")
+}
+
+// Deterministic lock check: while the test holds the row's lock, Mark and
+// Unmark must not reach their first observable step (Report); once released,
+// they do.
+func TestMarkAndUnmarkWaitForTheRowLock(t *testing.T) {
+	for _, name := range []string{"Unmark", "Mark"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.markFirst(t)
+			f.write(t, "song.lrc", "[00:01.00]hi\n") // gives Mark a file to report
+			reached := make(chan struct{}, 8)
+			opts := Options{Report: func(Record) error { reached <- struct{}{}; return nil }}
+			release := f.m.locks.lock(f.id)
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				if name == "Unmark" {
+					_, err = f.m.Unmark(f.ctx, f.id, opts)
+				} else {
+					_, err = f.m.Mark(f.ctx, f.id, opts)
+				}
+				done <- err
+			}()
+			waitBlocked(t, f.m, f.id)
+			select {
+			case <-reached:
+				t.Fatalf("%s reached Report while the row lock was held", name)
+			default:
+			}
+			release()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s never ran after the lock was released", name)
+			}
+			if len(reached) == 0 {
+				t.Errorf("%s never reached Report after release", name)
+			}
+		})
 	}
 }

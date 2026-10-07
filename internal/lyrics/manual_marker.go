@@ -59,15 +59,16 @@ func ReadRegularNoFollow(path string, limit int64) ([]byte, error) {
 
 // RemoveManualMarker removes path only if it is, at this moment, an instrumental
 // marker carrying [source:manual], and reports whether it did. The path is
-// recorded with the writer's selfwrite registry first. A file that is not a
+// recorded with the writer's selfwrite registry only once it is known to be a
+// marker, just before the unlink. A file that is not a
 // manual marker (real lyrics written since, a symlink, a missing file) is left
 // alone and is not an error. os.Remove unlinks a symlink rather than following
 // it, and ManualMarkerOnDisk already reads a symlink as "not a marker".
 func (w *LRCWriter) RemoveManualMarker(path string) (bool, error) {
-	w.selfWrites.Record(path)
 	if !ManualMarkerOnDisk(path) {
 		return false, nil
 	}
+	w.selfWrites.Record(path)
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
