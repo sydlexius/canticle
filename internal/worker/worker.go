@@ -1860,6 +1860,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		return w.failStuckItem(ctxNoCancel, item, capLanded, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
 	}
+	// Known drift (#1301): tier is counted even if its stamp failed and was cleared to NULL.
 	// Delivered type (#1301): a fresh fetch that landed (upgrade trips too); not a cache hit or kept write.
 	if !cacheHit {
 		w.recordSourceEvent(ctxNoCancel, song.WinningLane, deliveredEvent(outcomeTypeFromSong(song), tier))

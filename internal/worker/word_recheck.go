@@ -118,7 +118,7 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 		// No lane can ever answer under this configuration, so the provider path
 		// is exhausted for it. absent is stamped under THIS lane set's
 		// generation, so adding a word-capable lane re-opens the row.
-		return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
+		return w.settleWordRecheck(ctx, item)
 	}
 	song, err := orch.FindLyrics(ctx, track, "")
 	if err != nil {
@@ -126,7 +126,7 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 			// Every word lane answered no match: terminal (maintainer-approved
 			// default, plan section 7 question 1).
 			w.consecutiveFailures = 0
-			return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
+			return w.settleWordRecheck(ctx, item)
 		}
 		return w.deferWordRecheck(ctx, item, err)
 	}
@@ -134,10 +134,10 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 	if wordRecheckWritable(song, track.TrackLength) {
 		if reject, reason := w.guardReject(item, song); reject {
 			slog.Info("worker word recheck: script guard rejected the word result", "id", item.ID, "reason", reason)
-			return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
+			return w.settleWordRecheck(ctx, item)
 		}
 		if verr := w.verify(ctx, item, song, Confidence(item.Inputs.Track, song.Track)); errors.Is(verr, errVerificationRejected) {
-			return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
+			return w.settleWordRecheck(ctx, item)
 		} else if verr != nil {
 			return w.deferWordRecheck(ctx, item, verr)
 		}
@@ -154,7 +154,7 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 		// may re-fetch an eligible mis_synced row (#1120), and forced alignment
 		// of the existing words is only the on-demand #1008 Auto action.
 		w.consecutiveFailures = 0
-		return w.settleWordRecheck(ctx, item, queue.WordTimingAbsent)
+		return w.settleWordRecheck(ctx, item)
 	}
 	// Some word lane did not answer (plan 2.4 row 4): retry, never absent.
 	return w.deferWordRecheck(ctx, item, errNoWordAnswer)
@@ -254,22 +254,30 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 		// meantime (every tier reader is scoped to status='done').
 		return w.retryWordRecheckWrite(ctx, item, err)
 	}
-	// A landed recheck counts its tier but NO hit: provider_outcomes counts
-	// ordinary dispatches only, and daily hits must equal it (#1301).
-	w.recordSourceEvent(ctxNoCancel, song.WinningLane, tier)
 	w.consecutiveFailures = 0
-	return w.settleWordRecheck(ctx, item, queue.WordTimingServed)
+	// Counts the tier, NO hit (#1301), only once settled: a deferred settle re-runs.
+	return w.settleWordRecheckThen(ctx, item, queue.WordTimingServed, func() {
+		w.recordSourceEvent(ctxNoCancel, song.WinningLane, tier)
+	})
 }
 
 // settleWordRecheck settles the row done with its verdict in one statement.
 // On failure the row is re-deferred (never failed), so it stays a recheck row.
-func (w *Worker) settleWordRecheck(ctx context.Context, item queue.WorkItem, state string) error {
+func (w *Worker) settleWordRecheck(ctx context.Context, item queue.WorkItem) error {
+	return w.settleWordRecheckThen(ctx, item, queue.WordTimingAbsent, nil)
+}
+
+// settleWordRecheckThen runs onSettled only once settled, never on deferral.
+func (w *Worker) settleWordRecheckThen(ctx context.Context, item queue.WorkItem, state string, onSettled func()) error {
 	err := w.queue.SettleWordRecheck(context.WithoutCancel(ctx), item.ID, state, w.wordGeneration())
 	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, sql.ErrNoRows):
-		slog.Warn("worker word recheck: row no longer a processing recheck row; leaving it", "id", item.ID)
+	case err == nil, errors.Is(err, sql.ErrNoRows):
+		if err != nil {
+			slog.Warn("worker word recheck: row no longer a processing recheck row; leaving it", "id", item.ID)
+		}
+		if onSettled != nil {
+			onSettled()
+		}
 		return nil
 	}
 	return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: settle word recheck %s: %w", state, err))

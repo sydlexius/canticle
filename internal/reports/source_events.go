@@ -15,7 +15,10 @@ type SourceEventCount struct {
 }
 
 // SourceEvents returns the per-day, per-source counters for the UTC days from
-// through to (inclusive), ordered by day, lane, event. Consumer: the #1302 chart.
+// through to (inclusive), ordered by day, lane, event. Delivered-type events
+// (word/line/unsynced/instrumental) count landings, not distinct tracks: a track
+// delivered line and later rechecked to word counts both. hit and miss mirror
+// the provider_outcomes credits. Consumer: the #1302 chart.
 func (r *Repo) SourceEvents(ctx context.Context, from, to time.Time) ([]SourceEventCount, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT day, lane, event, count FROM source_event_daily

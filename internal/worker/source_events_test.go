@@ -208,6 +208,38 @@ func TestSourceEvents_WordRecheckLands(t *testing.T) {
 	})
 }
 
+type settleOnceFailsQueue struct {
+	*queue.DBQueue
+	failed *bool
+}
+
+func (q settleOnceFailsQueue) SettleWordRecheck(ctx context.Context, id int64, state string, gen int64) error {
+	if !*q.failed {
+		*q.failed = true
+		return errors.New("injected settle failure")
+	}
+	return q.DBQueue.SettleWordRecheck(ctx, id, state, gen)
+}
+
+// A settle failing once (settleOnceFailsQueue) must count the tier exactly once.
+func TestSourceEvents_WordRecheckCountsOnceAfterSettleRetry(t *testing.T) {
+	rig, w := newRecheckRig(t, &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}, nil, false)
+	w.SetSourceEventRecorder(rig.q)
+	w.setClock(func() time.Time { return eventsT0 })
+	w.queue = settleOnceFailsQueue{rig.q, new(bool)}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertEvents(t, rig.db, map[string]int64{})
+	if _, err := rig.db.Exec(`UPDATE work_queue SET status = 'pending', next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, rig.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertEvents(t, rig.db, map[string]int64{eventsDay + "|musixmatch|word": 1})
+}
+
 type failingSourceEvents struct{}
 
 func (failingSourceEvents) RecordSourceEvent(context.Context, time.Time, string, string) error {
