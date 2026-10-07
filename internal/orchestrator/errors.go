@@ -70,7 +70,7 @@ func (e *RefusedUntriedError) Unwrap() error { return ErrTimingRefusedUntried }
 // ErrAllResultsBlocked is returned by the dispatch (never by a lane) when at
 // least one lane answered with a lyric the operator blocked for this track
 // (#1394) and no lane produced anything usable: the rest were clean misses.
-// A lane that failed is NOT folded into it: that error is returned instead,
+// A lane that failed (or returned a hollow, truncated body) is NOT folded into it: that error is returned instead, even when another lane is untried,
 // because the lane may still hold the right lyric. A lane that did not answer
 // (breaker open, throttled) yields a RefusedUntriedError{Blocked: true}, which
 // parks just this row. It

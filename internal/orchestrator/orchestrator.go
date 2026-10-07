@@ -379,6 +379,10 @@ type dispatchResult struct {
 	// is not recorded: that lane answered, badly, and a request-shape refusal
 	// (403, stale client version) is not fixed by waiting.
 	untriedErr error
+	// failedErr is the first transport-class failure of a lane that answered
+	// badly (a canceled lane excluded). topErr cannot carry it alone: an untried
+	// lane's class outranks transport there. Only the blocked answer reads it.
+	failedErr error
 	// untriedLane names the lane untriedErr came from.
 	untriedLane string
 	// gated is the best result that would have committed but sat below the
@@ -429,7 +433,11 @@ func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName str
 		if r.untriedErr == nil {
 			r.untriedErr, r.untriedLane = err, laneName
 		}
-	case OutcomeSuccess, OutcomeBenignMiss, OutcomeLaneOutage, OutcomeTransport, OutcomeRefusedUntried:
+	case OutcomeTransport:
+		if r.failedErr == nil && !errors.Is(err, context.Canceled) {
+			r.failedErr = err
+		}
+	case OutcomeSuccess, OutcomeBenignMiss, OutcomeLaneOutage, OutcomeRefusedUntried:
 	}
 }
 
@@ -543,16 +551,28 @@ func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.S
 	}
 	if r.blocked {
 		// A retained or held result returned above, so timing-refused handling is
-		// untouched. A lane that failed may still hold the right lyric, so its
-		// error wins; a lane that did NOT answer (breaker open, throttled) parks
-		// this one row through the same bounded wait a timing-refused result uses,
-		// rather than idling the whole drain pass on the untried lane's own class.
-		// Only clean misses and a detector outage (which says nothing about the
-		// lyric) leave the blocked answer as the whole story.
-		if r.untriedErr != nil {
+		// untouched. Precedence, highest first:
+		//   1. a lane that FAILED (transport class): its error is returned through
+		//      the shared tail below (PartialFailureError rules apply), even when
+		//      another lane is untried. It may still hold the right lyric and only
+		//      a retry with backoff (which also feeds the breaker / global backoff)
+		//      asks it again; parking would hide the failure, and a spent wait
+		//      budget would settle the row as blocked though that lane never
+		//      answered. The untried lane is asked again on that same retry. (The
+		//      timing-refused path above parks instead because it carries a real
+		//      song; a blocked answer carries none.)
+		//   2. a lane that did NOT answer (breaker open, throttled): park just this
+		//      row through the bounded wait, rather than idling the whole drain
+		//      pass on the untried lane's own class.
+		//   3. a hollow (truncated) response is not an answer (#1131): it keeps its
+		//      non-blocked handling via the tail, never ErrAllResultsBlocked.
+		//   4. only clean misses and a detector outage (which says nothing about
+		//      the lyric): ErrAllResultsBlocked is the whole story.
+		if r.failedErr != nil {
+			r.topErr, r.topClass = r.failedErr, OutcomeTransport
+		} else if r.untriedErr != nil {
 			return models.Song{}, &RefusedUntriedError{Lane: r.untriedLane, Cause: r.untriedErr.Error(), Blocked: true}
-		}
-		if r.topErr == nil || r.topClass == OutcomeBenignMiss || r.topClass == OutcomeLaneOutage {
+		} else if r.hollowErr == nil && (r.topErr == nil || r.topClass == OutcomeBenignMiss || r.topClass == OutcomeLaneOutage) {
 			return models.Song{}, ErrAllResultsBlocked
 		}
 	}

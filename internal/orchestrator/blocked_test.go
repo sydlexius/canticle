@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +26,15 @@ func (b *bodyBlocker) SongBlocked(_ context.Context, s models.Song) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.keys = append(b.keys, s.IdentityArtistKey+"|"+s.IdentityTitleKey)
-	return b.blocked[firstLine(s)]
+	return b.blocked[blockedKey(s)]
+}
+
+// blockedKey is the first cue, or the lyric body for a song with no subtitles.
+func blockedKey(s models.Song) string {
+	if len(s.Subtitles.Lines) == 0 {
+		return s.Lyrics.LyricsBody
+	}
+	return firstLine(s)
 }
 
 func blockedOrch(t *testing.T, mode string, blocked []string, lanes ...*Lane) (*Orchestrator, *bodyBlocker) {
@@ -69,7 +78,7 @@ func TestAllBlockedReturnsErrAllResultsBlocked(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			p1 := &stubProvider{name: "innertube", song: goodSyncedSong("wrong words")}
 			p2 := &stubProvider{name: "musixmatch", song: models.Song{Lyrics: models.Lyrics{LyricsBody: "wrong words"}}}
-			o, _ := blockedOrch(t, mode, []string{"wrong words", ""}, laneFor(p1), laneFor(p2))
+			o, _ := blockedOrch(t, mode, []string{"wrong words"}, laneFor(p1), laneFor(p2))
 
 			song, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
 			if !errors.Is(err, ErrAllResultsBlocked) {
@@ -168,5 +177,39 @@ func TestBlockedWithUntriedOrOutageLane(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Blocked + a failed lane + an untried lane: the failed lane's error wins over
+// the parked class, and a hollow response never becomes all-blocked (#1394).
+func TestBlockedFailedAndHollowPrecedence(t *testing.T) {
+	open := func() *Lane {
+		cb := circuit.New(time.Minute, time.Hour)
+		cb.Trip()
+		return NewProviderLane(&stubProvider{name: "petitlyrics", song: goodSyncedSong("never asked")}, cb)
+	}
+	boom := errors.New("boom")
+	hollow := fmt.Errorf("x: %w", musixmatch.ErrTruncatedResponse)
+	blockedLane := func() *Lane {
+		return laneFor(&stubProvider{name: "innertube", song: goodSyncedSong("wrong words")})
+	}
+	for _, mode := range []string{ModeOrdered, ModeParallel} {
+		t.Run(mode+"/failed+untried", func(t *testing.T) {
+			o, _ := blockedOrch(t, mode, []string{"wrong words"}, blockedLane(),
+				laneFor(&stubProvider{name: "musixmatch", err: boom}), open())
+			_, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+			var ru *RefusedUntriedError
+			if !errors.Is(err, boom) || errors.As(err, &ru) {
+				t.Fatalf("err = %v; want the failed lane's error, not a parked RefusedUntriedError", err)
+			}
+		})
+		t.Run(mode+"/hollow", func(t *testing.T) {
+			o, _ := blockedOrch(t, mode, []string{"wrong words"}, blockedLane(),
+				laneFor(&stubProvider{name: "musixmatch", err: hollow}))
+			_, err := o.FindLyrics(context.Background(), fallthroughTrack(), "")
+			if !errors.Is(err, musixmatch.ErrTruncatedResponse) || errors.Is(err, ErrAllResultsBlocked) {
+				t.Fatalf("err = %v; want the truncated-response error, not ErrAllResultsBlocked", err)
+			}
+		})
 	}
 }
