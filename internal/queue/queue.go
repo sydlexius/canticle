@@ -357,15 +357,10 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE excluded.output_paths
              END,
              scan_result_id = COALESCE(work_queue.scan_result_id, excluded.scan_result_id),
-             -- #825: 0 means "never stamped" (providers.Generation is 0 only for an
-             -- empty provider set), e.g. a row first seen by a CLI scan. Adopt the
-             -- incoming generation ONLY from that unknown state: a nonzero stamp is
-             -- the generation the row's verdict was reached under, and refreshing it
-             -- would silently defeat the #679 expiry.
-             providers_version = CASE
-                 WHEN work_queue.providers_version = 0 AND excluded.providers_version <> 0 THEN excluded.providers_version
-                 ELSE work_queue.providers_version
-             END,
+             -- providers_version is deliberately absent (#825): on a stored row it
+             -- names the generation the row's verdict was reached under, which only
+             -- the worker's verdict write knows (TimingRecord.Generation). An
+             -- enqueue reaches no verdict, so it never writes one.
              priority = CASE
                  WHEN excluded.priority >= 10 THEN excluded.priority           -- PriorityWebhook always wins
                  WHEN work_queue.status = 'deferred' THEN work_queue.priority  -- preserve miss deprioritization
@@ -2377,6 +2372,15 @@ type TimingRecord struct {
 	// treats as post-settle: a forgotten source fails toward a provider pass,
 	// never toward skipping one. Any other value is rejected.
 	Source string
+	// Generation, when non-nil, writes providers_version in the SAME UPDATE as
+	// the verdict (#825, #1386): the provider-set generation the lanes answered
+	// under when this verdict was reached. The #679 suppression and the worker's
+	// cache bypass both read that column, so it must never name a generation the
+	// verdict was not reached under; one statement means the two land or fail
+	// together. Only the worker sets it, and only on a pass that asked the lanes
+	// (never a cache hit). nil leaves providers_version alone, as every other
+	// stamper (the sweep, revalidate) judges a file and asks no provider.
+	Generation *int
 	// FileState, when non-nil, re-describes the file in the SAME UPDATE as the
 	// verdict (#1130), so the two succeed or fail together: a verdict without its
 	// file state would retire the row from the timing backlog while
@@ -2430,6 +2434,20 @@ const fileStateSQL = `,
              outcome_type = CASE WHEN ? = 1 AND status <> 'processing' THEN ? ELSE outcome_type END,
              sync_tier = CASE WHEN ? = 1 AND status <> 'processing' THEN NULL ELSE sync_tier END`
 
+// generationArgs returns the (apply, generation) bind pair for generationSQL:
+// apply is 0 when rec.Generation is nil, so the statement keeps the stamp.
+func (r TimingRecord) generationArgs() (apply, generation int) {
+	if r.Generation == nil {
+		return 0, 0
+	}
+	return 1, *r.Generation
+}
+
+// generationSQL is the constant tail of the timing UPDATE's SET list (two
+// binds, see generationArgs) that writes the verdict's generation (#825).
+const generationSQL = `,
+             providers_version = CASE WHEN ? = 1 THEN ? ELSE providers_version END`
+
 // SetTimingOutcome records how a row's synced lyric compared against the audio
 // duration (#440). The worker calls this before Complete while the row is still
 // in 'processing'; the UPDATE keys on id alone (no status guard, matching
@@ -2456,15 +2474,16 @@ func (q *DBQueue) SetTimingOutcome(ctx context.Context, id int64, rec TimingReco
 		evaluatedAt = formatTime(rec.EvaluatedAt)
 	}
 	fsApply, fsOutcome := rec.fileStateArgs()
+	genApply, gen := rec.generationArgs()
 	_, err = q.db.ExecContext(ctx,
 		`UPDATE work_queue
          SET timing_outcome = ?,
              overrun_magnitude = ?,
              overrun_ratio = ?,
              evaluated_at = ?,
-             `+timingSourceSet+fileStateSQL+`
+             `+timingSourceSet+fileStateSQL+generationSQL+`
          WHERE id = ?`,
-		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, fsApply, fsOutcome, fsApply, id,
+		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, fsApply, fsOutcome, fsApply, genApply, gen, id,
 	)
 	if err != nil {
 		return fmt.Errorf("queue: set timing outcome for id %d: %w", id, err)
@@ -2499,15 +2518,16 @@ func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec Timi
 		evaluatedAt = formatTime(rec.EvaluatedAt)
 	}
 	fsApply, fsOutcome := rec.fileStateArgs()
+	genApply, gen := rec.generationArgs()
 	res, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue
          SET timing_outcome = ?,
              overrun_magnitude = ?,
              overrun_ratio = ?,
              evaluated_at = ?,
-             `+timingSourceSet+fileStateSQL+`
+             `+timingSourceSet+fileStateSQL+generationSQL+`
          WHERE id = ? AND status <> 'processing'`,
-		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, fsApply, fsOutcome, fsApply, id,
+		rec.Outcome, magnitude, ratio, evaluatedAt, src, src, fsApply, fsOutcome, fsApply, genApply, gen, id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: set timing outcome (guarded) for id %d: %w", id, err)

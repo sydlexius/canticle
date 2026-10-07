@@ -358,7 +358,8 @@ type Worker struct {
 	// over the active set). When non-zero and a dequeued item's stored
 	// ProvidersVersion differs, the cache is bypassed so the result is revalidated
 	// against the current provider set. 0 means "not configured" (cache always
-	// honored), preserving single-provider behavior.
+	// honored), preserving single-provider behavior. It is also written with each
+	// verdict a pass that asked the lanes records (verdictGeneration, #825).
 	providersVersion int
 	// mode is the orchestrator dispatch strategy (orchestrator.ModeOrdered or
 	// ModeParallel). raceWait is the parallel-mode synced-upgrade window. Both are
@@ -1267,13 +1268,20 @@ func (w *Worker) stampCompletionProvenance(ctxNoCancel context.Context, id int64
 //
 // Non-fatal like the sibling stamps: a bookkeeping write must never fail an item
 // whose fate is already decided.
-func (w *Worker) stampTimingOutcome(ctxNoCancel context.Context, item queue.WorkItem, song models.Song, durationSeconds int) {
+//
+// generation, when non-nil, is written with the verdict in the same UPDATE as
+// the row's providers_version (#825, #1386); see verdictGeneration for who may
+// pass one. nil keeps the row's stamp.
+func (w *Worker) stampTimingOutcome(ctxNoCancel context.Context, item queue.WorkItem, song models.Song, durationSeconds int, generation *int) {
 	rec := timingRecordFromSong(song, durationSeconds, w.now())
 	if rec.Outcome == "" {
 		// Not a synced result: no line timing exists to judge.
 		return
 	}
+	rec.Generation = generation
 	if err := w.queue.SetTimingOutcome(ctxNoCancel, item.ID, rec); err != nil {
+		// The generation rode in the same failed UPDATE, so the row keeps its
+		// previous verdict AND the stamp that verdict was reached under.
 		slog.Warn("worker: stamp timing outcome failed; continuing", "id", item.ID, "error", err)
 	}
 	if rec.Outcome == string(timing.Ok) || rec.Outcome == string(timing.UnknownDuration) {
@@ -1302,6 +1310,24 @@ func (w *Worker) stampTimingOutcome(ctxNoCancel context.Context, item queue.Work
 		"artist", item.Inputs.Track.ArtistName,
 		"track", item.Inputs.Track.TrackName,
 	)
+}
+
+// verdictGeneration is the provider generation an ordinary completion's verdict
+// was reached under, for stampTimingOutcome (#825, #1386). A pass that asked
+// the lanes (a cache miss, a bypassed cache, an upgrade trip, a #950 refused
+// settle) answered under w.providersVersion, so its verdict carries it; 0
+// records "unknown", which never suppresses. A cache hit returns nil: it judged
+// a stored lyric whose fetch generation was never recorded (entries carry
+// none), so the row keeps its stamp. That costs nothing, since a hit happens
+// only when the stamp already equals a configured generation. Paths that record
+// no verdict (a kept write, a detector or guard-rejected settle) never stamp,
+// so the generation follows the verdict and nothing else.
+func (w *Worker) verdictGeneration(cacheHit bool) *int {
+	if cacheHit {
+		return nil
+	}
+	gen := w.providersVersion
+	return &gen
 }
 
 // Run processes ready work items until the queue is empty or the context ends.
@@ -1848,7 +1874,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// The guard inside WriteLRC has ALREADY acted on this verdict (#439) -- a
 	// MisSynced result landed as .txt and a categorical one was not written --
 	// so this is the durable record of a decision, not an ignored observation.
-	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
+	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song), w.verdictGeneration(cacheHit))
 	w.stampWordTiming(ctxNoCancel, item, song)
 	// A sync-tier stamp+clear double failure (CodeRabbit thread 4098910896,
 	// #1085) must not reach Complete: the row would settle describing a file

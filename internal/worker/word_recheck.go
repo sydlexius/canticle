@@ -224,7 +224,9 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 		slog.Warn("worker: stamp provider lane failed", "id", item.ID, "lane", song.WinningLane, "error", err)
 	}
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
-	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song))
+	// No generation (#825): only the word-capable lanes were asked, so the row's
+	// stamp still names the last pass that asked the whole set.
+	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song), nil)
 	// HasQualifyingWords (wordRecheckWritable's gate) is necessary but not
 	// sufficient for landing (a FOREIGN .elrc blocks the write, #1075 finding
 	// 1), so check disk truth instead of assuming success.
