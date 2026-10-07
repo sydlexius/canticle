@@ -65,14 +65,14 @@ var queueBuckets = []queueBucket{
 		Key:         reports.BucketFinished,
 		Label:       "Finished",
 		Tooltip:     "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain.",
-		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk. Word sync is off, so line-synced is the best result: nothing further to gain.",
+		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk. No word-synced tier is available here, so line-synced is the best result: nothing further to gain.",
 		Value:       func(s reports.QueueSummary) int64 { return s.Finished },
 	},
 	{
 		Key:         reports.BucketSettled,
 		Label:       "Settled (upgradable)",
 		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state.",
-		LineTooltip: "Completed tracks below line sync (unsynced, instrumental, or tier not yet recorded). Word sync is off, so they could still be upgraded to line sync.",
+		LineTooltip: "Completed tracks below line sync (unsynced, instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync.",
 		Value:       func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{
@@ -148,7 +148,7 @@ var resultBuckets = []resultBucket{
 	{
 		Label:       "Line-synced",
 		Tooltip:     "The .lrc on disk has line-level timing and no word timing. It may still be upgraded.",
-		LineTooltip: "The .lrc on disk has line-level timing and no word timing: the best result with word sync off.",
+		LineTooltip: "The .lrc on disk has line-level timing and no word timing: the best result available here.",
 		Value:       func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
 		// The Line-synced chip lives on Settled under the word rung and moves to
 		// Finished under the line rung (reports.BucketChips).

@@ -1348,6 +1348,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		// banner. Default is OFF (the #210 gate is unchanged).
 		handlerOpts = append(handlerOpts,
 			server.WithWebUIAuth(bannerCfg, version, webAuth),
+			// Line is the top rung when no enabled lane can serve words (#1350):
+			// read once here from the lane list the worker was built from.
+			server.WithNoWordLane(noWordLane(fetcher, lyricsDisabled, fallbacks)),
 			server.WithOnboarding(onboarding),
 			// Back the Reports workspace with the same DB the rest of serve mode
 			// uses; the handler builds a read-only reports.Repo from it (#211).
@@ -2116,12 +2119,38 @@ func fallbackProviders(cfg config.Config, token, primaryName string, newFetcher 
 // providerGeneration is the cache-invalidation generation for the active lane
 // set (primary + fallbacks), computed over their provider names.
 func providerGeneration(primaryName string, fallbacks []providers.LyricsProvider) int {
+	return providers.Generation(laneNames(namedLane(primaryName), fallbacks))
+}
+
+// namedLane carries only a name, so providerGeneration and the web UI's top
+// rung (#1350) read one lane-name list.
+type namedLane string
+
+func (n namedLane) Name() string { return string(n) }
+
+// noWordLane reports whether no enabled lane can serve word timing, which makes
+// line the web UI's top rung (#1350). With lyricsDisabled (a Musixmatch primary
+// and no token, resolveServeProvider) nothing fetches at all: runServe starts
+// neither the worker nor the scheduler, so even a configured word-capable
+// fallback cannot process a row and no word tier is reachable. Otherwise the
+// lanes are the primary plus the fallbacks; fallbackProviders already omits a
+// token-less Musixmatch fallback and every disabled lane, so this reads
+// configuration, never health.
+func noWordLane(primary providers.LyricsProvider, lyricsDisabled bool, fallbacks []providers.LyricsProvider) bool {
+	if lyricsDisabled {
+		return true
+	}
+	return !providers.AnyWordCapable(laneNames(primary, fallbacks))
+}
+
+// laneNames is the primary's name followed by each fallback's.
+func laneNames(primary interface{ Name() string }, fallbacks []providers.LyricsProvider) []string {
 	names := make([]string, 0, len(fallbacks)+1)
-	names = append(names, primaryName)
+	names = append(names, primary.Name())
 	for _, p := range fallbacks {
 		names = append(names, p.Name())
 	}
-	return providers.Generation(names)
+	return names
 }
 
 func providerDisabledIn(name string, disabled []string) bool {

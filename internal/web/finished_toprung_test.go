@@ -30,9 +30,9 @@ func TestFinishedPagesFollowTopRung(t *testing.T) {
 			"read-only: they have word timing", false, true,
 			"The only terminal state", "It may still be upgraded."},
 		{"word sync off", true, "3", "2",
-			"Tracks with line- or word-synced lyrics, the best result with word sync off.",
+			"Tracks with line- or word-synced lyrics, the best result available here.",
 			"line-synced ones can also have their timing edited", true, false,
-			"Word sync is off, so line-synced is the best result", "the best result with word sync off"},
+			"No word-synced tier is available here, so line-synced is the best result", "the best result available here"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

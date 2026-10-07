@@ -54,3 +54,21 @@ func TestWordGeneration_ChangesWithRevision(t *testing.T) {
 		t.Fatalf("generation %d is outside the 31-bit range", cur)
 	}
 }
+
+// TestAnyWordCapable pins the #1350 rule: one word-capable lane is enough, and
+// line-only or detector lanes alone (or none) are not.
+func TestAnyWordCapable(t *testing.T) {
+	for _, tc := range []struct {
+		names []string
+		want  bool
+	}{
+		{nil, false},
+		{[]string{InnerTube, "detector"}, false},
+		{[]string{InnerTube, " PetitLyrics "}, true},
+		{[]string{Musixmatch}, true},
+	} {
+		if got := AnyWordCapable(tc.names); got != tc.want {
+			t.Errorf("AnyWordCapable(%v) = %v, want %v", tc.names, got, tc.want)
+		}
+	}
+}

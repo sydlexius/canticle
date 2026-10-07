@@ -27,6 +27,19 @@ func WordCapable(name string) bool {
 	return false
 }
 
+// AnyWordCapable reports whether any of the named lanes is WordCapable. It is
+// the one rule for "can this lane set ever produce a word-synced row", shared
+// by the reports' top rung (#1350) so the web layer cannot disagree with the
+// worker about which lanes exist.
+func AnyWordCapable(laneNames []string) bool {
+	for _, n := range laneNames {
+		if WordCapable(n) {
+			return true
+		}
+	}
+	return false
+}
+
 // WordGeneration fingerprints the word-capable subset of the active lane set
 // together with WordCapabilityRevision. A "no word data" verdict is valid only
 // under the generation it was reached with, so adding, removing or disabling a
