@@ -1128,6 +1128,29 @@ func TestReverse_LeavesForeignSidecarAlone(t *testing.T) {
 	}
 }
 
+// TestReverse_LeavesManualMarkerAlone pins #1218: a hand-placed marker
+// ([source:manual]) is a foreign claim to recalibration, never deleted.
+func TestReverse_LeavesManualMarkerAlone(t *testing.T) {
+	ctx := context.Background()
+	q := openTestQueue(t)
+	src := filepath.Join(t.TempDir(), "a.flac")
+	tel := queue.InstrumentalTelemetry{MusicSum: 0.95, VocalPeak: 0.02, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "v1"}
+	_, marker := seedConfirmation(t, q, src, tel, lyrics.SourceManual)
+
+	res, err := New(q, &fakeWriter{}).Reverse(ctx, Options{
+		MinConfidence: 0.9, VocalMax: 0.015, SpeechMax: 0.2, CurrentVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("Reverse: %v", err)
+	}
+	if res.Reversed != 0 || res.SkippedProviderOwned != 1 {
+		t.Errorf("Reversed=%d SkippedProviderOwned=%d; want 0/1", res.Reversed, res.SkippedProviderOwned)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("manual marker removed; want preserved")
+	}
+}
+
 // TestReverse_DryRunPreviewsWithoutMutating pins that a dry run reports through
 // Preview and changes neither the database nor the disk.
 func TestReverse_DryRunPreviewsWithoutMutating(t *testing.T) {

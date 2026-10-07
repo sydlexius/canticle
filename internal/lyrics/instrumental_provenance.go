@@ -49,6 +49,13 @@ func ReadInstrumentalProvenance(path string) (prov InstrumentalProvenance, isMar
 	if err != nil {
 		return InstrumentalProvenance{}, false, err
 	}
+	prov, isMarker = provenanceOf(tags, lyricLines)
+	return prov, isMarker, nil
+}
+
+// provenanceOf is ReadInstrumentalProvenance's judgment over an already-parsed
+// header, shared with the no-follow manual-marker probe (manual_marker.go).
+func provenanceOf(tags []lrcTag, lyricLines []string) (prov InstrumentalProvenance, isMarker bool) {
 	for _, t := range tags {
 		switch strings.ToLower(t.key) {
 		case "source":
@@ -67,9 +74,9 @@ func ReadInstrumentalProvenance(path string) (prov InstrumentalProvenance, isMar
 		}
 	}
 	if !isMarker {
-		return InstrumentalProvenance{}, false, nil
+		return InstrumentalProvenance{}, false
 	}
-	return prov, true, nil
+	return prov, true
 }
 
 // WriteMarkerProvenance stamps a provenance header onto a bare instrumental

@@ -610,6 +610,22 @@ func resolvedSidecarPath(dir, stem, ext string, listing sidecar.Listing) (string
 	return candidate, false
 }
 
+// manualMarkerAmong reports whether the resolved .txt, or ANY extension-case
+// variant of it already in the directory listing (no new read of the directory),
+// is a manual instrumental marker (#1218). On a case-sensitive filesystem
+// song.txt can win resolution while song.TXT is the marker.
+func manualMarkerAmong(dir, stem, txtPath string, listing sidecar.Listing) bool {
+	if lyrics.ManualMarkerOnDisk(txtPath) {
+		return true
+	}
+	for _, v := range listing.Variants(filepath.Join(dir, stem+sidecar.ExtUnsynced)) {
+		if v != txtPath && lyrics.ManualMarkerOnDisk(v) {
+			return true
+		}
+	}
+	return false
+}
+
 // NewScanner creates a new Scanner with the supplied options.
 func NewScanner(opts ...Option) *Scanner {
 	sc := &Scanner{}
@@ -1231,7 +1247,9 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// [upgrade_sweep] (serve mode, off by default; it bypasses the cache
 			// and the detector refuses telemetry from an older model version, so
 			// inference runs again) or scan reconcile, not a scan side effect.
-			if !reopen.Unsynced {
+			// A manual marker (#1218) is never reopened; the probe runs only once
+			// a reopen is granted, so an ordinary scan reads nothing extra.
+			if !reopen.Unsynced || manualMarkerAmong(dir, stem, txtPath, listing) {
 				// Index it if the scan index has never seen this path (#786). In
 				// serve mode this is the FIRST branch a lone .txt matches, so
 				// leaving it unwired would keep every moved instrumental track

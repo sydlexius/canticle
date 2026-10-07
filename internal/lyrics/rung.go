@@ -54,6 +54,9 @@ type KeptError struct {
 	// Judged is false when the sidecar could not be read: its rung is then
 	// the highest its extension allows, a keep-it guess rather than a reading.
 	Judged bool
+	// Manual is true when the write was refused because the kept sidecar is a
+	// manual instrumental marker (#1218): a refusal --update does not override.
+	Manual bool
 }
 
 func (e *KeptError) Error() string { return ErrKeptBetter.Error() }
