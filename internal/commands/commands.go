@@ -39,6 +39,7 @@ import (
 	"github.com/sydlexius/canticle/internal/langguard"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/logging"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
@@ -1203,12 +1204,18 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// permanently deaf to external change.
 	selfWrites := selfwrite.New(selfWriteTTL(watcherConfigFromCentral(cfg).Debounce))
 	configureWriterSelfWrites(writer, selfWrites)
+	// Lyric blocks (#1394), serve mode only: the writer backstop and the worker's
+	// dispatch and cache checks share one store. Fetch mode opens no database,
+	// so its nil checkers mean no blocking.
+	blocks := lyricblock.NewStore(sqlDB, nil)
+	configureWriterBlocks(writer, blocks)
 	// One shared cache repo across the worker, scheduler, and watcher so the
 	// /metrics cache hit/lookup counters (#308) cover every cache read in serve
 	// mode, not just the worker's. Its hit/lookup counters are process-lifetime
 	// and exposed via CacheStats.
 	cacheRepo := cache.New(sqlDB)
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
+	w.SetBlockChecker(blocks)
 	w.SetDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion))
 	// Answer the fetch-time metadata read from audio_metadata rather than by
 	// opening each item's audio file (#712). Same reader identity as the duration
@@ -1232,6 +1239,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// Restore each lane's liveness control from its last recorded win, so a
 	// restart does not reopen the #767 false outage (#1195).
 	seedLaneControlsFn(ctx, workQ, append([]providers.LyricsProvider{fetcher}, fallbacks...)...)
+	serveWiringProbe(w, writer)
 	gen := providerGeneration(fetcher.Name(), fallbacks)
 	workQ.SetProvidersVersion(gen)
 	w.SetProvidersVersion(gen)
@@ -2350,6 +2358,19 @@ func configureWriterForce(w lyrics.Writer, update bool) {
 	}
 }
 
+// serveWiringProbe is a test seam called once runServe has wired the worker and
+// writer; production leaves it a no-op. It lets a test assert the serve graph
+// really installed the lyric-block checkers (#1394).
+var serveWiringProbe = func(*worker.Worker, lyrics.Writer) {}
+
+// configureWriterBlocks attaches the lyric-block backstop to the concrete LRC
+// writer (#1394). A non-LRCWriter (a test double) is left alone.
+func configureWriterBlocks(w lyrics.Writer, c lyrics.BlockChecker) {
+	if lw, ok := w.(*lyrics.LRCWriter); ok {
+		lw.SetBlockChecker(c)
+	}
+}
+
 // configureWriterSelfWrites attaches the shared self-write registry to the
 // concrete LRC writer, so the watcher recognizes the paths it touches (#685). A
 // non-LRCWriter (a test double) is left alone, exactly as the bilingual setter
@@ -2962,6 +2983,9 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		// without this the check would silently fall back to the cached song's
 		// own catalog length and rarely catch anything. See DurationLookup's doc.
 		Durations: durations,
+		// A blocked cache entry reads as a miss at scan time (#1394). Wired here,
+		// where the scheduler already holds the database; fetch mode has none.
+		Blocks: lyricblock.NewStore(sqlDB, nil),
 	}
 	return scan.Scheduler{
 		Libraries: library.New(sqlDB),

@@ -59,6 +59,7 @@ func (w *Worker) wordOrchestrator() *orchestrator.Orchestrator {
 	if len(lanes) > 1 && w.scriptGuard != nil {
 		orch.SetGuard(w.scriptGuard)
 	}
+	orch.SetBlockChecker(w.blocks)
 	return orch
 }
 
@@ -210,6 +211,8 @@ const maxWordRecheckWaits = 3
 func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, track models.Track, song models.Song) error {
 	song.AudioDurationSeconds = track.TrackLength
 	song.AudioPath = item.Inputs.SourcePath // opt-in mtime bump (#505)
+	// The writer's block backstop keys on the row identity (#1394).
+	song.IdentityArtistKey, song.IdentityTitleKey = queue.IdentityKeys(item.Inputs.Track)
 	for _, p := range outputPaths(item.Inputs) {
 		if err := w.writer.WriteLRC(song, p.Filename, p.Outdir); err != nil {
 			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err)))
