@@ -9,6 +9,11 @@ import (
 // OpMark labels a Record written by Mark.
 const OpMark = "mark"
 
+// OpUnmark labels a Record written by Unmark: the manual marker about to be
+// removed. Restoring the lyrics a mark replaced is a separate operator action
+// from the OpMark records.
+const OpUnmark = "unmark"
+
 // MaxBackupBytes caps the size of a sidecar the backup will capture. A larger
 // file fails the backup, which (backup-first) leaves everything untouched.
 const MaxBackupBytes = 4 << 20
