@@ -272,6 +272,89 @@ func TestVariants_HardLinkedExactAndVariant(t *testing.T) {
 	}
 }
 
+// TestSymlinkVariants_ExactAndRegular: a symlink at the exact candidate name
+// is returned (Variants would hand it to os.Remove; callers refusing a
+// symlinked sidecar ask here), while a regular file at that name is not.
+func TestSymlinkVariants_ExactAndRegular(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere")
+	touch(t, target)
+	link := filepath.Join(dir, "song.lrc")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, filepath.Join(dir, "plain.lrc"))
+	l := List(dir)
+	if got := l.SymlinkVariants(link); !slices.Equal(got, []string{link}) {
+		t.Fatalf("SymlinkVariants(symlink) = %q, want [%q]", got, link)
+	}
+	if got := l.SymlinkVariants(filepath.Join(dir, "plain.lrc")); len(got) != 0 {
+		t.Fatalf("SymlinkVariants(regular file) = %q, want none", got)
+	}
+	if got := l.SymlinkVariants(filepath.Join(dir, "absent.lrc")); len(got) != 0 {
+		t.Fatalf("SymlinkVariants(no match) = %q, want none", got)
+	}
+}
+
+// TestSymlinkVariants_OtherDirectory: a candidate outside the listed directory
+// is never matched, even when a same-named symlink exists in the listing.
+func TestSymlinkVariants_OtherDirectory(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere")
+	touch(t, target)
+	if err := os.Symlink(target, filepath.Join(dir, "song.lrc")); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "song.lrc")
+	if got := List(dir).SymlinkVariants(other); got != nil {
+		t.Fatalf("SymlinkVariants(other dir) = %q, want nil", got)
+	}
+}
+
+// TestSymlinkVariants_CaseVariants: an extension-case variant symlink is
+// returned in name order alongside the exact one, a regular-file variant is
+// omitted, and another stem's symlink is never matched.
+func TestSymlinkVariants_CaseVariants(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; the variants would alias one file")
+	}
+	target := filepath.Join(dir, "elsewhere")
+	touch(t, target)
+	for _, n := range []string{"song.lrc", "song.LRC", "Song.lrc"} {
+		if err := os.Symlink(target, filepath.Join(dir, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch(t, filepath.Join(dir, "song.Lrc"))
+	cand := filepath.Join(dir, "song.lrc")
+	want := []string{filepath.Join(dir, "song.LRC"), cand}
+	if got := List(dir).SymlinkVariants(cand); !slices.Equal(got, want) {
+		t.Fatalf("SymlinkVariants = %q, want %q", got, want)
+	}
+}
+
+// TestSymlinkVariants_UnindexedListing: a Listing built without its index
+// (only a hand-built value can be; every constructor sets one) indexes on the
+// fly and gives the same answer as a constructed Listing.
+func TestSymlinkVariants_UnindexedListing(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere")
+	touch(t, target)
+	link := filepath.Join(dir, "song.lrc")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := Listing{dir: dir, entries: entries}
+	if got := l.SymlinkVariants(link); !slices.Equal(got, []string{link}) {
+		t.Fatalf("SymlinkVariants on unindexed Listing = %q, want [%q]", got, link)
+	}
+}
+
 // TestAsciiEqualFold pins the extension comparison: ASCII letters fold, any
 // non-ASCII byte must match exactly (the Kelvin sign is not "k").
 func TestAsciiEqualFold(t *testing.T) {
