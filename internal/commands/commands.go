@@ -383,6 +383,9 @@ type QueueCmd struct {
 	Retry    *QueueRetryCmd    `arg:"subcommand:retry" help:"reset a failed work item back to pending"`
 	Clear    *QueueClearCmd    `arg:"subcommand:clear" help:"delete completed work_queue rows"`
 	Recheck  *QueueRecheckCmd  `arg:"subcommand:recheck" help:"revive deferred or retired rows for another pass"`
+
+	MarkInstrumental   *QueueMarkInstrumentalCmd   `arg:"subcommand:mark-instrumental" help:"mark tracks instrumental by hand, protected from automatic replacement; dry-run unless --yes"`
+	UnmarkInstrumental *QueueUnmarkInstrumentalCmd `arg:"subcommand:unmark-instrumental" help:"withdraw a hand-made instrumental mark and re-queue the track; dry-run unless --yes"`
 }
 
 // QueueRecheckCmd revives work_queue rows for another processing pass.
@@ -4257,6 +4260,10 @@ func runQueueCmd(ctx context.Context, out io.Writer, args QueueCmd) int {
 		return runQueueClear(ctx, out, *args.Clear)
 	case args.Recheck != nil:
 		return runQueueRecheck(ctx, out, *args.Recheck)
+	case args.MarkInstrumental != nil:
+		return runQueueInstrumental(ctx, out, false, *args.MarkInstrumental)
+	case args.UnmarkInstrumental != nil:
+		return runQueueInstrumental(ctx, out, true, QueueMarkInstrumentalCmd(*args.UnmarkInstrumental))
 	default:
 		_, _ = fmt.Fprintln(out, "missing queue subcommand")
 		return 2

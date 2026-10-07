@@ -1,0 +1,210 @@
+package commands
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/instrumentalmark"
+	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/queue"
+)
+
+// QueueMarkInstrumentalCmd marks tracks instrumental by hand (#1404). Dry-run
+// unless --yes. Select tracks with --id and/or --path; both repeat.
+type QueueMarkInstrumentalCmd struct {
+	IDs        []int64  `arg:"--id,separate" help:"work_queue row id; repeat for more than one"`
+	Paths      []string `arg:"--path,separate" help:"audio file path; resolves to its work_queue row(s). Repeat for more than one"`
+	Yes        bool     `arg:"--yes" help:"actually apply (without it, prints what would change)"`
+	Backup     string   `arg:"--backup" help:"path for the JSONL backup of the lyric files replaced (default: <db-dir>/instrumental-<mark|unmark>-backup-<ts>.jsonl)" default:""`
+	ConfigPath string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
+}
+
+// QueueUnmarkInstrumentalCmd withdraws a hand-made instrumental mark and
+// re-queues the track. Same flags as QueueMarkInstrumentalCmd.
+type QueueUnmarkInstrumentalCmd QueueMarkInstrumentalCmd
+
+// instrumentalCounts is the whole of what the command prints: counts only. A
+// sidecar path, artist, title or lyric text must never reach stdout.
+type instrumentalCounts struct {
+	done, dry, already, notFound, inFlight, failed, files int
+}
+
+// runQueueInstrumental drives Marker.Mark (unmark=false) or Marker.Unmark over
+// the selected rows. One row failing does not stop the others; the exit status
+// is 1 if any failed. Stdout is aggregate-only.
+func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args QueueMarkInstrumentalCmd) int {
+	verb := "mark"
+	if unmark {
+		verb = "unmark"
+	}
+	if len(args.IDs) == 0 && len(args.Paths) == 0 {
+		_, _ = fmt.Fprintf(out, "queue %s-instrumental needs at least one --id or --path\n", verb)
+		return 2
+	}
+	cfg, err := config.Load(args.ConfigPath)
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		return 1
+	}
+	sqlDB, err := db.OpenForBatch(ctx, cfg.DB.Path, args.Yes)
+	if err != nil {
+		slog.Error("failed to open database", "error", err)
+		return 1
+	}
+	defer func() { _ = sqlDB.Close() }() //nolint:errcheck // reason: best-effort close on command exit
+
+	libs, err := library.New(sqlDB).List(ctx)
+	if err != nil {
+		slog.Error("failed to list libraries", "error", err)
+		return 1
+	}
+	roots := make([]string, 0, len(libs))
+	for _, l := range libs {
+		roots = append(roots, l.Path)
+	}
+	marker := instrumentalmark.New(sqlDB, lyrics.NewLRCWriter(roots...))
+
+	var c instrumentalCounts
+	ids := append([]int64(nil), args.IDs...)
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	for _, p := range args.Paths {
+		// work_queue.source_path holds the audio file path the scan enqueued
+		// (the same value scan_results.file_path carries); a path can have
+		// more than one row, so every match is processed.
+		found, qerr := rowsForSourcePath(ctx, sqlDB, filepath.Clean(p))
+		if qerr != nil {
+			slog.Error("failed to look up path", "error", qerr)
+			return 1
+		}
+		if len(found) == 0 {
+			c.notFound++
+		}
+		for _, id := range found {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+
+	backupPath := args.Backup
+	if backupPath == "" {
+		backupPath = filepath.Join(filepath.Dir(cfg.DB.Path),
+			fmt.Sprintf("instrumental-%s-backup-%s.jsonl", verb, time.Now().UTC().Format("20060102-150405")))
+	}
+	var backupFile *os.File
+	defer func() {
+		if backupFile != nil {
+			if cerr := backupFile.Close(); cerr != nil {
+				slog.Warn("failed to close instrumental backup file", "error", cerr)
+			}
+		}
+	}()
+	report := func(rec instrumentalmark.Record) error {
+		if backupFile == nil {
+			f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: G304 -- backupPath is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
+			if ferr != nil {
+				return fmt.Errorf("open instrumental backup: %w", ferr)
+			}
+			backupFile = f
+			lyrics.FsyncDir(filepath.Dir(backupPath))
+		}
+		return instrumentalmark.AppendRecord(backupFile, rec)
+	}
+	opts := instrumentalmark.Options{DryRun: !args.Yes, Report: report}
+
+	for _, id := range ids {
+		var res instrumentalmark.Result
+		var rerr error
+		if unmark {
+			res, rerr = marker.Unmark(ctx, id, opts)
+		} else {
+			res, rerr = marker.Mark(ctx, id, opts)
+		}
+		switch {
+		case errors.Is(rerr, queue.ErrManualInstrumentalNotFound):
+			c.notFound++
+		case errors.Is(rerr, queue.ErrManualInstrumentalInFlight):
+			c.inFlight++
+		case rerr != nil:
+			// The service's errors carry the work item id and no path.
+			slog.Error("instrumental "+verb+" failed", "work_item", id, "error", rerr)
+			c.failed++
+		default:
+			c.files += res.FilesBackedUp
+			switch res.Outcome {
+			case instrumentalmark.OutcomeDryRun:
+				c.dry++
+			case instrumentalmark.OutcomeAlreadyMarked, instrumentalmark.OutcomeNotMarked:
+				c.already++
+			default:
+				c.done++
+			}
+		}
+	}
+
+	printInstrumentalSummary(out, unmark, args.Yes, c)
+	if args.Yes {
+		if backupFile != nil {
+			_, _ = fmt.Fprintf(out, "backup: %s\n", backupPath)
+		} else {
+			_, _ = fmt.Fprintln(out, "backup: none written (no lyric files were replaced)")
+		}
+	}
+	if c.failed > 0 {
+		return 1
+	}
+	return 0
+}
+
+// rowsForSourcePath returns the ids of the work_queue rows enqueued for the
+// audio file at path, oldest first.
+func rowsForSourcePath(ctx context.Context, sqlDB *sql.DB, path string) (ids []int64, retErr error) {
+	rows, err := sqlDB.QueryContext(ctx, `SELECT id FROM work_queue WHERE source_path = ? ORDER BY id`, path)
+	if err != nil {
+		return nil, fmt.Errorf("query work items by path: %w", err)
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil && retErr == nil {
+			retErr = fmt.Errorf("close work item rows: %w", cerr)
+		}
+	}()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan work item id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate work items: %w", err)
+	}
+	return ids, nil
+}
+
+// printInstrumentalSummary prints counts only.
+func printInstrumentalSummary(out io.Writer, unmark, applied bool, c instrumentalCounts) {
+	verb, done, already, would, files := "mark", "marked", "already marked", "would mark", "lyric files backed up"
+	if unmark {
+		verb, done, already, would, files = "unmark", "unmarked", "not marked", "would unmark", "marker files backed up"
+	}
+	if !applied {
+		_, _ = fmt.Fprintf(out, "dry run: nothing changed (pass --yes to %s)\n", verb)
+		files = "files that would be backed up"
+	}
+	_, _ = fmt.Fprintf(out, "%s: %d\n%s: %d\n%s: %d\nnot found: %d\nin flight: %d\nfailed: %d\n%s: %d\n",
+		done, c.done, would, c.dry, already, c.already, c.notFound, c.inFlight, c.failed, files, c.files)
+}

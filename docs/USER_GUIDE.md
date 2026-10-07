@@ -740,6 +740,33 @@ canticle scan clear --library Music
 canticle scan clear --library Music --yes
 ```
 
+### Mark a track instrumental by hand
+
+`queue mark-instrumental` marks a track instrumental when you know the detector is wrong. It replaces the track's `.lrc` and `.txt` files with an instrumental marker. The row is then protected: a scan, an upgrade or a re-fetch will not replace the marker. `queue unmark-instrumental` removes the mark and the marker file, and puts the track back in the queue so it is fetched again.
+
+```sh
+# Pick tracks by work item id (repeat --id) or by audio file path (repeat --path).
+# Without --yes this only prints counts of what would change.
+canticle queue mark-instrumental --id 42 --id 43
+canticle queue mark-instrumental --path /music/Artist/Album/track.flac --yes
+
+# Undo it. The track is queued again and fetched like any other.
+canticle queue unmark-instrumental --id 42 --yes
+```
+
+`--path` finds the work item by the audio file path the scan recorded. A path or id with no work item is counted as "not found". A track that is being processed right now is counted as "in flight"; run the command again later. One failure does not stop the others, and the exit status is 1 if any failed.
+
+The output is counts only. It never prints a path, artist or title.
+
+Before a real run changes a file, it appends the old file to a JSONL backup. The default is `<db-dir>/instrumental-mark-backup-<timestamp>.jsonl` (`instrumental-unmark-backup-...` for unmark), or the file named by `--backup`. The command prints the backup path when it finishes.
+
+Each line is one JSON record with four fields: `op` (`mark` or `unmark`), `work_item_id`, `path` (the file that was replaced or removed) and `content` (its bytes, base64 encoded). Unmarking does not restore the old lyrics, because the track is fetched again. To put a file back by hand, decode the `content` of its `mark` record and write the bytes to `path`:
+
+```sh
+jq -r 'select(.op=="mark") | [.path, .content] | @tsv' backup.jsonl
+# for one record: printf '%s' "$CONTENT" | base64 -d > "$PATH_FROM_RECORD"
+```
+
 ### Realign orphaned sidecars
 
 When an audio file is renamed but its `.lrc` / `.txt` lyric sidecar is not, the
