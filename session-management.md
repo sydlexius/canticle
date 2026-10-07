@@ -5,6 +5,190 @@ Read it on resume, after the gitignored `SESSION-STATE.md` (which holds transien
 Durable rules and the one-line-per-package catalog live in `CLAUDE.md`; this file holds the point-in-time detail behind them.
 Add a dated `##` section at the top for new material. Do not edit history except to correct it.
 
+## 2026-10-07 - further detail moved out of the CLAUDE.md package catalog
+
+The package catalog in `CLAUDE.md` is still loaded into every session and spawned agent, and several entries had again grown past a one-line purpose, so each entry listed below was cut to its purpose plus the invariants a future editor would break by accident.
+Each shortened entry is recorded below as it stood before this move, in the catalog's order, one sentence per line; where the two disagree later, `CLAUDE.md` and the code win, and this section is the record of what was known on this date.
+Sentences already recorded verbatim in the 2026-10-06 section are not repeated; a subsection says so when that applies.
+Issue and PR numbers refer to this repository.
+
+### `innertube`
+
+- `innertube` -- YouTube Music's unauthenticated internal ("innertube") API adapter, tokenless like petitlyrics; owns the three-call flow (search, next, browse), the client-string selection that picks a timed-cue response over a plain-text one (`ANDROID_MUSIC`/`IOS_MUSIC`, never `WEB_REMIX`), its own pacer with a 2s policy floor (`MinAllowedInterval`), and search-result verification (the search call never signals "no match").
+This lane MULTIPLEXES per track between upstream lyric licensors (Musixmatch or LyricFind): `[source:innertube]` stays constant while `[upstream:]` carries the licensor -- see `docs/provider-attribution.md` and `docs/provider-terms.md`.
+
+### `providers`
+
+- `providers` -- provider abstraction (`LyricsProvider`, `Fetcher`, `AdaptivePacer`) plus provider-generation/version invalidation that retires stale cache entries when the provider set changes.
+Also `WordCapable` (Musixmatch, PetitLyrics) and `WordGeneration`, the word-capable lane set plus `WordCapabilityRevision`, which expires a "no word data" verdict when either changes (#982).
+
+### `orchestrator`
+
+Sentences already recorded verbatim in the 2026-10-06 section are omitted; the remainder as it stood before this edit:
+
+- `orchestrator` -- multi-lane orchestration (`Lane`, `Orchestrator`, parallel-race + suitability scoring); composes `providers` with per-lane `circuit` breakers.
+A result ends the dispatch only if it is suitable AND `lyrics.DecidePromotion` would promote it as-is, judged against the query track's `TrackLength` (#950); a categorical (quarantined) result falls through to the remaining lanes and, when it is the only result, is returned WITH `ErrTimingRefusedUntried` while a lane did NOT answer.
+A cached refused entry reads as a miss.
+`SetMinCommitQuality` (ordered mode only, off by default) lets only a result at or above that quality end the dispatch and aggregates `Song.WordAnswer` across the word-capable lanes (#982).
+A provider refusal (`ErrForbidden`, HTTP 403) trips that lane's breaker and sets `LaneState.Refused` (#1372); a transport failure is returned as `*PartialFailureError` only when every failing lane's breaker is open after the dispatch AND another lyrics lane answered with a clean miss.
+
+### `lyrics`
+
+- `lyrics` -- LRC/TXT/instrumental writer (`Writer`, `LRCWriter`), `Slugify`, an `.lrc` parser, provenance-tag embedding, and fsync helpers.
+`WriteLRC` pairs `[re:canticle]` immediately before `[ve:x.y.z]` on every synced write (#483).
+It owns the accept-time timing guard (`DecidePromotion`, #439, via `timing.Evaluate`): `MisSynced` refuses the `.lrc` and keeps the words as `.txt`, `Categorical` writes nothing, unknown duration always fails open; the duration judged against is `Song.AudioDurationSeconds`, which callers stamp from the AUDIO FILE, never `Track.TrackLength`.
+It also owns the no-downgrade guard (#553): before any mutation it compares the candidate's `Rung` (`rung.go`: none < instrumental < unsynced < line < word; `TestQualityAgreesWithRung` pins agreement with `orchestrator.Quality` on the five canonical shapes only) against `RungOnDisk` (the files themselves, never a provenance header) and returns `ErrKeptBetter` (a `*KeptError` carrying the kept file's rung) on a strictly lower candidate, unless `SetForceOverwrite` (wired from `--update` only) is set.
+A sidecar is read only through an `O_NOFOLLOW|O_NONBLOCK` handle fstat'ed regular (no FIFO block, no symlink follow).
+`ClassifySynced`/`ClassifyLRCFile` (#1075) classify a `.lrc`'s on-disk sync tier with no new parser; `ReadSyncedLRC`/`EvaluateLRCFile` are the disk-to-`models.Song` seam (#442), so an existing file is re-judged by the SAME predicate that judged it at accept time.
+`mtimebump.go` (#505, opt-in `output.bump_audio_mtime`, off by default) bumps the SOURCE AUDIO file's mtime only after the writer REPLACES an existing sidecar with a different lyric body; a failure is a Warn, never a rollback.
+
+### `scanner`
+
+- `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`).
+An instrumental marker of any provenance reopens on `--upgrade` like any `.txt` (#553); a detector version bump does not reopen one (#1106).
+
+### `cache`
+
+- `cache` -- lyrics cache repository (`CacheRepo`) over SQLite.
+An entry is the `lyrics.EncodeCachedSong` envelope: the song plus the lane and fetch time of the fetch that stored it (#1207).
+`Lookup` falls back to the bucket-0 unknown-duration sentinel row on an exact-bucket miss, so `Invalidate` deletes every duration bucket for a key; it also takes an `Execer`, so a caller can invalidate inside its own transaction.
+
+### `audiodur`
+
+- `audiodur` -- exact per-file audio duration cache (`Store`) keyed by path and validated by (mtime, size); filled opportunistically wherever a file is already open, from that read's own handle rather than a path re-stat.
+A miss is `unknown_duration`, never an error (#441), and `revalidate` (#442) fails open on one rather than remediating.
+The scanner ALSO fills it for files it skips for fetching (#684); that fill is gated on a `Lookup`, so a skipped file costs one header read per file VERSION, not one per scan.
+
+### `revalidate`
+
+Sentences already recorded verbatim in the 2026-10-06 section are omitted; the remainder as it stood before this edit:
+
+- `revalidate` -- re-judges `.lrc` files ALREADY on disk against their companion audio's exact duration and plans remediation (#442): demote a `MisSynced` lyric's words to `.txt`, quarantine a `Categorical` one.
+`Plan` WALKS library roots (the CLI); `PlanCandidates` judges an explicit list of `work_queue` rows (the serve-mode sweep, #443) without reading a single directory: the sidecar is DERIVED (`stem + .lrc`) and an extension-case variant is resolved by `Lstat` calls, never a directory read.
+In candidate mode EVERY candidate returns a finding; an unparsable `.lrc` leaves its row UNSTAMPED (the stamp is one-way), and a duration-store failure abandons the cycle rather than stamping rows it never judged.
+
+### `queue`
+
+- `queue` -- the in-memory `InputsQueue` (fetch mode) and the durable SQLite `DBQueue` (serve/worker mode) with priority tiers and randomized within-tier dequeue.
+An `Enqueue` collision keeps a settled or in-flight row's paths, with two exceptions: a row whose source file is gone is moved to the incoming same-directory, same-stem file that replaced it (`enqueue_move.go`, #1262; never a `processing` row; `RepointGoneSource` is the same move with no enqueue), and a scan enqueue carrying `Inputs.ReopenCategorical` (#972) reopens a `done` + categorical row for a different-length recording or fails the enqueue with `ErrCategoricalNotReopened`, nothing written or linked.
+A row that records a file or a hand edit is never reopened.
+Completion stamps (`SetOutcomeType`, `SetCompletionProvenance`, `SetTimingOutcome`, `SetSyncTier` #1075) are written before `Complete` while the row is still `processing`; each is non-fatal.
+`sync_tier` (word/line/unsynced) records what the FILE is and is deliberately separate from `word_timing_state`.
+`work_queue.upstream` (#1297) is written by `SetProviderLane` in the SAME statement as `provider_lane`, follows the lane, NOT the file, and is cleared by every path that clears or replaces `provider_lane`.
+`upgrade_sweep.go` (#553, #1118, #1120) owns upgrade trips (`ListUpgradeCandidates`/`MarkUpgradeQueued` arm, `SettleUpgradeTrip` settles one that landed nothing); an armed row is protected like a word-recheck row (`notWordRecheckQueued`).
+
+### `scan`
+
+Sentences already recorded verbatim in the 2026-10-06 section are omitted; the remainder as it stood before this edit:
+
+- `scan` -- library scanning: `Enqueuer`, the `scan_results` `Repo`, and the periodic scheduler that enqueues missing lyrics.
+
+### `worker`
+
+- `worker` -- durable-queue `Worker` that drains work items through the providers/orchestrator and cache.
+On `ErrTimingRefusedUntried` (#950) it parks ONLY that row via `queue.DeferRefused` and keeps draining; after `maxRefusedWaits` (3) it settles the carried refused song as done + categorical.
+`stampLane` writes the result's lane and its `lyrics.RecordedUpstream` in one `SetProviderLane` statement; a kept write stamps neither.
+A row with `word_timing_state='queued'` takes the word-recheck path (`runWordRecheck`, #982): word-capable lanes only, never the cache, and it writes ONLY a result whose words pass the writer's own `lyrics.HasQualifyingWords` and that promotes as-is, so a recheck can never downgrade a settled `.lrc` or its `.elrc`; no recheck path touches `miss_count`, `attempts`, `lane_attempts`, or `provider_outcomes`.
+Under `output.word_sync_mode` `off` (#1054) such a row is released back to `done` with no lane contacted.
+An ORDINARY completion stamps the word verdict (`stampWordTiming`) and the sync tier (`stampSyncTier`, #1075, from `LRCWriter.WordsLanded`) before `Complete`; a failed tier stamp clears the tier to unknown instead of leaving the row's prior tier stale.
+On an `orchestrator.PartialFailureError` (#1372) the row still takes `queue.Fail` but the global backoff (`consecutiveFailures`) is reset, not fed; any other transport failure feeds it as before.
+
+### `reports`
+
+- `reports` -- read-only, run-on-demand reports over existing SQLite data; no write paths.
+The #627 word/line sync-tier split reads `work_queue.sync_tier` (#1075), not `word_timing_state`.
+`QueueSummary` splits `Done` into `Finished` and `SettledUpgradable` (summing to `Done` by construction); `Finished` and `ResultsBreakdown.WordSynced` share one SQL fragment (`wordTierPredicate`), and `finishedPredicates` is the one rung-to-SQL map, decided per query under `TopRungLine` (#1275, selected from `output.word_sync_mode = off` or, via `server.WithNoWordLane`, from no word-capable lane being configured, #1350).
+`BucketFilter` (#1234, #1235) narrows a bucket listing (search, the `Tier`/`Edited`/`MisSynced` chips, `Reason`, `LibraryID`, `Lane`); `BucketChips` and `ReasonCategories` are the one place a bucket's offered set is decided.
+The `LibraryID` predicate is an `EXISTS` (never a JOIN, so the keyset cursor cannot break) and its unary plus (`+scan_result_id IN (...)`) is load-bearing: `TestLibraryPredicateUsesPrefixProbe` pins the `work_queue_id=?` prefix-only plan.
+The Reports track tables sort through the shared `tablesort` component under namespaced params (#1260).
+The dashboard Results tiles link into these views only where a bucket + chip combination yields EXACTLY the tile's population (#1237), pinned per rung by `TestResultTilesLinkToEqualPopulations`.
+
+### `watcher`
+
+- `watcher` -- optional filesystem watcher that triggers targeted library scans on change; complements, never replaces, the periodic scheduler.
+Consults `selfwrite` in `translate` to drop the events canticle's own sidecar writes generate, before they can prune or arm a debounce timer (#685).
+
+### `selfwrite`
+
+Sentences already recorded verbatim in the 2026-10-06 section are omitted; the remainder as it stood before this edit:
+
+- `selfwrite` -- a TTL'd, concurrency-safe set of paths this process just wrote, shared in memory between the `lyrics` writer (which records) and the `watcher` (which suppresses).
+Suppression keys on the FILE path, never its directory; a recorded final path also covers its `os.CreateTemp` temp file by derivation.
+Entries expire, so a crash or an undelivered event can never leave a path permanently deaf to external change.
+
+### `prune`
+
+- `prune` -- reconciles `work_queue`/`scan_results` against the filesystem: rows whose source audio file has vanished are deleted (`os.Stat` is the sole authority; `Directory` granularity for the periodic sweep, `Exact` for the reactive prune and `scan reconcile-paths`; an in-flight guard defers rows whose linked work is still `processing`).
+A gone row is relinked instead when a unique MBID/ISRC match, else (#1262) exactly one present same-stem sibling with another extension (never a directory read), else an exact-title name match resolves it.
+A row classified for deletion that is also junction-linked to a PRESENT file in another library is retained, never deleted (#1293).
+The periodic `Directory` sweep skips unchanged directories through `dirstate.go` (migration 060 `prune_dir_state`); a row gone inside a surviving directory is relinked or retained there, never retired, and is deleted only by AGE-OUT (migration 061 `prune_gone_since`: a mark `goneGrace` old, then confirmed by a second sweep at least `goneConfirmGap` later).
+An aged-out row is BACKUP-FIRST: its report runs before the delete transaction and a row whose report failed is not deleted.
+More than `ageOutMaxPerSweep` (50) rows due at once is a hard stop for the unattended sweep, and the exit is attended (`scan reconcile-paths --yes`).
+A dry run or library-scoped sweep stores nothing.
+The serve sweeper appends each source it deletes to `reconcile-paths-serve-backup.jsonl` beside the database.
+
+### `purgeprovenance`
+
+- `purgeprovenance` -- bulk-deletes `.lrc`/`.txt` sidecars matching a provenance filter (`--source <name>` or `--no-source`) and resets the coupled `work_queue`/`scan_results` rows so the next scan re-fetches (issue #474).
+Backup-first (the caller's `Report` fsyncs a restorable JSONL record before anything is touched), symlinks never followed, in-flight rows skipped.
+The row reset and the `cache.Invalidate` of each linked `(artist, title)` commit in ONE transaction and BOTH commit before the unlink, because `scan.Enqueuer.EnqueuePending` consults the cache before enqueueing: a reset without its invalidation would delete the sidecar and then satisfy the re-scan from cache, losing the file permanently.
+Driven by the dry-run-by-default `scan purge-provenance` CLI command.
+
+### `identityrepair`
+
+- `identityrepair` -- re-reads each `scan_results` file's tags (via the injected `IdentityReader` seam) to correct run-together multi-value artist rows ingested before the ID3v2.4 fix (issue #466); updates `scan_results` in place and re-keys the coupled `work_queue` row, merging on the `(artist_key, title_key)` unique conflict and skipping `processing` rows.
+Each correction's backup record is written and fsynced inside the transaction before the row commits (backup-first / write-ahead: a report failure rolls the change back), so an applied correction always has its restorable record.
+Shared by the dry-run-by-default `scan reconcile-identity` CLI command and a one-shot, marker-gated serve-mode startup backfill.
+
+### `web`
+
+- `web` -- serves the web UI (fixed-sidebar shell, Reports placeholder, read-only Config view) from embedded templ templates and `go:embed`'d static assets.
+`flacfallback.go` (#1243, opt-in `server.preview_flac_fallback`, off by default): `GET /preview/{id}/audio.flac` serves a whole-file ffmpeg FLAC conversion (argv, no shell) of the row's audio through the same session guard and `os.Root` confinement as `/preview/{id}/audio`, 404 when off.
+Conversions live in a size-capped per-process temp cache, never in a library, and ffmpeg never re-opens the library path (it is handed the confined handle).
+
+### `detector`
+
+- `detector` -- optional audio-based instrumental detection sidecar (external AudioSet/YAMNet classifier, vendored at `deploy/yamnet-detector/`); a three-gated decision (music / sung-vocal / speech gates) sampling short windows across the track in one inference call; a legacy mean-only sidecar degrades safely to never-instrumental.
+
+### `timing`
+
+Sentences already recorded verbatim in the 2026-10-06 section are omitted; the remainder as it stood before this edit:
+
+- `timing` -- the shared pure predicate classifying synced-lyric timing against audio duration; sole owner of `TimingOutcome`/`Evaluate`, the exported `IsDecorative` line classifier, and the calibrated `Tolerance`/`CategoricalRatio` constants (#438).
+Consumed by all four callers: the accept-time guard in `lyrics`, the worker's outcome stamp, the `revalidate` backlog pass (#442), and the serve-mode sweep (#443).
+No I/O; the max timestamp is taken over text-bearing lines only, so a decorative marker past the audio end is not an overrun.
+
+### `config`
+
+- `config` -- TOML config resolution (XDG paths, registry-driven keys, token precedence CLI > env > file) plus redaction, validation, render/write.
+Owns `[timing_validation]` (#443; consumer `commands.runTimingValidationSweep`): `enabled` / `revalidate_existing` gate the serve-mode sweep (BOTH required), `revalidate_batch` budgets one cycle, and `on_mis_synced` / `on_categorical` select the remediation.
+The two action enums differ by exactly one value and the difference is load-bearing -- a categorical lyric is another song's words, so `demote` is illegal there; both sets derive from one pair of functions, so they cannot drift.
+An unrecognized action ALWAYS resets to the conservative default rather than falling through.
+Also owns `[word_sync_recheck]` (#1048) and `[upgrade_sweep]` (#553) (each `enabled`/`batch`, dark by default, batch range 1-1000), and `[word_sync_generate]` (#1006), which drives no background sweep.
+
+### `realign`
+
+Sentences already recorded verbatim in the 2026-10-06 section are omitted; the remainder as it stood before this edit:
+
+- `realign` -- confidence resolver (`Realigner`, `Move`, `Apply`) that re-attaches orphaned `.lrc`/`.txt` sidecars to renamed or moved audio: exact ISRC/MBID provenance, filesystem heuristic with a title-only name guard plus a `min_margin` runner-up rule (#672: the artist is excluded and both name tiers must agree on a pair), an opt-in N:M name-similarity matcher (`heuristic-nm`, config `name_match`/`min_margin`), ambiguous, conflict.
+`Apply` also carries the REMEDIATION action kinds (`KindDemote`/`KindQuarantine`/`KindPurge`, #442) so `revalidate` reuses this one apply path and one JSONL backup trail; `KindRename` is the zero value, so every pre-existing `Move` is unchanged.
+
+### `commands`
+
+Sentences already recorded verbatim in the 2026-10-06 section are omitted; the remainder as it stood before this edit:
+
+- `commands` -- the CLI command tree: top-level `Args` and every subcommand (`fetch`, `serve`, `scan`, `library`, `keys`, `secrets`, `config`, `queue`, `provenance`, `realign`, `revalidate`, `timing-accuracy`, `completion`).
+Each is thin CLI wiring over its package: `revalidate` and `realign` over the packages of the same name, `timing-accuracy` (#1117) over `timingacc` (it opens no database and writes nothing), and the `scan reconcile-*` family: `reconcile-paths` drives `prune`, `reconcile-identity` drives `identityrepair`, plus `reconcile-word-sync` (#982), `reconcile-upstream` (#1298; fills `work_queue.upstream` for settled rows from the sidecar's `[upstream:]` tag) and `reconcile-editor-tag` (#483).
+`scan reconcile-sync-tier` (#1075) is the one-time backfill for `work_queue.sync_tier`, and `scan reconcile-remediated` (#1143) re-describes tier-unknown synced rows from disk (dry-run by default, write-ahead JSONL backup).
+`revalidate`, `reconcile-editor-tag` and `reconcile-remediated` are AGGREGATE-ONLY on stdout -- no path, artist, title, or lyric text is ever printed, since a sidecar path carries the library's private metadata; `--tail` is the one place per-file detail lands.
+The serve-mode sweeps live here too: `runTimingValidationSweep` (#443), which applies BEFORE it stamps so a failed remediation leaves its row in the backlog to retry; the word-recheck sweep (`word_recheck_sweep.go`, #1048); and the upgrade sweep (`upgrade_sweep.go`, #553, `runUpgradeSweepLoop`), whose trips the worker writes through `LRCWriter.WriteLRCNoDowngrade` (never forced, even under `serve --update`).
+
+### `timingacc`
+
+- `timingacc` -- pure line-start accuracy measurement for `timing-accuracy` (#1117): a monotone LCS `matchLines` over `normalize.NormalizeKey` text (ties broken by smaller total start error) and `LineStats` (MAE, share within the 300 ms `WithinMS`, declared reference residual); no I/O, so it imports neither `lyrics` nor `models`.
+Cues pair only on equal normalized text (an empty one never pairs), and with repeated lines and a count mismatch the error is a lower bound.
+No MAE is reported for zero matches.
+
 ## 2026-10-06 - detail moved out of the CLAUDE.md package catalog (#1378)
 
 `CLAUDE.md` is loaded into every session and every spawned agent, and its package catalog had grown to carry dated measurements, review citations, per-issue fix narratives and blow-by-blow edge-case mechanics.
