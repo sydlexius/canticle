@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/instrumentalmark"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -41,7 +43,7 @@ type instrumentalCounts struct {
 
 // runQueueInstrumental drives Marker.Mark (unmark=false) or Marker.Unmark over
 // the selected rows. One row failing does not stop the others; the exit status
-// is 1 if any failed. Stdout is aggregate-only.
+// is 1 if any row failed, was not found or was in flight. Stdout is aggregate-only.
 func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args QueueMarkInstrumentalCmd) int {
 	verb := "mark"
 	if unmark {
@@ -74,11 +76,21 @@ func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args 
 	}
 	marker := instrumentalmark.New(sqlDB, lyrics.NewLRCWriter(roots...))
 
+	// A backup that is itself a lyric file, or sits where a scan reads lyric
+	// files, would be replaced by the very run that wrote it.
+	if args.Backup != "" && backupPathUnsafe(args.Backup, roots) {
+		_, _ = fmt.Fprintln(out, "--backup must not be a lyric file (.lrc, .txt, .elrc) or inside a library root")
+		return 2
+	}
+
 	var c instrumentalCounts
-	ids := append([]int64(nil), args.IDs...)
-	seen := make(map[int64]bool, len(ids))
-	for _, id := range ids {
-		seen[id] = true
+	var ids []int64
+	seen := make(map[int64]bool, len(args.IDs))
+	for _, id := range args.IDs {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
 	}
 	for _, p := range args.Paths {
 		// work_queue.source_path holds the audio file path the scan enqueued
@@ -160,14 +172,40 @@ func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args 
 	if args.Yes {
 		if backupFile != nil {
 			_, _ = fmt.Fprintf(out, "backup: %s\n", backupPath)
+		} else if c.failed > 0 {
+			_, _ = fmt.Fprintln(out, "backup: not written (see the errors above)")
 		} else {
 			_, _ = fmt.Fprintln(out, "backup: none written (no lyric files were replaced)")
 		}
 	}
-	if c.failed > 0 {
+	// Exit 0 only when every selected row ended in a mark, an unmark, or an
+	// already-marked / not-marked no-op.
+	if c.failed > 0 || c.notFound > 0 || c.inFlight > 0 {
 		return 1
 	}
 	return 0
+}
+
+// backupPathUnsafe reports whether a --backup path would be destroyed by the
+// run it backs up: a lyric file name, or a location inside a library root.
+// Both the as-given and the symlink-resolved forms are tested.
+func backupPathUnsafe(backup string, roots []string) bool {
+	switch strings.ToLower(filepath.Ext(backup)) {
+	case ".lrc", ".txt", ".elrc":
+		return true
+	}
+	abs, err := filepath.Abs(backup)
+	if err != nil {
+		abs = filepath.Clean(backup)
+	}
+	canon := filepath.Join(pathutil.CanonicalPath(filepath.Dir(abs)), filepath.Base(abs))
+	for _, root := range roots {
+		absRoot, canonRoot := pathutil.CanonicalRoot(root)
+		if pathutil.WithinRoot(absRoot, abs) || pathutil.WithinRoot(canonRoot, canon) {
+			return true
+		}
+	}
+	return false
 }
 
 // rowsForSourcePath returns the ids of the work_queue rows enqueued for the
@@ -199,7 +237,7 @@ func rowsForSourcePath(ctx context.Context, sqlDB *sql.DB, path string) (ids []i
 func printInstrumentalSummary(out io.Writer, unmark, applied bool, c instrumentalCounts) {
 	verb, done, already, would, files := "mark", "marked", "already marked", "would mark", "lyric files backed up"
 	if unmark {
-		verb, done, already, would, files = "unmark", "unmarked", "not marked", "would unmark", "marker files backed up"
+		verb, done, already, would, files = "unmark", "unmarked", "not marked", "would unmark", "lyric files backed up"
 	}
 	if !applied {
 		_, _ = fmt.Fprintf(out, "dry run: nothing changed (pass --yes to %s)\n", verb)

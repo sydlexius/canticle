@@ -754,11 +754,11 @@ canticle queue mark-instrumental --path /music/Artist/Album/track.flac --yes
 canticle queue unmark-instrumental --id 42 --yes
 ```
 
-`--path` finds the work item by the audio file path the scan recorded. A path or id with no work item is counted as "not found". A track that is being processed right now is counted as "in flight"; run the command again later. One failure does not stop the others, and the exit status is 1 if any failed.
+`--path` finds the work item by the audio file path exactly as the scan recorded it; a path through a symlink, or a relative path, is counted as "not found". A path or id with no work item is counted as "not found". A track that is being processed right now is counted as "in flight"; run the command again later. One failure does not stop the others. The exit status is 1 if any selected row failed, was not found or was in flight, and 0 only when every row was marked, unmarked, already marked or not marked.
 
-The output is counts only. It never prints a path, artist or title.
+The output is counts only. It never prints a library path, artist, title or lyric text; the one path it prints is the backup file's.
 
-Before a real run changes a file, it appends the old file to a JSONL backup. The default is `<db-dir>/instrumental-mark-backup-<timestamp>.jsonl` (`instrumental-unmark-backup-...` for unmark), or the file named by `--backup`. The command prints the backup path when it finishes.
+Before a real run changes a file, it appends the old file to a JSONL backup. The default is `<db-dir>/instrumental-mark-backup-<timestamp>.jsonl` (`instrumental-unmark-backup-...` for unmark), or the file named by `--backup`, which must not be a `.lrc`, `.txt` or `.elrc` file or sit inside a library root (the run would replace it). The command prints the backup path when it finishes.
 
 Each line is one JSON record with four fields: `op` (`mark` or `unmark`), `work_item_id`, `path` (the file that was replaced or removed) and `content` (its bytes, base64 encoded). Unmarking does not restore the old lyrics, because the track is fetched again. To put a file back by hand, decode the `content` of its `mark` record and write the bytes to `path`:
 

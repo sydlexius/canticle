@@ -202,7 +202,7 @@ func TestQueueInstrumentalMarkThenUnmarkRoundTrip(t *testing.T) {
 
 	unmarkBackup := filepath.Join(t.TempDir(), "unmark.jsonl")
 	out, code = f.run(t, true, QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Yes: true, Backup: unmarkBackup})
-	if code != 0 || !strings.Contains(out, "unmarked: 1") || !strings.Contains(out, "marker files backed up: 1") {
+	if code != 0 || !strings.Contains(out, "unmarked: 1") || !strings.Contains(out, "lyric files backed up: 1") {
 		t.Fatalf("real unmark = %d:\n%s", code, out)
 	}
 	qiNoLeak(t, "real unmark", out, f)
@@ -277,5 +277,125 @@ func (f *qiFixture) requireDequeues(t *testing.T, id int64) {
 	item, err := q.Dequeue(f.ctx)
 	if err != nil || item.ID != id {
 		t.Fatalf("Dequeue = %+v, %v; want row %d re-queued", item, err, id)
+	}
+}
+
+func (f *qiFixture) setStatus(t *testing.T, id int64, status string) {
+	t.Helper()
+	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	if _, err := sqlDB.ExecContext(f.ctx, `UPDATE work_queue SET status = ? WHERE id = ?`, status, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueueInstrumentalBackupOpenFailureRefusesTheRow(t *testing.T) {
+	f := newQIFixture(t)
+	// The backup's directory does not exist, so opening it fails.
+	backup := filepath.Join(t.TempDir(), "missing-dir", "b.jsonl")
+	out, code := f.run(t, false, QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Yes: true, Backup: backup})
+	if code != 1 {
+		t.Errorf("exit = %d; want 1", code)
+	}
+	for _, want := range []string{"failed: 1", "marked: 0", "backup: not written (see the errors above)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "none written") {
+		t.Errorf("stdout claims nothing needed backing up:\n%s", out)
+	}
+	qiNoLeak(t, "backup open failure", out, f)
+	if marked := f.row(t, f.id); marked || f.markerExists() {
+		t.Errorf("row changed despite no backup: marked=%v marker=%v", marked, f.markerExists())
+	}
+	if b, _ := os.ReadFile(f.lrcPath); string(b) != qiLRC {
+		t.Errorf("lrc not intact: %q", b)
+	}
+}
+
+func TestQueueInstrumentalBackupFileIsPrivate(t *testing.T) {
+	f := newQIFixture(t)
+	backup := filepath.Join(t.TempDir(), "b.jsonl")
+	if _, code := f.run(t, false, QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Yes: true, Backup: backup}); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	fi, err := os.Stat(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("backup mode = %o; want 600", perm)
+	}
+}
+
+func TestQueueInstrumentalDuplicateSelectorsCountOnce(t *testing.T) {
+	for _, yes := range []bool{false, true} {
+		for name, mk := range map[string]func(f *qiFixture) QueueMarkInstrumentalCmd{
+			"id twice": func(f *qiFixture) QueueMarkInstrumentalCmd { return QueueMarkInstrumentalCmd{IDs: []int64{f.id, f.id}} },
+			"id and path": func(f *qiFixture) QueueMarkInstrumentalCmd {
+				return QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Paths: []string{f.audio}}
+			},
+		} {
+			f := newQIFixture(t)
+			a := mk(f)
+			a.Yes, a.Backup = yes, filepath.Join(t.TempDir(), "b.jsonl")
+			want := "would mark: 1"
+			if yes {
+				want = "marked: 1"
+			}
+			out, code := f.run(t, false, a)
+			if code != 0 || !strings.Contains(out, want) || strings.Contains(out, "already marked: 1") {
+				t.Errorf("%s (yes=%v) = %d; want %q once and no already-marked:\n%s", name, yes, code, want, out)
+			}
+		}
+	}
+}
+
+func TestQueueInstrumentalInFlightIsCountedAndExitsNonZero(t *testing.T) {
+	f := newQIFixture(t)
+	f.setStatus(t, f.id, "processing")
+	out, code := f.run(t, false, QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Yes: true, Backup: filepath.Join(t.TempDir(), "b.jsonl")})
+	if code != 1 {
+		t.Errorf("exit = %d; want 1 for an in-flight row", code)
+	}
+	for _, want := range []string{"in flight: 1", "failed: 0", "marked: 0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+	if marked := f.row(t, f.id); marked {
+		t.Error("in-flight row was marked")
+	}
+}
+
+func TestQueueInstrumentalRefusesUnsafeBackupPath(t *testing.T) {
+	f := newQIFixture(t)
+	outside := t.TempDir()
+	cases := map[string]string{
+		"lrc extension":      filepath.Join(outside, "b.lrc"),
+		"txt upper case":     filepath.Join(outside, "b.TXT"),
+		"elrc extension":     filepath.Join(outside, "b.elrc"),
+		"inside library":     filepath.Join(f.root, "b.jsonl"),
+		"inside library dir": filepath.Join(f.dir, "b.jsonl"),
+	}
+	for name, backup := range cases {
+		out, code := f.run(t, false, QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Yes: true, Backup: backup})
+		if code != 2 || !strings.Contains(out, "--backup must not be") {
+			t.Errorf("%s: exit = %d; want 2 with a refusal:\n%s", name, code, out)
+		}
+		qiNoLeak(t, name, out, f)
+		if _, err := os.Stat(backup); err == nil {
+			t.Errorf("%s: backup file was created", name)
+		}
+	}
+	if marked := f.row(t, f.id); marked || f.markerExists() {
+		t.Errorf("a refused run changed state: marked=%v marker=%v", marked, f.markerExists())
+	}
+	if b, _ := os.ReadFile(f.lrcPath); string(b) != qiLRC {
+		t.Errorf("lrc not intact: %q", b)
 	}
 }
