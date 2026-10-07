@@ -164,8 +164,8 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 	_, _ = fmt.Fprintf(out, "reconcile-identity: scanned %d row(s); %s %d (%d queue re-keyed, %d queue merged, %d skipped in-flight, %d unreadable)%s\n",
 		res.Scanned, verb, res.Changed, res.QueueUpdated, res.QueueMerged, res.ProcessingSkips, res.ReadFailures, suffixDryRun(args.Yes))
 	if held, skips := res.EditHeld+divRes.EditHeld, res.EditSkips+divRes.EditSkips; held+skips > 0 {
-		// Hand-edited rows (#1226): corrected but not re-fetched, or not merged.
-		_, _ = fmt.Fprintf(out, "reconcile-identity: hand-edited rows: %d corrected without re-fetch, %d merge(s) skipped%s\n",
+		// Hand-edited or manually marked rows (#1226, #1405): corrected but not re-fetched, or not merged.
+		_, _ = fmt.Fprintf(out, "reconcile-identity: hand-edited or manually marked rows: %d corrected without re-fetch, %d merge(s) skipped%s\n",
 			held, skips, suffixDryRun(args.Yes))
 	}
 	if backupFile != nil {

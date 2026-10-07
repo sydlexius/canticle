@@ -5,6 +5,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // LaneLabel returns the user-facing name for a PERSISTED lane string, falling
@@ -44,6 +45,9 @@ func LaneLabel(lane string) string {
 	// sometimes true.
 	case providers.InnerTube:
 		return "YouTube Music"
+	// The lane a hand-marked instrumental carries (#1218, #1405).
+	case queue.ManualLane:
+		return "Manual"
 	default:
 		return lane
 	}
@@ -61,7 +65,7 @@ var sourceLabelExpr = buildSourceLabelExpr()
 func buildSourceLabelExpr() string {
 	var b strings.Builder
 	b.WriteString("CASE provider_lane")
-	for _, k := range append(Lanes(), detectorbackfill.LaneName) {
+	for _, k := range append(Lanes(), detectorbackfill.LaneName, queue.ManualLane) {
 		b.WriteString(" WHEN '" + sqlQuote(k) + "' THEN '" + sqlQuote(LaneLabel(k)) + "'")
 	}
 	b.WriteString(" ELSE provider_lane END")

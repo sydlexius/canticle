@@ -129,10 +129,11 @@ func TestResultsBreakdownQueuedRowKeepsStaleTierAsUnknown(t *testing.T) {
 	}
 }
 
-// TestResultsBreakdownWordSyncedMatchesFinished pins (ported from the retired
-// SyncTierCounts agreement check, #1200) that the Results row's word-synced
-// bucket and QueueSummary.Finished are one predicate, over the full
-// finished-split fixture (every remediated, queued, stray and non-done shape).
+// TestResultsBreakdownWordSyncedMatchesFinished pins the relation between the
+// Results row's word-synced bucket and QueueSummary.Finished (#1200, #1405):
+// they share one tier predicate, and Finished additionally counts hand-marked
+// instrumentals, so Finished minus the manual-mark count equals WordSynced,
+// over the full finished-split fixture (which includes one marked row).
 func TestResultsBreakdownWordSyncedMatchesFinished(t *testing.T) {
 	repo, _, wantFinished := seedFinishedSplit(t)
 	ctx := context.Background()
@@ -144,11 +145,16 @@ func TestResultsBreakdownWordSyncedMatchesFinished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResultsBreakdown: %v", err)
 	}
-	if rb.WordSynced != qs.Finished {
-		t.Errorf("ResultsBreakdown.WordSynced = %d, QueueSummary.Finished = %d; want equal", rb.WordSynced, qs.Finished)
+	// Finished is WordSynced plus the hand-marked rows (#1405), which the
+	// result buckets classify as Instrumental, exactly once.
+	if rb.WordSynced != qs.Finished-1 {
+		t.Errorf("ResultsBreakdown.WordSynced = %d, QueueSummary.Finished = %d; want Finished-1 (one manual mark)", rb.WordSynced, qs.Finished)
 	}
-	if rb.WordSynced != wantFinished {
-		t.Errorf("ResultsBreakdown.WordSynced = %d, want %d", rb.WordSynced, wantFinished)
+	if qs.Finished != wantFinished {
+		t.Errorf("QueueSummary.Finished = %d, want %d", qs.Finished, wantFinished)
+	}
+	if rb.Instrumental != 2 {
+		t.Errorf("ResultsBreakdown.Instrumental = %d, want 2 (one plain, one manual)", rb.Instrumental)
 	}
 }
 

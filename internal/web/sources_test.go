@@ -69,7 +69,7 @@ func TestSourcePages(t *testing.T) {
 			t.Fatalf("status = %d", code)
 		}
 		for _, want := range []string{
-			`href="/queue/finished?lane=musixmatch"`,
+			`href="/queue/finished?lane=musixmatch&amp;word=1"`,
 			`href="/queue/settled?lane=musixmatch&amp;tier=line"`,
 			`data-chart-labels="[&#34;Word-synced&#34;,&#34;Line-synced&#34;,&#34;Unsynced&#34;,&#34;Instrumental&#34;,&#34;Tier unknown&#34;,&#34;Other&#34;]"`,
 			`data-chart-values="[2,1,1,0,0,0]"`,
@@ -219,7 +219,7 @@ func TestSourceRowLinksEqualPopulations(t *testing.T) {
 		slices.Sort(linked)
 		want := map[reports.TopRung][]string{
 			reports.TopRungWord: {"innertube/Line-synced", "innertube/Word-synced", "musixmatch/Line-synced", "musixmatch/Word-synced"},
-			reports.TopRungLine: {"innertube/Line-synced", "musixmatch/Line-synced"},
+			reports.TopRungLine: {"innertube/Line-synced", "innertube/Word-synced", "musixmatch/Line-synced", "musixmatch/Word-synced"},
 		}[top]
 		if !slices.Equal(linked, want) {
 			t.Errorf("rung %v: linked rows %q, want %q", top, linked, want)
@@ -268,7 +268,7 @@ func TestSourceRowLinksOddShapes(t *testing.T) {
 				}
 			}
 		}
-		if want := map[reports.TopRung]int{reports.TopRungWord: 2, reports.TopRungLine: 1}[top]; linked != want {
+		if want := map[reports.TopRung]int{reports.TopRungWord: 2, reports.TopRungLine: 2}[top]; linked != want {
 			t.Errorf("rung %v: %d linked rows, want %d", top, linked, want)
 		}
 	}

@@ -39,7 +39,12 @@ func seedFinishedSplit(t *testing.T) (repo *reports.Repo, wantDone, wantFinished
 	for _, w := range rows {
 		insertWorkItem(t, sqlDB, w)
 	}
-	return reports.New(sqlDB), 12, 2
+	// A hand-marked instrumental is Finished too (#1405).
+	marked := insertWorkItem(t, sqlDB, workItem{artist: "A", title: "marked", status: "done", outcomeType: "instrumental"})
+	if _, err := sqlDB.ExecContext(context.Background(), `UPDATE work_queue SET manual_instrumental_at = '2026-08-16T05:00:00Z' WHERE id = ?`, marked); err != nil {
+		t.Fatal(err)
+	}
+	return reports.New(sqlDB), 13, 3
 }
 
 // TestQueueSummaryFinishedSplit pins the 2026-09-24 decision on #553: Done

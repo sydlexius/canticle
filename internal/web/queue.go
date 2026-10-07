@@ -48,7 +48,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketProcessing:  {"Processing", "Tracks a worker has claimed and is working on now."},
 	reports.BucketDeferred:    {"Retrying", "Tracks waiting for the worker to try again: lookups that found nothing yet, and word-sync rechecks."},
 	reports.BucketFailed:      {"Errored", "Tracks whose last lookup hit an error; they are retried automatically."},
-	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, the best result there is."},
+	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, plus tracks marked instrumental by hand: nothing further to gain."},
 	reports.BucketSettled:     {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to word sync."},
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
 }
@@ -56,7 +56,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 // lineTopBucketInfo overrides Finished and Settled when no word tier is reachable
 // (reports.TopRungLine, #1275, #1350: word sync off or no word-capable lane): line-synced is the best result there.
 var lineTopBucketInfo = map[reports.Bucket][2]string{
-	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, the best result available here."},
+	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, plus tracks marked instrumental by hand: the best result available here."},
 	reports.BucketSettled:  {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to line sync."},
 }
 
@@ -266,14 +266,15 @@ func buildQueueColumns(bucket string, state queueViewState, spec tablesort.Spec,
 var queueChipLabels = map[reports.Chip]string{
 	reports.ChipLineSynced: "Line-synced (editable)",
 	reports.ChipEdited:     "Hand-edited",
+	reports.ChipWordSynced: "Word-synced",
 	reports.ChipMissynced:  "Mis-synced",
 }
 
 // buildQueueChips is the chip row for the buckets that offer chips (nil
 // elsewhere). Each chip links to the same view with that one chip toggled,
 // keeping search, sort and the other chips and dropping the cursor (a stale
-// position would hide rows). Line-synced and Mis-synced are mutually exclusive:
-// turning one on turns the other off in the link.
+// position would hide rows). Line-synced, Word-synced and Mis-synced are mutually
+// exclusive: turning one on turns the others off in the link.
 //
 // No chip shows a count, and nothing issues one. tier and edited read unindexed
 // columns, so a count is a scan of the done partition per page view. A Settled
@@ -297,8 +298,11 @@ func buildQueueChips(bucket reports.Bucket, state queueViewState, top reports.To
 			if active {
 				next.Tier = ""
 			} else {
-				next.Tier, next.MisSynced = reports.TierLine, false
+				next.Tier, next.MisSynced, next.Word = reports.TierLine, false, false
 			}
+		case reports.ChipWordSynced:
+			active = state.Word
+			next.Word = !state.Word
 		case reports.ChipEdited:
 			active = state.Edited
 			next.Edited = !state.Edited
@@ -363,7 +367,7 @@ func queueHiddenFilters(state queueViewState) []templates.QueueHidden {
 	v := state.filterValues()
 	v.Del("q")
 	out := make([]templates.QueueHidden, 0, len(v))
-	for _, k := range []string{"tier", "edited", "missync"} {
+	for _, k := range []string{"tier", "word", "edited", "missync"} {
 		if val := v.Get(k); val != "" {
 			out = append(out, templates.QueueHidden{Name: k, Value: val})
 		}

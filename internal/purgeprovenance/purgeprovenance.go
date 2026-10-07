@@ -155,6 +155,10 @@ type Result struct {
 	WorkItemsRequeued int // work_queue rows reset to 'deferred' for re-fetch
 	SkippedSymlink    int // symlinked sidecars never followed or touched
 	SkippedProcessing int // matched sidecars left alone: a linked work_queue row is in-flight
+	// SkippedManual counts matched sidecars left alone because a linked
+	// work_queue row carries a manual instrumental mark (#1405), including
+	// --source manual. Nothing is deleted, reset or invalidated for them.
+	SkippedManual int
 	// SkippedProvenanceMismatch counts matched sidecars refused because the
 	// on-disk [source:] tag and the coupled work_queue.provider_lane name
 	// different providers (issue #827). Nothing is deleted and no row is reset
@@ -202,6 +206,7 @@ type wqLink struct {
 	id     int64
 	status string
 	lane   string
+	manual bool // manual_instrumental_at is set (#1405)
 }
 
 // provenanceAgrees reports whether a sidecar's on-disk [source:] tag and a
@@ -322,7 +327,7 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	var identities []trackIdentity
 	seenID := make(map[trackIdentity]bool)
 	seenWQ := make(map[int64]bool)
-	processing := false
+	processing, manual := false, false
 	var mismatched []int64
 	for _, sr := range srs {
 		scanResultIDs = append(scanResultIDs, sr.id)
@@ -335,6 +340,7 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 			if link.status == "processing" {
 				processing = true
 			}
+			manual = manual || link.manual
 			// A restore puts the provider's own bytes back whichever lane the
 			// row credits, so the #827 deletion guard does not apply to it.
 			if !opts.Filter.Generated && !provenanceAgrees(pt.Source, link.lane) {
@@ -368,6 +374,14 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	//
 	// Row ids only in the log: a work_queue row carries the library's private
 	// artist/title metadata and the path is the same metadata by another name.
+	// A manually marked row is never purged (#1405). Checked first so exactly
+	// one counter increments, and not on a generated-retiming restore, which
+	// touches only edit marks and never a marked row's file.
+	if manual && !opts.Filter.Generated {
+		res.SkippedManual++
+		slog.Warn("purge-provenance: sidecar belongs to a manually marked instrumental; leaving it", "scan_result_ids", scanResultIDs)
+		return
+	}
 	if len(mismatched) > 0 {
 		res.SkippedProvenanceMismatch++
 		slog.Warn("purge-provenance: sidecar provenance is disputed; refusing to delete it",
@@ -438,6 +452,13 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	// restorable record above, before either half runs.
 	if len(scanResultIDs) > 0 || len(workItemIDs) > 0 {
 		srReset, wqReset, invalidated, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs, identities, pt.Source)
+		if errors.Is(rerr, errMarkedUnderfoot) {
+			// Marked by hand after the index snapshot: the file is safe, and the
+			// outcome is the same as for a row marked before the walk.
+			res.SkippedManual++
+			slog.Warn("purge-provenance: sidecar belongs to a manually marked instrumental; leaving it", "scan_result_ids", scanResultIDs)
+			return
+		}
 		if rerr != nil {
 			res.Errors++
 			slog.Warn("purge-provenance: reset rows failed; leaving sidecar in place", "path", path, "error", rerr)
@@ -456,10 +477,37 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		slog.Warn("purge-provenance: sidecar has no linked scan_results row; cannot invalidate its cache entry", "path", path)
 	}
 
+	if afterResetHook != nil {
+		afterResetHook()
+	}
+	// stillUnmarked re-reads the marks just before an unlink. It narrows the
+	// window in which a concurrent mark loses its file; it does not close it (a
+	// mark landing between this read and the unlink still can).
+	stillUnmarked := func() bool {
+		if len(workItemIDs) == 0 {
+			return true
+		}
+		marked, merr := markedRows(ctx, p.db, workItemIDs)
+		if merr != nil {
+			res.Errors++
+			slog.Warn("purge-provenance: mark re-check failed; leaving sidecar", "path", path, "error", merr)
+			return false
+		}
+		if len(marked) > 0 {
+			res.SkippedManual++
+			slog.Warn("purge-provenance: sidecar belongs to a manually marked instrumental; leaving it", "scan_result_ids", scanResultIDs)
+			return false
+		}
+		return true
+	}
+
 	// Companion BEFORE the .lrc, the writer's rule: a failed companion removal
 	// leaves the .lrc too, so the pair is never split. The re-fetch's writer
 	// removes an owned companion before it writes, so the retry is safe.
 	if companion != "" {
+		if !stillUnmarked() {
+			return
+		}
 		if rerr := removeFile(companion); rerr != nil && !os.IsNotExist(rerr) {
 			res.Errors++
 			slog.Warn("purge-provenance: companion delete failed; leaving the sidecar too", "path", companion, "error", rerr)
@@ -468,6 +516,9 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		res.CompanionsDeleted++
 	}
 
+	if !stillUnmarked() {
+		return
+	}
 	if rerr := removeFile(path); rerr != nil {
 		if !os.IsNotExist(rerr) {
 			res.Errors++
@@ -827,6 +878,50 @@ func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag str
 	return disputed, nil
 }
 
+// errMarkedUnderfoot reports that a work_queue row was marked instrumental by
+// hand between the index build and the reset transaction. The sidecar is left
+// alone and counted as skipped-manual, not as an error.
+var errMarkedUnderfoot = errors.New("purgeprovenance: row marked instrumental since the index was built")
+
+// rowQuerier is the read side of *sql.Tx and *sql.DB.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// afterResetHook, when non-nil, runs between the reset commit and the first
+// unlink. Test seam only.
+var afterResetHook func()
+
+// markedRows re-reads the given rows inside tx and returns the ids now marked.
+func markedRows(ctx context.Context, tx rowQuerier, workItemIDs []int64) ([]int64, error) {
+	placeholders := make([]string, len(workItemIDs))
+	args := make([]any, len(workItemIDs))
+	for i, id := range workItemIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	//nolint:gosec // reason: G201 - the interpolated text is a generated "?,?" placeholder
+	// list sized to workItemIDs; every id is bound as a parameter, never formatted in.
+	q := "SELECT id FROM work_queue WHERE manual_instrumental_at IS NOT NULL AND id IN (" + strings.Join(placeholders, ",") + ")"
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read manual marks: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // reason: read-only cursor; rows.Err() below reports any failure
+	var marked []int64
+	for rows.Next() {
+		var id int64
+		if serr := rows.Scan(&id); serr != nil {
+			return nil, fmt.Errorf("purgeprovenance: scan manual mark: %w", serr)
+		}
+		marked = append(marked, id)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read manual marks: %w", rerr)
+	}
+	return marked, nil
+}
+
 // resetRows retries its transaction whole on SQLITE_BUSY (#978). The sidecar's
 // backup record was written by the caller BEFORE this runs and is written once
 // regardless of how many attempts this takes, and nothing here touches the
@@ -864,6 +959,13 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
 	// the transaction either. A lock would also have to be held by a
 	// provider-lane repair path, and no such path exists in the tree.
 	if len(workItemIDs) > 0 {
+		marked, merr := markedRows(ctx, tx, workItemIDs)
+		if merr != nil {
+			return 0, 0, 0, merr
+		}
+		if len(marked) > 0 {
+			return 0, 0, 0, fmt.Errorf("%w: work_queue rows %v", errMarkedUnderfoot, marked)
+		}
 		disputed, verr := disputedLanes(ctx, tx, workItemIDs, tag)
 		if verr != nil {
 			return 0, 0, 0, verr
@@ -986,7 +1088,7 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 	// provenanceAgrees ("this row asserts no provider"), so collapsing them at
 	// the boundary keeps the guard from having to distinguish two spellings of
 	// nothing.
-	wqQuery := `SELECT j.scan_result_id, wq.id, wq.status, COALESCE(wq.provider_lane, '')
+	wqQuery := `SELECT j.scan_result_id, wq.id, wq.status, COALESCE(wq.provider_lane, ''), wq.manual_instrumental_at IS NOT NULL
          FROM work_queue_scan_results j
          JOIN work_queue wq ON wq.id = j.work_queue_id`
 	var wqArgs []any
@@ -1005,7 +1107,8 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 	for wqRows.Next() {
 		var srID, wqID int64
 		var status, lane string
-		if serr := wqRows.Scan(&srID, &wqID, &status, &lane); serr != nil {
+		var manual bool
+		if serr := wqRows.Scan(&srID, &wqID, &status, &lane, &manual); serr != nil {
 			return nil, nil, fmt.Errorf("purgeprovenance: scan work_queue link: %w", serr)
 		}
 		if !srIDs[srID] {
@@ -1013,7 +1116,7 @@ func (p *Purger) buildIndex(ctx context.Context, libraryID *int64) (map[string][
 			// to keep the index scoped to what buildIndex actually loaded.
 			continue
 		}
-		wqIdx[srID] = append(wqIdx[srID], wqLink{id: wqID, status: status, lane: lane})
+		wqIdx[srID] = append(wqIdx[srID], wqLink{id: wqID, status: status, lane: lane, manual: manual})
 	}
 	if rerr := wqRows.Err(); rerr != nil {
 		return nil, nil, fmt.Errorf("purgeprovenance: iterate work_queue links: %w", rerr)

@@ -120,6 +120,8 @@ type BucketRow struct {
 	LineEditable bool
 	Edited       bool
 	OffsetMS     int64
+	// ManualInstrumental is the manual mark (manual_instrumental_at, #1218).
+	ManualInstrumental bool
 	// SortVal is the row's value under the listing's sort, encoded for a
 	// tablesort.Cursor ("n" when NULL or unsorted); the next page's cursor reads it.
 	SortVal string
@@ -158,6 +160,10 @@ type BucketFilter struct {
 	Tier      string
 	Edited    bool
 	MisSynced bool
+	// Word keeps only word-synced rows (outcome synced AND wordTierPredicate), the
+	// Results tile's own population. It drops hand-marked instrumentals, which
+	// Finished also holds (#1405).
+	Word bool
 	// LibraryID, when positive, keeps only rows linked to that library (a
 	// work_queue row dedupes several files, so it can belong to several
 	// libraries; a CLI-enqueued row belongs to none and never matches). The id
@@ -241,9 +247,13 @@ var tierPredicates = map[string]string{
 	TierLine: `outcome_type = 'synced' AND ` + lineTierPredicate,
 }
 
-// Hand-edited (#1213) and mis-synced chips: constant fragments, no caller text.
+// Hand-edited (#1213), mis-synced and word-synced (#1405) chips: constant
+// fragments, no caller text.
 const (
-	editedPredicate = `lyric_edited_at IS NOT NULL`
+	// wordSyncedPredicate is ResultsBreakdown.WordSynced's own arm, so the Word-synced
+	// tile and the chip it links to cannot drift.
+	wordSyncedPredicate = `outcome_type = 'synced' AND (` + wordTierPredicate + `)`
+	editedPredicate     = `lyric_edited_at IS NOT NULL`
 	// timingWrongPredicate means exactly timing_outcome = 'mis_synced' on done rows
 	// (composed with a done bucket), NOT the review queue's wider
 	// ('mis_synced', 'categorical') set over any status.
@@ -259,16 +269,18 @@ const (
 	ChipLineSynced Chip = "tier"
 	ChipEdited     Chip = "edited"
 	ChipMissynced  Chip = "missync"
+	ChipWordSynced Chip = "word"
 )
 
 // bucketChips and lineTopBucketChips are the ONE place the chip set per bucket
 // is decided, in display order. Under TopRungWord, Finished is status done AND
-// synced AND word tier (which excludes
-// mis_synced) and Settled is its complement within done, so only Hand-edited
-// can match on Finished, while Line-synced and Mis-synced only ever match on
+// (a hand-marked instrumental OR synced at the word tier, which excludes
+// mis_synced) and Settled is its complement within done. Word-synced and
+// Hand-edited can match on Finished (a manual mark matches neither chip, only
+// the unfiltered list), while Line-synced and Mis-synced only ever match on
 // Settled. A chip a bucket does not list is never offered and never honored.
 var bucketChips = map[Bucket][]Chip{
-	BucketFinished: {ChipEdited},
+	BucketFinished: {ChipWordSynced, ChipEdited},
 	BucketSettled:  {ChipLineSynced, ChipEdited, ChipMissynced},
 }
 
@@ -276,7 +288,7 @@ var bucketChips = map[Bucket][]Chip{
 // are Finished there, so the Line-synced chip moves with them (it would always
 // be empty on Settled). Mis-synced stays on Settled: the line tier excludes it.
 var lineTopBucketChips = map[Bucket][]Chip{
-	BucketFinished: {ChipLineSynced, ChipEdited},
+	BucketFinished: {ChipWordSynced, ChipLineSynced, ChipEdited},
 	BucketSettled:  {ChipEdited, ChipMissynced},
 }
 
@@ -307,6 +319,9 @@ func (f BucketFilter) chipSQL() string {
 	out := ""
 	if p, ok := tierPredicates[f.Tier]; ok {
 		out += ` AND (` + p + `)`
+	}
+	if f.Word {
+		out += ` AND ` + wordSyncedPredicate
 	}
 	if f.Edited {
 		out += ` AND ` + editedPredicate
@@ -389,6 +404,7 @@ func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, 
                 COALESCE(status = 'done' AND outcome_type = 'synced'
                  AND ((` + wordTierPredicate + `) OR (` + lineTierPredicate + `)), 0),
                 COALESCE(` + lineEditableSQL + `, 0), ` + editedPredicate + `, COALESCE(lyric_offset_ms, 0),
+                ` + manualMarkPredicate + `,
                 ` + spec.SelectExpr(o) + `
          FROM work_queue
          WHERE (` + pred + `)` + keyset + search + `
@@ -424,7 +440,7 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 		)
 		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
 			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable,
-			&it.LineEditable, &it.Edited, &it.OffsetMS, &sv); err != nil {
+			&it.LineEditable, &it.Edited, &it.OffsetMS, &it.ManualInstrumental, &sv); err != nil {
 			return nil, fmt.Errorf("reports: scan bucket row: %w", err)
 		}
 		it.SortVal = tablesort.EncodeValue(sv)

@@ -64,15 +64,15 @@ var queueBuckets = []queueBucket{
 	{
 		Key:         reports.BucketFinished,
 		Label:       "Finished",
-		Tooltip:     "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain.",
-		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk. No word-synced tier is available here, so line-synced is the best result: nothing further to gain.",
+		Tooltip:     "Completed tracks with word-level timing on disk, plus instrumentals you marked by hand. The only terminal state: nothing further to gain.",
+		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk, plus instrumentals you marked by hand. No word-synced tier is available here, so line-synced is the best result: nothing further to gain.",
 		Value:       func(s reports.QueueSummary) int64 { return s.Finished },
 	},
 	{
 		Key:         reports.BucketSettled,
 		Label:       "Settled (upgradable)",
-		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state.",
-		LineTooltip: "Completed tracks below line sync (unsynced, instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync.",
+		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, detected or provider-flagged instrumental, or tier not yet recorded). Not finished: a later run may still improve them. Hand-marked instrumentals are not here.",
+		LineTooltip: "Completed tracks below line sync (unsynced, detected or provider-flagged instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync. Hand-marked instrumentals are not here.",
 		Value:       func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{
@@ -146,14 +146,11 @@ var resultBuckets = []resultBucket{
 		Label:   "Word-synced",
 		Tooltip: "Synced lyrics with word-level timing on disk. Terminal: nothing further to gain from a re-fetch or word-sync recheck.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.WordSynced },
-		// Finished is the word tier only under the word rung (the same
-		// wordTierPredicate). Under the line rung Finished also holds the line
-		// tier and no word chip exists, so the population has no exact view.
-		Href: func(top reports.TopRung, lane string) string {
-			if top == reports.TopRungLine {
-				return ""
-			}
-			return resultsHref(reports.BucketFinished, queueViewState{Lane: lane})
+		// Finished also holds hand-marked instrumentals (#1405), and under the
+		// line rung the line tier; the Word-synced chip (word=1) narrows it to
+		// exactly this tile's population under both rungs.
+		Href: func(_ reports.TopRung, lane string) string {
+			return resultsHref(reports.BucketFinished, queueViewState{Lane: lane, Word: true})
 		},
 	},
 	{
@@ -181,7 +178,7 @@ var resultBuckets = []resultBucket{
 	},
 	{
 		Label:   "Instrumental",
-		Tooltip: "Tracks marked instrumental (no lyrics expected), by audio detection or a provider's own flag.",
+		Tooltip: "Tracks marked instrumental (no lyrics expected): by audio detection, a provider's own flag, or by hand.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.Instrumental },
 	},
 	{

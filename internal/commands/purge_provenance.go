@@ -177,7 +177,7 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	// whole point of a dry run.
 	// Both skip cohorts are counted after Matched, so both must come off the
 	// preview or the dry run promises deletions an apply run will refuse.
-	deleted := res.Matched - res.SkippedProcessing - res.SkippedProvenanceMismatch
+	deleted := res.Matched - res.SkippedProcessing - res.SkippedProvenanceMismatch - res.SkippedManual
 	companions := previewCompanions
 	if args.Yes {
 		verb = "deleted"
@@ -211,6 +211,9 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	}
 	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d%s, requeued %d (%d scan_results reset, %d cache entries invalidated, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
 		res.Scanned, verb, deleted, companionNote, res.WorkItemsRequeued, res.ScanResultsReset, res.CacheInvalidated, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
+	if res.SkippedManual > 0 {
+		_, _ = fmt.Fprintf(out, "note: %d matched sidecar(s) belong to a manually marked instrumental and were left alone\n", res.SkippedManual)
+	}
 	if res.SkippedProvenanceMismatch > 0 {
 		// Aggregate only: naming the files would print the library's private
 		// artist/title metadata to stdout. The per-row ids are in the warning log.

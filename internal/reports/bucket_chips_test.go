@@ -157,7 +157,7 @@ func TestBucketChipsPagingWalksEveryRowOnce(t *testing.T) {
 
 func TestBucketChipsPerBucket(t *testing.T) {
 	want := map[reports.Bucket][]reports.Chip{
-		reports.BucketFinished: {reports.ChipEdited},
+		reports.BucketFinished: {reports.ChipWordSynced, reports.ChipEdited},
 		reports.BucketSettled:  {reports.ChipLineSynced, reports.ChipEdited, reports.ChipMissynced},
 	}
 	for _, b := range reports.Buckets() {
@@ -167,7 +167,7 @@ func TestBucketChipsPerBucket(t *testing.T) {
 		if wantAny := len(want[b]) > 0; reports.ChipBucket(b) != wantAny {
 			t.Errorf("ChipBucket(%s) = %v, want %v", b, !wantAny, wantAny)
 		}
-		for _, c := range []reports.Chip{reports.ChipLineSynced, reports.ChipEdited, reports.ChipMissynced} {
+		for _, c := range []reports.Chip{reports.ChipLineSynced, reports.ChipEdited, reports.ChipMissynced, reports.ChipWordSynced} {
 			wantHas := false
 			for _, w := range want[b] {
 				wantHas = wantHas || w == c
@@ -183,7 +183,7 @@ func TestBucketChipsPerBucket(t *testing.T) {
 func TestBucketChipsLineTopRung(t *testing.T) {
 	top := reports.TopRungLine
 	got := fmt.Sprint(reports.BucketChips(reports.BucketFinished, top), reports.BucketChips(reports.BucketSettled, top))
-	if got != "[tier edited] [edited missync]" {
+	if got != "[word tier edited] [edited missync]" {
 		t.Errorf("line-rung chips (finished, settled) = %s", got)
 	}
 	if !reports.HasChip(reports.BucketFinished, reports.ChipLineSynced, top) || reports.HasChip(reports.BucketSettled, reports.ChipLineSynced, top) {

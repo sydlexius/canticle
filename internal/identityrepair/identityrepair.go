@@ -561,7 +561,7 @@ func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, exc
 	var status string
 	var edited bool
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, status, lyric_edited_at IS NOT NULL FROM work_queue WHERE artist_key = ? AND title_key = ? AND id != ?`,
+		`SELECT id, status, `+queue.HandProtectedPredicate+` FROM work_queue WHERE artist_key = ? AND title_key = ? AND id != ?`,
 		artistKey, titleKey, excludeID).Scan(&id, &status, &edited)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", false, nil

@@ -38,6 +38,8 @@ type queueViewState struct {
 	Tier      string
 	Edited    bool
 	MisSynced bool
+	// Word is the Word-synced chip (#1405); it excludes Tier (disjoint tiers).
+	Word bool
 	// Library is the Library filter's id (0 = all libraries). Parsing keeps any
 	// positive id; the handler drops one that names no library.
 	Library int64
@@ -87,6 +89,9 @@ func parseQueueViewState(v url.Values, bucket reports.Bucket, top reports.TopRun
 			s.Tier = t
 		}
 	}
+	if reports.HasChip(bucket, reports.ChipWordSynced, top) {
+		s.Word = v.Get("word") == "1"
+	}
 	if reports.HasChip(bucket, reports.ChipEdited, top) {
 		s.Edited = v.Get("edited") == "1"
 	}
@@ -97,6 +102,11 @@ func parseQueueViewState(v url.Values, bucket reports.Bucket, top reports.TopRun
 	// never both match. A URL carrying both resolves to Mis-synced, the narrower
 	// and more deliberate filter, and the line tier is dropped.
 	if s.MisSynced {
+		s.Tier = ""
+	}
+	// The word and line tiers are disjoint, so both chips would always list
+	// nothing; the word chip wins, as Mis-synced does above.
+	if s.Word {
 		s.Tier = ""
 	}
 	// Library: a positive id; anything else (empty, text, zero, overflow) is ignored.
@@ -142,6 +152,9 @@ func (s queueViewState) filterValues() url.Values {
 	if s.Tier != "" {
 		v.Set("tier", s.Tier)
 	}
+	if s.Word {
+		v.Set("word", "1")
+	}
 	if s.Edited {
 		v.Set("edited", "1")
 	}
@@ -162,12 +175,12 @@ func (s queueViewState) filterValues() url.Values {
 
 // chipsActive reports whether any chip narrows the list.
 func (s queueViewState) chipsActive() bool {
-	return s.Tier != "" || s.Edited || s.MisSynced || s.Library > 0 || s.Lane != "" || s.Reason != ""
+	return s.Tier != "" || s.Word || s.Edited || s.MisSynced || s.Library > 0 || s.Lane != "" || s.Reason != ""
 }
 
 // filter is the repo filter for this state.
 func (s queueViewState) filter() reports.BucketFilter {
-	return reports.BucketFilter{Query: s.Query, Tier: s.Tier, Edited: s.Edited, MisSynced: s.MisSynced, LibraryID: s.Library, Lane: s.Lane, Reason: s.Reason}
+	return reports.BucketFilter{Query: s.Query, Tier: s.Tier, Word: s.Word, Edited: s.Edited, MisSynced: s.MisSynced, LibraryID: s.Library, Lane: s.Lane, Reason: s.Reason}
 }
 
 // href is the URL of bucket's page for this state at the given cursor.

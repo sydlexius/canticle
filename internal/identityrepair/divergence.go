@@ -600,7 +600,7 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 func loadQueueRowForDivergence(ctx context.Context, tx *sql.Tx, id int64) (queueRow, bool, error) {
 	var q queueRow
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, artist, album_artist, artist_key, title_key, status, lyric_edited_at IS NOT NULL FROM work_queue WHERE id = ?`, id).
+		`SELECT id, artist, album_artist, artist_key, title_key, status, `+queue.HandProtectedPredicate+` FROM work_queue WHERE id = ?`, id).
 		Scan(&q.id, &q.artist, &q.albumArtist, &q.artistKey, &q.titleKey, &q.status, &q.edited)
 	if errors.Is(err, sql.ErrNoRows) {
 		return queueRow{}, false, nil

@@ -149,7 +149,7 @@ func chipQuery(t *testing.T, m []string) url.Values {
 	return u.Query()
 }
 
-// The chip set is per bucket: Finished offers Hand-edited only, Settled offers
+// The chip set is per bucket: Finished offers Word-synced and Hand-edited, Settled offers
 // Line-synced, Hand-edited and Mis-synced, in that order, and no other bucket any.
 func TestQueueChipsPerBucketSet(t *testing.T) {
 	db := openReportsTestDB(t)
@@ -157,7 +157,7 @@ func TestQueueChipsPerBucketSet(t *testing.T) {
 	seedSortRows(t, db, "pending", [][3]string{{"Pend 001", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"}})
 	mux := newReportsUIServer(t, db)
 	for target, want := range map[string]string{
-		"/queue/finished": "[Hand-edited]",
+		"/queue/finished": "[Word-synced Hand-edited]",
 		"/queue/settled":  "[Line-synced (editable) Hand-edited Mis-synced]",
 		"/queue/pending":  "[]",
 	} {
