@@ -137,6 +137,23 @@ func TestSourcePages(t *testing.T) {
 	})
 }
 
+// A failed attempts lookup for an otherwise-unknown lane is a server fault, not a missing page.
+func TestSourceAttemptsLookupFailureIs500(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	seedSources(t, sqlDB)
+	mux := newReportsUIServer(t, sqlDB)
+	// SourceBreakdown reads work_queue only, so it still succeeds; only the attempts lookup breaks.
+	if _, err := sqlDB.ExecContext(context.Background(), `DROP TABLE lane_attempts`); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := getSource(t, mux, "/sources/nosuchlane"); code != http.StatusInternalServerError {
+		t.Errorf("GET /sources/nosuchlane = %d, want 500", code)
+	}
+	if code, _ := getSource(t, mux, "/sources/musixmatch"); code != http.StatusOK {
+		t.Errorf("known lane = %d, want 200 (lookup not needed)", code)
+	}
+}
+
 func TestSourcePagesRequireSession(t *testing.T) {
 	a, svc := newTestAuth(t, trustnet.LoopbackOnly())
 	sqlDB := openReportsTestDB(t)

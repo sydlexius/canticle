@@ -36,39 +36,42 @@ func knownSourceLane(lane string) bool {
 // hasAttempts reports whether lane has recorded attempts, which is what gives
 // it a dashboard tile; every tile link must resolve, so such a lane is served
 // (as the empty state when it has no done rows) even when it is retired.
-func (u *UI) hasAttempts(ctx context.Context, lane string) bool {
+func (u *UI) hasAttempts(ctx context.Context, lane string) (bool, error) {
 	pe, err := u.reports.ProviderEffectiveness(ctx)
 	if err != nil {
-		slog.Error("source page: provider effectiveness failed", "error", err)
-		return false
+		return false, err
 	}
-	return slices.ContainsFunc(pe, func(p reports.ProviderEffectiveness) bool { return p.Lane == lane })
+	return slices.ContainsFunc(pe, func(p reports.ProviderEffectiveness) bool { return p.Lane == lane }), nil
 }
 
 func (u *UI) handleSource(w http.ResponseWriter, r *http.Request) {
 	lane := r.PathValue("lane")
-	u.serveSource(w, r, func(all []reports.SourceBreakdown) (reports.SourceBreakdown, bool) {
+	u.serveSource(w, r, func(all []reports.SourceBreakdown) (reports.SourceBreakdown, bool, error) {
 		for _, sb := range all {
 			if !sb.Unattributed && sb.Lane == lane {
-				return sb, true
+				return sb, true, nil
 			}
 		}
-		return reports.SourceBreakdown{Lane: lane}, knownSourceLane(lane) || u.hasAttempts(r.Context(), lane)
+		if knownSourceLane(lane) {
+			return reports.SourceBreakdown{Lane: lane}, true, nil
+		}
+		ok, err := u.hasAttempts(r.Context(), lane)
+		return reports.SourceBreakdown{Lane: lane}, ok, err
 	})
 }
 
 func (u *UI) handleSourceUnattributed(w http.ResponseWriter, r *http.Request) {
-	u.serveSource(w, r, func(all []reports.SourceBreakdown) (reports.SourceBreakdown, bool) {
+	u.serveSource(w, r, func(all []reports.SourceBreakdown) (reports.SourceBreakdown, bool, error) {
 		for _, sb := range all {
 			if sb.Unattributed {
-				return sb, true
+				return sb, true, nil
 			}
 		}
-		return reports.SourceBreakdown{Unattributed: true}, true
+		return reports.SourceBreakdown{Unattributed: true}, true, nil
 	})
 }
 
-func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]reports.SourceBreakdown) (reports.SourceBreakdown, bool)) {
+func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]reports.SourceBreakdown) (reports.SourceBreakdown, bool, error)) {
 	w.Header().Set("Cache-Control", "no-store")
 	if u.reports == nil {
 		slog.Error("reports repo not wired; cannot serve source page")
@@ -81,7 +84,12 @@ func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]rep
 		http.Error(w, "source breakdown failed", http.StatusInternalServerError)
 		return
 	}
-	sb, ok := pick(all)
+	sb, ok, err := pick(all)
+	if err != nil {
+		slog.Error("source page: provider effectiveness failed", "error", err)
+		http.Error(w, "source breakdown failed", http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.NotFound(w, r)
 		return
