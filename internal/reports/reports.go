@@ -355,9 +355,9 @@ type RecentOutcome struct {
 	Detail string
 }
 
-// RecentOutcomes returns the most recently completed or retired
-// (status IN ('done','unavailable')) tracks, newest first by completed_at
-// (NULLs sorted last), capped at limit.
+// RecentOutcomes returns the most recently settled tracks (status 'done', or
+// 'unavailable' for an exhausted miss), newest first by completed_at (NULLs
+// sorted last), capped at limit.
 //
 // A row prune retired as unresolvable is excluded BEFORE the limit (#740; see
 // recentWhere), so a sweep retiring a batch of rows cannot push genuine fetch
