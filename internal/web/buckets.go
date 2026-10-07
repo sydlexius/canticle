@@ -31,7 +31,7 @@ func (b queueBucket) tooltip(top reports.TopRung) string {
 // (buildQueueChart) are
 // all derived from it, so a bucket cannot carry one name on a tile and another
 // on its chart segment. The chart color map in
-// web/static/js/chart-init.js (QUEUE_COLOR_VARS) is keyed by Label, so a rename
+// web/static/js/chart-init.js (CAT_VARS) is keyed by Label, so a rename
 // here must rename that key too; TestQueueBucketsHaveChartColors enforces it.
 //
 // Every value reads work_queue through reports.QueueSummary. Done is shown as
@@ -86,6 +86,14 @@ var queueBuckets = []queueBucket{
 		Tooltip: "Tracks retired after every lyrics source repeatedly found nothing; revived by 'queue recheck --retired'.",
 		Value:   func(s reports.QueueSummary) int64 { return s.Unavailable },
 	},
+}
+
+// tooltip is the hover text under rung top.
+func (b resultBucket) tooltip(top reports.TopRung) string {
+	if top == reports.TopRungLine && b.LineTooltip != "" {
+		return b.LineTooltip
+	}
+	return b.Tooltip
 }
 
 // resultBucket is one Results tile: what a COMPLETED track ended up with.

@@ -93,28 +93,35 @@ templ dashQueueTiles(tiles []StatTile, chart ChartData) {
 		title="Track counts by queue status. Values update on page refresh; processing is asynchronous."
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-queue-heading">Work Queue</h2>
-		<div class="mx-dash-tiles" role="list">
-			if len(tiles) == 0 {
-				<p class="mx-dash-empty">No queue data available.</p>
-			}
-			for _, t := range tiles {
-				<div class="mx-dash-tile" role="listitem" title={ t.Tooltip }>
-					if t.Href != "" {
-						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title={ t.Tooltip }>
-							<span class="mx-dash-tile-label">{ t.Label }</span>
-							<span class="mx-dash-tile-value">{ t.Value }</span>
-						</a>
-					} else {
-						<span class="mx-dash-tile-label">{ t.Label }</span>
-						<span class="mx-dash-tile-value">{ t.Value }</span>
-					}
-				</div>
-			}
-		</div>
+		@dashStatTiles(tiles)
 		if chart.HasData() {
 			@dashChart("mx-dash-queue-chart", "doughnut", "Work queue status distribution", "", chart)
 		}
 	</section>
+}
+
+// dashStatTiles is the stat-tile row shared by the dashboard's queue and
+// results sections and the source drill-down (#1302): a tile is a link when it
+// has an Href, plain otherwise.
+templ dashStatTiles(tiles []StatTile) {
+	<div class="mx-dash-tiles" role="list">
+		if len(tiles) == 0 {
+			<p class="mx-dash-empty">No data available.</p>
+		}
+		for _, t := range tiles {
+			<div class="mx-dash-tile" role="listitem" if t.Tooltip != "" { title={ t.Tooltip } }>
+				if t.Href != "" {
+					<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } if t.Tooltip != "" { title={ t.Tooltip } }>
+						<span class="mx-dash-tile-label">{ t.Label }</span>
+						<span class="mx-dash-tile-value">{ t.Value }</span>
+					</a>
+				} else {
+					<span class="mx-dash-tile-label">{ t.Label }</span>
+					<span class="mx-dash-tile-value">{ t.Value }</span>
+				}
+			</div>
+		}
+	</div>
 }
 
 // dashResultsTiles renders the Results tile row (#599): completed tracks split
@@ -129,21 +136,7 @@ templ dashResultsTiles(tiles []StatTile) {
 		title="What each completed track ended up with. Adds up to Finished plus Settled (upgradable) in the Work Queue."
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-results-heading">Results</h2>
-		<div class="mx-dash-tiles" role="list">
-			for _, t := range tiles {
-				<div class="mx-dash-tile" role="listitem" title={ t.Tooltip }>
-					if t.Href != "" {
-						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title={ t.Tooltip }>
-							<span class="mx-dash-tile-label">{ t.Label }</span>
-							<span class="mx-dash-tile-value">{ t.Value }</span>
-						</a>
-					} else {
-						<span class="mx-dash-tile-label">{ t.Label }</span>
-						<span class="mx-dash-tile-value">{ t.Value }</span>
-					}
-				</div>
-			}
-		</div>
+		@dashStatTiles(tiles)
 	</section>
 }
 

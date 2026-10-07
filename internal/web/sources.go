@@ -2,7 +2,9 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -94,7 +96,106 @@ func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]rep
 		http.NotFound(w, r)
 		return
 	}
-	render(w, r, templates.SourcePage(u.version, buildSourceView(sb, u.reports.TopRung()), u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+	view := buildSourceView(sb, u.reports.TopRung())
+	days, err := parseTrendRange(r.URL.Query()["range"])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	view.Trend = templates.TrendView{Ranges: trendRanges(r.URL.EscapedPath(), days)}
+	if sb.Unattributed {
+		// The recorder ignores an empty lane, so this group has no daily counters.
+		view.Trend.Note = "Daily history is not recorded for unattributed tracks: they have no source to count."
+	} else if tr, err := u.reports.SourceTrend(r.Context(), sb.Lane, u.now(), days); err != nil {
+		slog.Error("source page: trend failed", "error", err)
+		http.Error(w, "source trend failed", http.StatusInternalServerError)
+		return
+	} else {
+		fillTrend(&view.Trend, tr)
+	}
+	render(w, r, templates.SourcePage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+}
+
+// trendRangeDays are the selectable windows; trendDefaultDays applies when the
+// range parameter is absent, unknown or not in canonical spelling (a default of
+// 30 applies). A repeated parameter is ambiguous and rejected with a 400, as
+// parseQueueViewState does.
+var trendRangeDays = []int{7, 30, 90}
+
+const trendDefaultDays = 30
+
+func parseTrendRange(vals []string) (int, error) {
+	if len(vals) > 1 {
+		return 0, errors.New("repeated parameter range")
+	}
+	// Only the canonical spelling selects a range: "+7" and "007" are NOT
+	// accepted and fall back to the default.
+	if len(vals) == 1 {
+		for _, d := range trendRangeDays {
+			if vals[0] == strconv.Itoa(d) {
+				return d, nil
+			}
+		}
+	}
+	return trendDefaultDays, nil
+}
+
+func trendRanges(path string, cur int) []templates.TrendRange {
+	var out []templates.TrendRange
+	for _, d := range trendRangeDays {
+		out = append(out, templates.TrendRange{Label: strconv.Itoa(d) + " days", Href: path + "?range=" + strconv.Itoa(d), Current: d == cur})
+	}
+	return out
+}
+
+// trendTypeLabels are the delivered-type series, the first four resultBuckets
+// (word, line, unsynced, instrumental: the worker's landing events). Deriving
+// them keeps the labels equal to the chart color keys, which
+// TestResultBucketsHaveChartColors pins for every resultBuckets label.
+func trendTypeLabels() []string {
+	out := make([]string, 0, 4)
+	for _, b := range resultBuckets[:4] {
+		out = append(out, b.Label)
+	}
+	return out
+}
+
+// fillTrend turns the data-layer trend into chart series and table rows. A
+// no-attempt day stays nil (a gap); the chart is skipped when it has no point.
+func fillTrend(v *templates.TrendView, tr reports.SourceTrend) {
+	if !tr.HasHistory {
+		v.Note = "No daily counts in the last 90 days."
+		return
+	}
+	hit := templates.TrendSeries{Label: "Hit rate (%)"}
+	typ := map[string]*templates.TrendSeries{}
+	order := trendTypeLabels()
+	for _, l := range order {
+		typ[l] = &templates.TrendSeries{Label: l}
+	}
+	for _, d := range tr.Days {
+		v.Hit.Labels = append(v.Hit.Labels, d.Day)
+		var p *float64
+		cell := "-"
+		if d.HitRate != nil {
+			r := math.Round(*d.HitRate*10) / 10
+			p, cell = &r, strconv.FormatFloat(r, 'f', 1, 64)+"%"
+		}
+		hit.Data = append(hit.Data, p)
+		v.Hit.Details = append(v.Hit.Details, "Hits "+strconv.FormatInt(d.Hits, 10)+"  /  Misses "+strconv.FormatInt(d.Misses, 10))
+		cells := []string{cell, strconv.FormatInt(d.Hits, 10), strconv.FormatInt(d.Misses, 10)}
+		for i, n := range []int64{d.Word, d.Line, d.Unsynced, d.Instrumental} {
+			f := float64(n)
+			typ[order[i]].Data = append(typ[order[i]].Data, &f)
+			cells = append(cells, strconv.FormatInt(n, 10))
+		}
+		v.TableRows = append(v.TableRows, templates.SourceRow{Label: d.Day, Cells: cells})
+	}
+	v.Hit.Series = []templates.TrendSeries{hit}
+	v.Types.Labels = v.Hit.Labels
+	for _, l := range order {
+		v.Types.Series = append(v.Types.Series, *typ[l])
+	}
 }
 
 // typeCellsFor lists counts in resultBuckets order (the Results tiles' labels).
@@ -140,14 +241,14 @@ func buildSourceView(sb reports.SourceBreakdown, top reports.TopRung) templates.
 		return v
 	}
 	labels, vals := typeCellsFor(sb.Counts, top)
-	t := templates.SourceTable{Heading: "By result type", FirstCol: "Type", Cols: []string{"Tracks"}, ChartID: "mx-source-type-chart",
+	t := templates.SourceTable{Heading: "By result type", ChartID: "mx-source-type-chart",
 		Blurb: "Total " + strconv.FormatInt(sb.Counts.Total(), 10) + " completed tracks."}
+	// Every type is a tile and a legend entry, zero included, as on the dashboard.
 	for i, l := range labels {
-		t.Rows = append(t.Rows, templates.SourceRow{Label: l, Cells: []string{strconv.FormatInt(vals[i], 10)}, Href: sourceTypeLink(sb, l, top)})
-		if vals[i] > 0 {
-			t.Chart.Labels = append(t.Chart.Labels, l)
-			t.Chart.Values = append(t.Chart.Values, float64(vals[i]))
-		}
+		n := strconv.FormatInt(vals[i], 10)
+		t.Tiles = append(t.Tiles, templates.StatTile{Label: l, Value: n, Href: sourceTypeLink(sb, l, top), Tooltip: resultBuckets[i].tooltip(top)})
+		t.Chart.Labels = append(t.Chart.Labels, l)
+		t.Chart.Values = append(t.Chart.Values, float64(vals[i]))
 	}
 	v.Types = t
 	if len(sb.Upstreams) == 0 || sb.Unattributed || !slices.Contains(providers.UpstreamLanes(), sb.Lane) {
@@ -167,6 +268,7 @@ func buildSourceView(sb reports.SourceBreakdown, top reports.TopRung) templates.
 			cells = append(cells, strconv.FormatInt(n, 10))
 		}
 		up.Rows = append(up.Rows, templates.SourceRow{Label: name, Cells: cells})
+		up.Tiles = append(up.Tiles, templates.StatTile{Label: name, Value: cells[0]})
 		up.Chart.Labels = append(up.Chart.Labels, name)
 		up.Chart.Values = append(up.Chart.Values, float64(ub.Counts.Total()))
 	}

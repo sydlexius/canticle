@@ -17,23 +17,26 @@ templ SourcePage(version string, view SourceView, reports []RailItem, musixmatch
 					@sourceBlock(*view.Upstream)
 				}
 			}
+			@sourceTrend(view.Trend)
 		</div>
 		<script src="/static/js/chart.umd.min.js" defer></script>
 		<script src="/static/js/chart-init.js" defer></script>
 	}
 }
 
-// sourceBlock: a doughnut beside the table of the same numbers (the table works without JavaScript).
+// sourceBlock: the dashboard's tiles and doughnut for one breakdown, then the
+// per-type table when the block has one (the tiles cannot carry it).
 templ sourceBlock(t SourceTable) {
 	<section class="mx-dash-section" aria-labelledby={ t.ChartID + "-heading" }>
 		<h2 class="mx-dash-section-title" id={ t.ChartID + "-heading" }>{ t.Heading }</h2>
 		<p class="mx-dash-section-sub">{ t.Blurb }</p>
-		<div class="mx-source-block">
-			if t.Chart.HasData() {
-				@dashChart(t.ChartID, "doughnut", t.Heading, "", t.Chart)
-			}
+		@dashStatTiles(t.Tiles)
+		if t.Chart.HasData() {
+			@dashChart(t.ChartID, "doughnut", t.Heading, "", t.Chart)
+		}
+		if len(t.Rows) > 0 {
 			<div class="mx-table-wrap mx-source-table">
-				<table class="mx-table" aria-label={ t.Heading }>
+				<table class="mx-table" aria-label={ t.Heading + " by type" }>
 					<thead>
 						<tr>
 							<th>{ t.FirstCol }</th>
@@ -45,13 +48,7 @@ templ sourceBlock(t SourceTable) {
 					<tbody>
 						for _, r := range t.Rows {
 							<tr>
-								<td>
-									if r.Href != "" {
-										<a class="mx-source-link" href={ templ.SafeURL(r.Href) }>{ r.Label }</a>
-									} else {
-										{ r.Label }
-									}
-								</td>
+								<td>{ r.Label }</td>
 								for _, c := range r.Cells {
 									<td class="mx-source-num">{ c }</td>
 								}
@@ -60,6 +57,88 @@ templ sourceBlock(t SourceTable) {
 					</tbody>
 				</table>
 			</div>
-		</div>
+		}
 	</section>
+}
+
+// sourceTrend: the over-time charts (#1302). The numbers also sit in a native
+// <details> table, so the section is readable without JavaScript.
+templ sourceTrend(t TrendView) {
+	<section class="mx-dash-section" aria-labelledby="mx-source-trend-heading">
+		<h2 class="mx-dash-section-title" id="mx-source-trend-heading">Over time</h2>
+		<p class="mx-dash-section-sub">Daily counts; days are UTC calendar days. Delivered types count landings, not distinct tracks.</p>
+		if t.Note != "" {
+			<p class="mx-dash-empty">{ t.Note }</p>
+		} else {
+			<nav class="mx-range-nav" aria-label="Range">
+				for _, r := range t.Ranges {
+					if r.Current {
+						<a class="mx-source-link mx-range-current" href={ templ.SafeURL(r.Href) } aria-current="page">{ r.Label }</a>
+					} else {
+						<a class="mx-source-link" href={ templ.SafeURL(r.Href) }>{ r.Label }</a>
+					}
+				}
+			</nav>
+			<h3 class="mx-source-subtitle">Hit rate by day</h3>
+			if t.Hit.HasPoint() {
+				@dashTimeChart("mx-source-hit-chart", "line", "Hit rate by day", "%", t.Hit)
+			} else {
+				<p class="mx-dash-empty">No lookups recorded in this range. A day with no lookups is a gap, not 0%.</p>
+			}
+			<h3 class="mx-source-subtitle">Delivered types by day</h3>
+			if t.Types.HasData() {
+				@dashTimeChart("mx-source-types-chart", "stacked-bar", "Delivered types by day", "", t.Types)
+			} else {
+				<p class="mx-dash-empty">Nothing delivered in this range.</p>
+			}
+			<details class="mx-source-details">
+				<summary>Daily numbers (table)</summary>
+				<div class="mx-table-wrap">
+					<table class="mx-table" aria-label="Daily numbers">
+						<thead>
+							<tr>
+								<th>Day (UTC)</th>
+								for _, c := range []string{"Hit rate", "Hits", "Misses", "Word", "Line", "Unsynced", "Instrumental"} {
+									<th class="mx-source-num">{ c }</th>
+								}
+							</tr>
+						</thead>
+						<tbody>
+							for _, r := range t.TableRows {
+								<tr>
+									<td>{ r.Label }</td>
+									for _, c := range r.Cells {
+										<td class="mx-source-num">{ c }</td>
+									}
+								</tr>
+							}
+						</tbody>
+					</table>
+				</div>
+			</details>
+		}
+	</section>
+}
+
+// dashTimeChart is dashChart's multi-series sibling: one canvas, the UTC day
+// labels and a JSON series list (null = gap) in data-chart-* attributes.
+templ dashTimeChart(canvasID, kind, ariaLabel, suffix string, c SeriesData) {
+	<noscript>
+		<p class="mx-dash-empty">Chart requires JavaScript; the daily numbers table below has the same data.</p>
+	</noscript>
+	<div class="mx-dash-chart-wrap mx-dash-chart-wide">
+		<canvas
+			id={ canvasID }
+			class="mx-dash-chart"
+			role="img"
+			aria-label={ ariaLabel }
+			data-chart-type={ kind }
+			data-chart-suffix={ suffix }
+			data-chart-labels={ marshalJSON(c.Labels) }
+			data-chart-series={ c.SeriesJSON() }
+			if len(c.Details) > 0 {
+				data-chart-detail={ marshalJSON(c.Details) }
+			}
+		></canvas>
+	</div>
 }

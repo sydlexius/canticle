@@ -134,10 +134,10 @@
 }
 
 /* Inline mini hit-rate bar inside a Lyrics Sources tile (#318): a thin rail
- * with an accent-colored fill whose width encodes the hit-rate percent. The
+ * with a --mx-chart-hit colored fill whose width encodes the hit-rate percent. The
  * fill width is applied by chart-init.js from the data-hit-rate attribute (the
- * serve-mode CSP forbids an inline style="" width). The fill reuses --mx-accent
- * so it matches the former standalone hit-rate bar chart's series color. */
+ * serve-mode CSP forbids an inline style="" width). The fill uses the
+ * --mx-chart-hit token, the same color as the hit-rate legend swatch. */
 .mx-dash-tile-bar {
   margin-top: 0.5rem;
   width: 100%;
@@ -150,7 +150,7 @@
 .mx-dash-tile-bar-fill {
   width: 0; /* set client-side by chart-init.js from data-hit-rate */
   height: 100%;
-  background: var(--mx-accent);
+  background: var(--mx-chart-hit);
   border-radius: inherit;
 }
 
@@ -190,15 +190,23 @@
  * change. Status hues are semantic (success/error/warn) and intentionally
  * distinct from the blue accent so the queue doughnut segments stay legible. */
 .mx-dash-page {
-  --mx-chart-pending: #94a3b8;    /* slate-400: waiting, neutral */
-  --mx-chart-processing: #3b82f6; /* blue-500: active (matches --mx-accent) */
-  --mx-chart-finished: #22c55e;   /* green-500: success (word-synced, terminal) */
-  --mx-chart-settled: #2dd4bf;    /* teal-400: good, but can still be upgraded (#1139) */
-  --mx-chart-failed: var(--mx-status-failed);     /* red-500: failure (design-tokens.css) */
-  --mx-chart-deferred: var(--mx-status-deferred);   /* amber-500: no lyrics found yet, re-checked later (design-tokens.css) */
-  --mx-chart-unavailable: #8b5cf6; /* violet-500: exhausted-retired (#477); neither success nor active failure */
-  --mx-chart-grid: rgba(255, 255, 255, 0.08); /* matches --mx-surface-border */
-  --mx-chart-text: #94a3b8;       /* slate-400: axis/legend labels */
+  --mx-chart-pending: #8b9bb4;    /* neutral slate (Queued, Tier unknown, Not recorded) */
+  --mx-chart-processing: #7b8bff; /* periwinkle: Other */
+  --mx-chart-finished: #19e0a8;   /* aqua-green: word-synced / Finished */
+  --mx-chart-settled: #3fa9ff;    /* azure: line-synced / Settled */
+  --mx-chart-failed: #ff4d7a;     /* hot rose: errored */
+  --mx-chart-deferred: #ffb020;   /* amber: unsynced / retrying */
+  --mx-chart-unavailable: #b45cff; /* ultraviolet: instrumental / given up */
+  --mx-chart-hit: #19e0a8;        /* hit-rate legend swatch, strong end of the value ramp and the mini hit-rate bar fill */
+  /* Upstream names: hues kept clear of every result-type color and the rose error hue. */
+  --mx-chart-up-lyricfind: #c4e538;   /* lime */
+  --mx-chart-up-musixmatch: #ff8a4c;  /* coral */
+  --mx-chart-up-a: #2ad4ee;           /* hashed fallbacks for other upstreams */
+  --mx-chart-up-b: #f472d0;
+  --mx-chart-up-c: #d9c7a0;
+  --mx-chart-grid: rgba(165, 180, 207, 0.12);
+  --mx-chart-text: #a9b8d2;       /* axis/legend labels, 8.6:1 on #0b1120 */
+  --mx-chart-ink: #f1f5f9;        /* doughnut center total */
 }
 
 /* Sized wrapper: Chart.js responsive sizing needs a bounded parent (the canvas
@@ -217,22 +225,8 @@
 }
 
 /* -- Source page (#1300) --------------------------------------------------- */
-.mx-source-block {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.5rem;
-  align-items: flex-start;
-}
-
-.mx-source-block .mx-dash-chart-wrap {
-  margin-top: 0;
-  flex: 0 1 18rem;
-  width: 100%;
-}
-
 .mx-source-table {
-  flex: 1 1 22rem;
-  min-width: 0;
+  margin-top: 1.25rem;
 }
 
 .mx-source-num {
@@ -253,6 +247,14 @@
   outline: 2px solid var(--mx-sidebar-active-text);
   outline-offset: 2px;
 }
+
+/* Source trend (#1302): range links, wide time charts, collapsible table. */
+.mx-range-nav { display: flex; flex-wrap: wrap; gap: 1rem; margin: 0.75rem 0; }
+.mx-range-current { font-weight: 700; text-decoration: underline; }
+.mx-source-subtitle { font-size: 1rem; margin: 1rem 0 0; }
+.mx-dash-chart-wide { max-width: 48rem; width: 100%; }
+.mx-source-details { margin-top: 1rem; }
+.mx-source-details summary { cursor: pointer; }
 
 /* The unattributed link follows the tile grid, which has no bottom margin. */
 .mx-dash-tiles + .mx-dash-section-sub { margin-top: 0.875rem; }
