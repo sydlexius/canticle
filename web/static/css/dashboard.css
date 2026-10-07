@@ -150,7 +150,7 @@
 .mx-dash-tile-bar-fill {
   width: 0; /* set client-side by chart-init.js from data-hit-rate */
   height: 100%;
-  background: var(--mx-accent);
+  background: var(--mx-chart-hit);
   border-radius: inherit;
 }
 

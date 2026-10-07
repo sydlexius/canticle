@@ -782,11 +782,11 @@ body {
   border: 1px solid var(--mx-surface-border);
 }
 
-/* Word-synced: the #553 terminal rung. Green, matching the "success" hue
-   dashboard.css already uses for Finished in the queue chart (--mx-chart-finished is
-   page-scoped there, so the value is repeated here rather than shared). */
+/* Word-synced: the #553 terminal rung. Green, matching the aqua-green
+   dashboard.css uses for Finished (--mx-chart-finished is page-scoped there, so
+   a nearby green is repeated here rather than shared; it is not the same value). */
 .mx-result-tier-word {
-  color: #22c55e; /* green-500: matches --mx-chart-finished's success hue */
+  color: #22c55e; /* green-500: the success green, near --mx-chart-finished (#19e0a8) */
   background: rgba(34, 197, 94, 0.12);
 }
 
@@ -807,18 +807,18 @@ body {
 }
 
 /* Needs attention (#654 AC2): failed and deferred rows, which have no lyric
-   outcome, get their own hues (the dashboard chart's failed red and deferred
-   amber). The pill text names the state, so color is never the only signal.
-   The failed TEXT is red-400, one step lighter than the chart's red-500 (which
-   the tint keeps): red-500 text measured 4.27:1 on the Reports surface, under
-   WCAG AA's 4.5:1. */
+   outcome, get their own hues (near the dashboard chart's failed rose and
+   deferred amber). The pill text names the state, so color is never the only signal.
+   The failed TEXT is red-400, one step lighter than red-500 (which the tint
+   keeps): red-500 text measured 4.27:1 on the Reports surface, under WCAG AA's
+   4.5:1. The chart's own failed token is the hot rose --mx-chart-failed. */
 .mx-result-tier-failed {
-  color: #f87171; /* red-400; the tint below is --mx-chart-failed red-500 */
+  color: #f87171; /* red-400; the tint below is red-500 */
   background: rgba(239, 68, 68, 0.12);
 }
 
 .mx-result-tier-deferred {
-  color: #f59e0b; /* amber-500: matches --mx-chart-deferred */
+  color: #f59e0b; /* amber-500: near --mx-chart-deferred (#ffb020) */
   background: rgba(245, 158, 11, 0.12);
 }
 

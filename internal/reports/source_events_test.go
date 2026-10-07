@@ -27,7 +27,7 @@ func TestSourceEvents(t *testing.T) {
 		}
 	}
 	repo := reports.New(sqlDB)
-	got, err := repo.SourceEvents(ctx, time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC), time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC))
+	got, err := reports.SourceEventsForTest(repo, ctx, time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC), time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestSourceEvents(t *testing.T) {
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("rows = %v, want %v", got, want)
 	}
-	if none, err := repo.SourceEvents(ctx, time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)); err != nil || len(none) != 0 {
+	if none, err := reports.SourceEventsForTest(repo, ctx, time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)); err != nil || len(none) != 0 {
 		t.Errorf("inverted range = %v, %v; want empty", none, err)
 	}
 }

@@ -108,13 +108,17 @@
 
   // catColor: the single resolver for a category's color.
   function catColor(label) {
-    var v = CAT_VARS[label] || FALLBACK_COLOR_VARS[hashLabel(String(label)) % FALLBACK_COLOR_VARS.length];
+    var v = (Object.prototype.hasOwnProperty.call(CAT_VARS, label) && CAT_VARS[label]) || FALLBACK_COLOR_VARS[hashLabel(String(label)) % FALLBACK_COLOR_VARS.length];
     return resolveVar(probe, v, accentColor);
   }
 
   function rgb(hex) {
-    var h = hex.replace('#', '');
+    var h = String(hex).replace('#', '');
     if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    if (!/^[0-9a-fA-F]{6}$/.test(h)) {
+      console.error('chart-init: expected a hex color token, got ' + JSON.stringify(hex) + '; using neutral gray');
+      return [139, 155, 180];
+    }
     return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
   }
   function rgba(hex, a) { var c = rgb(hex); return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }

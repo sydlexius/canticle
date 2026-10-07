@@ -100,7 +100,7 @@ func TestSourceTrend(t *testing.T) {
 	})
 	t.Run("no history yet", func(t *testing.T) {
 		code, body := getSource(t, mux, "/sources/petitlyrics")
-		if code != http.StatusOK || !strings.Contains(body, "No history yet") || strings.Contains(body, "data-chart-series") {
+		if code != http.StatusOK || !strings.Contains(body, "No daily counts in the last 90 days") || strings.Contains(body, "data-chart-series") {
 			t.Errorf("status=%d, want 200 with the no-history note and no trend chart", code)
 		}
 	})
@@ -164,5 +164,43 @@ func TestTrendTypeLabelsAreResultBuckets(t *testing.T) {
 	want := []string{"Word-synced", "Line-synced", "Unsynced", "Instrumental"}
 	if got := trendTypeLabels(); !slices.Equal(got, want) {
 		t.Errorf("trendTypeLabels = %q, want %q", got, want)
+	}
+}
+
+// TestSourceTrendQueryFailureIs500 (#1302): the breakdown succeeds but the
+// trend read fails, so the page must be a 500 with no chart, never a 200 page
+// that silently drops the trend.
+func TestSourceTrendQueryFailureIs500(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	seedSources(t, sqlDB)
+	seedEvent(t, sqlDB, 0, "musixmatch", "hit", 1)
+	mux := newTrendServer(t, sqlDB, trendNow)
+	if _, err := sqlDB.ExecContext(context.Background(), `DROP TABLE source_event_daily`); err != nil {
+		t.Fatal(err)
+	}
+	code, body := getSource(t, mux, "/sources/musixmatch")
+	if code != http.StatusInternalServerError || strings.Contains(body, "data-chart-series") {
+		t.Errorf("status=%d, want 500 and no chart", code)
+	}
+}
+
+// TestSourcePagesTilesHaveNoEmptyTitle: result-type tiles carry their
+// resultBuckets tooltip, and a tile without one omits the attribute.
+func TestSourcePagesTilesHaveNoEmptyTitle(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	seedSources(t, sqlDB)
+	mux := newTrendServer(t, sqlDB, trendNow)
+	for _, path := range []string{"/sources/musixmatch", unattributedPath} {
+		code, body := getSource(t, mux, path)
+		if code != http.StatusOK {
+			t.Fatalf("%s: status %d", path, code)
+		}
+		if strings.Contains(body, `title=""`) {
+			t.Errorf("%s: empty title attribute emitted", path)
+		}
+	}
+	_, body := getSource(t, mux, "/sources/musixmatch")
+	if !strings.Contains(body, `title="`+resultBuckets[0].Tooltip) {
+		t.Error("word-synced tile lost its tooltip")
 	}
 }

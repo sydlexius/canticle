@@ -106,12 +106,12 @@ templ dashQueueTiles(tiles []StatTile, chart ChartData) {
 templ dashStatTiles(tiles []StatTile) {
 	<div class="mx-dash-tiles" role="list">
 		if len(tiles) == 0 {
-			<p class="mx-dash-empty">No queue data available.</p>
+			<p class="mx-dash-empty">No data available.</p>
 		}
 		for _, t := range tiles {
-			<div class="mx-dash-tile" role="listitem" title={ t.Tooltip }>
+			<div class="mx-dash-tile" role="listitem" if t.Tooltip != "" { title={ t.Tooltip } }>
 				if t.Href != "" {
-					<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title={ t.Tooltip }>
+					<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } if t.Tooltip != "" { title={ t.Tooltip } }>
 						<span class="mx-dash-tile-label">{ t.Label }</span>
 						<span class="mx-dash-tile-value">{ t.Value }</span>
 					</a>

@@ -102,7 +102,7 @@ func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]rep
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	view.Trend = templates.TrendView{Days: days, Ranges: trendRanges(r.URL.EscapedPath(), days)}
+	view.Trend = templates.TrendView{Ranges: trendRanges(r.URL.EscapedPath(), days)}
 	if sb.Unattributed {
 		// The recorder ignores an empty lane, so this group has no daily counters.
 		view.Trend.Note = "Daily history is not recorded for unattributed tracks: they have no source to count."
@@ -162,7 +162,7 @@ func trendTypeLabels() []string {
 // no-attempt day stays nil (a gap); the chart is skipped when it has no point.
 func fillTrend(v *templates.TrendView, tr reports.SourceTrend) {
 	if !tr.HasHistory {
-		v.Note = "No history yet: no daily counts have been recorded for this source."
+		v.Note = "No daily counts in the last 90 days."
 		return
 	}
 	hit := templates.TrendSeries{Label: "Hit rate (%)"}
@@ -244,7 +244,7 @@ func buildSourceView(sb reports.SourceBreakdown, top reports.TopRung) templates.
 	// Every type is a tile and a legend entry, zero included, as on the dashboard.
 	for i, l := range labels {
 		n := strconv.FormatInt(vals[i], 10)
-		t.Tiles = append(t.Tiles, templates.StatTile{Label: l, Value: n, Href: sourceTypeLink(sb, l, top)})
+		t.Tiles = append(t.Tiles, templates.StatTile{Label: l, Value: n, Href: sourceTypeLink(sb, l, top), Tooltip: resultBuckets[i].Tooltip})
 		t.Chart.Labels = append(t.Chart.Labels, l)
 		t.Chart.Values = append(t.Chart.Values, float64(vals[i]))
 	}

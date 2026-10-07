@@ -87,7 +87,6 @@ type TrendRange struct {
 type TrendView struct {
 	Note      string
 	Ranges    []TrendRange
-	Days      int
 	Hit       SeriesData
 	Types     SeriesData
 	TableRows []SourceRow

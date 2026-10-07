@@ -14,17 +14,13 @@ type SourceEventCount struct {
 	Count int64
 }
 
-// SourceEvents returns the per-day, per-source counters for the UTC days from
-// through to (inclusive), ordered by day, lane, event. Delivered-type events
-// (word/line/unsynced/instrumental) count landings, not distinct tracks: a track
-// delivered line and later rechecked to word counts both. hit and miss mirror
-// the provider_outcomes credits. Consumer: the #1302 chart.
-func (r *Repo) SourceEvents(ctx context.Context, from, to time.Time) ([]SourceEventCount, error) {
-	return r.sourceEvents(ctx, from, to, "")
-}
-
-// sourceEvents reads the counter rows in [from, to]; a non-empty lane scopes
+// sourceEvents returns the per-day, per-source counters for the UTC days from
+// through to (inclusive), ordered by day, lane, event; a non-empty lane scopes
 // the read to that lane in SQL (the primary key is (day, lane, event)).
+// Delivered-type events (word/line/unsynced/instrumental) count landings, not
+// distinct tracks: a track delivered line and later rechecked to word counts
+// both. hit and miss mirror the provider_outcomes credits. Consumer:
+// SourceTrend (#1302).
 func (r *Repo) sourceEvents(ctx context.Context, from, to time.Time, lane string) ([]SourceEventCount, error) {
 	q := `SELECT day, lane, event, count FROM source_event_daily WHERE day >= ? AND day <= ?`
 	args := []any{from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02")}
