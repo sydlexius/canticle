@@ -1255,6 +1255,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// and exposed via GET /metrics (mxlrcgo_provider_hits_total{lane},
 	// mxlrcgo_provider_misses_total{lane}).
 	configureWorkerProviderRecorder(w, workQ)
+	w.SetSourceEventRecorder(workQ)
 
 	// Trusted-network policy gates GET /metrics (#204, S3). CIDRs were already
 	// validated at config load; rebuild here for the listener. A build failure
