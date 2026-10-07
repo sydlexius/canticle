@@ -97,6 +97,7 @@ type Handler struct {
 	pathChecker        func(string) error
 	webui              *web.UI
 	wordSyncOff        bool // output.word_sync_mode = off in the UI's config: line is the reports' top rung (#1275)
+	noWordLane         bool // no word-capable lane is enabled in config: line is the reports' top rung too (#1350)
 	onboarding         *web.Onboarding
 	reportsDB          *sql.DB
 	editDurations      *audiodur.Store
@@ -237,6 +238,16 @@ func WithWebUI(cfg config.Config, version string) Option {
 		h.webui = web.NewUI(cfg, version)
 		h.wordSyncOff = cfg.Output.WordSyncMode == config.WordSyncModeOff
 	}
+}
+
+// WithNoWordLane declares that no word-capable lane is enabled in config, so no
+// row can reach the word tier and line is the reports' top rung (#1350), as with
+// word_sync_mode = off. Serve derives it once at startup from the same lane list
+// the worker is built from (providers.AnyWordCapable); it follows configuration,
+// never lane health. Re-enabling a lane takes effect at the next serve start and
+// rewrites no row: the Finished/Settled split is decided per query.
+func WithNoWordLane(none bool) Option {
+	return func(h *Handler) { h.noWordLane = none }
 }
 
 // WithTrustedNetworks wires the trusted-network policy that gates GET /metrics
@@ -387,7 +398,7 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 			h.webui.AttachOnboarding(h.onboarding)
 		}
 		if h.reportsDB != nil {
-			h.webui.AttachReports(reports.New(h.reportsDB, reports.WithLineTopRung(h.wordSyncOff)))
+			h.webui.AttachReports(reports.New(h.reportsDB, reports.WithLineTopRung(h.wordSyncOff || h.noWordLane)))
 			h.webui.AttachQueueActions(queue.NewDBQueue(h.reportsDB))
 			h.webui.AttachLyricEditor(web.EditDeps{
 				Queue: queue.NewDBQueue(h.reportsDB), Durations: h.editDurations, SelfWrites: h.editSelfWrites,

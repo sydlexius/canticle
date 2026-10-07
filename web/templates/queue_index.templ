@@ -41,7 +41,7 @@ templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musix
 // queueIndexHint is the player hint for a bucket row, or "" for a bucket with
 // no Preview links. Finished rows are word-tier, which the preview page opens
 // read-only (fillPreviewEditor); Settled rows can hold line-synced tracks,
-// which get the offset editor. With word sync off (lineTop, #1275) the
+// which get the offset editor. With no reachable word tier (lineTop, #1275/#1350) the
 // line-synced tracks are Finished, so the editor hint moves with them and
 // Settled holds no previewable track.
 func queueIndexHint(href string, lineTop bool) string {

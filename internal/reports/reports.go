@@ -37,8 +37,8 @@ type TopRung uint8
 const (
 	// TopRungWord means word sync is on, so only the word tier is finished (#553).
 	TopRungWord TopRung = iota
-	// TopRungLine means output.word_sync_mode is off, so no row can reach the word
-	// tier and a settled line-synced row is finished too.
+	// TopRungLine means no row can reach the word tier (output.word_sync_mode is off
+	// or no word-capable lane is enabled, #1350) and a settled line-synced row is finished too.
 	TopRungLine
 )
 
@@ -46,7 +46,7 @@ const (
 type Option func(*Repo)
 
 // WithLineTopRung selects TopRungLine when on (serve wires it from
-// output.word_sync_mode = off). The rung is decided in every query, never
+// output.word_sync_mode = off or no enabled word-capable lane, #1350). The rung is decided in every query, never
 // stored on a row, so a restart under a new mode re-buckets with no backfill.
 func WithLineTopRung(on bool) Option {
 	return func(r *Repo) {
@@ -98,7 +98,7 @@ type QueueSummary struct {
 	// runs) counts as SettledUpgradable: nothing proves it terminal, and the
 	// counter must never overstate what is finished.
 	//
-	// Under TopRungLine (word sync off, #1275) Finished also counts settled
+	// Under TopRungLine (no reachable word tier, #1275/#1350) Finished also counts settled
 	// line-synced rows (lineFinishedPredicate), since no row can reach the word
 	// tier there; the pair still sums to Done by the same derivation.
 	Finished          int64
