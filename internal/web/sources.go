@@ -3,10 +3,12 @@ package web
 import (
 	"context"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/providers"
@@ -94,7 +96,80 @@ func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]rep
 		http.NotFound(w, r)
 		return
 	}
-	render(w, r, templates.SourcePage(u.version, buildSourceView(sb, u.reports.TopRung()), u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+	view := buildSourceView(sb, u.reports.TopRung())
+	days := parseTrendRange(r.URL.Query()["range"])
+	view.Trend = templates.TrendView{Days: days, Ranges: trendRanges(r.URL.EscapedPath(), days)}
+	if sb.Unattributed {
+		// The recorder ignores an empty lane, so this group has no daily counters.
+		view.Trend.Note = "Daily history is not recorded for unattributed tracks: they have no source to count."
+	} else if tr, err := u.reports.SourceTrend(r.Context(), sb.Lane, time.Now(), days); err != nil {
+		slog.Error("source page: trend failed", "error", err)
+		http.Error(w, "source trend failed", http.StatusInternalServerError)
+		return
+	} else {
+		fillTrend(&view.Trend, tr)
+	}
+	render(w, r, templates.SourcePage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+}
+
+// trendRangeDays are the selectable windows; trendDefaultDays applies when the
+// range parameter is absent, unknown or repeated.
+var trendRangeDays = []int{7, 30, 90}
+
+const trendDefaultDays = 30
+
+func parseTrendRange(vals []string) int {
+	if len(vals) == 1 {
+		if n, err := strconv.Atoi(vals[0]); err == nil && slices.Contains(trendRangeDays, n) {
+			return n
+		}
+	}
+	return trendDefaultDays
+}
+
+func trendRanges(path string, cur int) []templates.TrendRange {
+	var out []templates.TrendRange
+	for _, d := range trendRangeDays {
+		out = append(out, templates.TrendRange{Label: strconv.Itoa(d) + " days", Href: path + "?range=" + strconv.Itoa(d), Current: d == cur})
+	}
+	return out
+}
+
+// fillTrend turns the data-layer trend into chart series and table rows. A
+// no-attempt day stays nil (a gap); the chart is skipped when it has no point.
+func fillTrend(v *templates.TrendView, tr reports.SourceTrend) {
+	if !tr.HasHistory {
+		v.Note = "No history yet: no daily counts have been recorded for this source."
+		return
+	}
+	hit := templates.TrendSeries{Label: "Hit rate (%)"}
+	typ := map[string]*templates.TrendSeries{}
+	order := []string{"Word-synced", "Line-synced", "Unsynced", "Instrumental"}
+	for _, l := range order {
+		typ[l] = &templates.TrendSeries{Label: l}
+	}
+	for _, d := range tr.Days {
+		v.Hit.Labels = append(v.Hit.Labels, d.Day)
+		var p *float64
+		cell := "-"
+		if d.HitRate != nil {
+			r := math.Round(*d.HitRate*10) / 10
+			p, cell = &r, strconv.FormatFloat(r, 'f', 1, 64)+"%"
+		}
+		hit.Data = append(hit.Data, p)
+		cells := []string{cell, strconv.FormatInt(d.Hits, 10), strconv.FormatInt(d.Misses, 10)}
+		for i, n := range []int64{d.Word, d.Line, d.Unsynced, d.Instrumental} {
+			f := float64(n)
+			typ[order[i]].Data = append(typ[order[i]].Data, &f)
+			cells = append(cells, strconv.FormatInt(n, 10))
+		}
+		v.TableRows = append(v.TableRows, templates.SourceRow{Label: d.Day, Cells: cells})
+	}
+	v.Hit.Series = []templates.TrendSeries{hit}
+	v.Types.Labels = v.Hit.Labels
+	for _, l := range order {
+		v.Types.Series = append(v.Types.Series, *typ[l])
+	}
 }
 
 // typeCellsFor lists counts in resultBuckets order (the Results tiles' labels).

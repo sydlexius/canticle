@@ -254,6 +254,14 @@
   outline-offset: 2px;
 }
 
+/* Source trend (#1302): range links, wide time charts, collapsible table. */
+.mx-range-nav { display: flex; flex-wrap: wrap; gap: 1rem; margin: 0.75rem 0; }
+.mx-range-current { font-weight: 700; text-decoration: underline; }
+.mx-source-subtitle { font-size: 1rem; margin: 1rem 0 0; }
+.mx-dash-chart-wide { max-width: 48rem; width: 100%; }
+.mx-source-details { margin-top: 1rem; }
+.mx-source-details summary { cursor: pointer; }
+
 /* The unattributed link follows the tile grid, which has no bottom margin. */
 .mx-dash-tiles + .mx-dash-section-sub { margin-top: 0.875rem; }
 
