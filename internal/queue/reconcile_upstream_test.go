@@ -59,3 +59,38 @@ func TestSetUpstreamIfPending_RaceGuard(t *testing.T) {
 		t.Errorf("backup failure left upstream %q", up.String)
 	}
 }
+
+// TestListUpstreamCandidates: only done or processing rows on a requested lane
+// with a NULL upstream are listed, in id order; no lanes lists nothing.
+func TestListUpstreamCandidates(t *testing.T) {
+	ctx := context.Background()
+	q, sqlDB := upgradeQueue(t)
+	seed := func(key, status, lane string, upstream any) int64 {
+		var id int64
+		if err := sqlDB.QueryRowContext(ctx,
+			`INSERT INTO work_queue (artist, title, artist_key, title_key, source_path, status, provider_lane, upstream)
+             VALUES ('A', ?, ?, ?, '/x/'||?||'.flac', ?, ?, ?) RETURNING id`, key, key, key, key, status, lane, upstream).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	done := seed("a", "done", "innertube", nil)
+	proc := seed("b", "processing", "innertube", nil)
+	seed("filled", "done", "innertube", "musixmatch")
+	seed("pending", "pending", "innertube", nil)
+	seed("otherlane", "done", "petitlyrics", nil)
+
+	got, err := q.ListUpstreamCandidates(ctx, []string{"innertube"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != done || got[1].ID != proc || got[1].Status != "processing" || got[0].Lane != "innertube" || got[0].AudioPath != "/x/a.flac" {
+		t.Errorf("candidates = %+v; want done then processing innertube rows only", got)
+	}
+	if none, err := q.ListUpstreamCandidates(ctx, nil); err != nil || none != nil {
+		t.Errorf("no lanes: %v %v; want nil, nil", none, err)
+	}
+	if ok, err := q.SetUpstreamIfPending(ctx, UpstreamCandidate{ID: done, Lane: "innertube"}, "", nil); ok || err == nil {
+		t.Errorf("empty upstream: ok=%v err=%v; want false + error", ok, err)
+	}
+}
