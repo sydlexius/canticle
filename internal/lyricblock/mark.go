@@ -71,6 +71,8 @@ type MarkRequest struct {
 	// Report receives one Backup per file about to be removed (again for a file
 	// that appeared or changed since), BEFORE it is removed. It must make the
 	// record durable (see AppendBackup); an error aborts the mark.
+	// A nil Report with a file to remove fails with ErrNoBackupSink before
+	// anything changes.
 	Report func(Backup) error
 }
 

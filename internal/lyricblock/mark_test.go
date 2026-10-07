@@ -78,7 +78,12 @@ func (f *fx) mustExec(t *testing.T, q string) {
 	}
 }
 
+// req builds a request; a nil report becomes a no-op sink, since a mark with
+// files and no Report is refused (ErrNoBackupSink).
 func (f *fx) req(report func(Backup) error) MarkRequest {
+	if report == nil {
+		report = func(Backup) error { return nil }
+	}
 	return MarkRequest{WorkItemID: f.id, Roots: []string{f.root}, Report: report}
 }
 
@@ -384,5 +389,17 @@ func TestMarkBlocksEveryFormTheNextFetchCanTake(t *testing.T) {
 				t.Error("an unrelated body is blocked")
 			}
 		})
+	}
+}
+
+func TestMarkWithoutAReportSinkRefusesAndChangesNothing(t *testing.T) {
+	f := newFx(t)
+	f.write(t, "song.lrc", lrcBody)
+	_, err := f.svc.Mark(f.ctx, MarkRequest{WorkItemID: f.id, Roots: []string{f.root}})
+	if !errors.Is(err, ErrNoBackupSink) {
+		t.Fatalf("err = %v, want ErrNoBackupSink", err)
+	}
+	if !f.exists("song.lrc") || f.count(t, `SELECT COUNT(*) FROM lyric_blocks`) != 0 || f.status(t) != "done" {
+		t.Error("a refused mark changed state")
 	}
 }
