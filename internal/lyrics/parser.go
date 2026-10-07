@@ -58,27 +58,31 @@ func ReadProvenanceTags(path string) (ProvenanceTags, error) {
 const MaxHeaderBytes = 32 << 10
 
 // ReadProvenanceHeader is ReadProvenanceTags for a caller that must not trust
-// the file: it opens with O_NOFOLLOW|O_NONBLOCK where the platform has them,
-// requires the opened handle to be a regular file (a FIFO or device swapped in
-// after a stat is refused, never blocked on) and reads at most MaxHeaderBytes.
+// the file: an Lstat plus a no-follow open (O_NOFOLLOW|O_NONBLOCK where the
+// platform has them) whose handle must be the same regular file (a symlink,
+// FIFO or device swapped in is refused, never blocked on), and it reads at most
+// MaxHeaderBytes.
 func ReadProvenanceHeader(path string) (ProvenanceTags, error) {
-	f, err := openNoFollow(path)
+	tags, err := readHeaderTags(path)
 	if err != nil {
-		return ProvenanceTags{}, fmt.Errorf("open: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil {
-		return ProvenanceTags{}, fmt.Errorf("stat: %w", err)
-	}
-	if !fi.Mode().IsRegular() {
-		return ProvenanceTags{}, errNotRegular
-	}
-	tags, _, err := parseLRCHeaderFrom(io.LimitReader(f, MaxHeaderBytes))
-	if err != nil {
-		return ProvenanceTags{}, fmt.Errorf("scan: %w", err)
+		return ProvenanceTags{}, err
 	}
 	return provenanceFromTags(tags), nil
+}
+
+// readHeaderTags is the bounded, no-follow, regular-file-only header read
+// shared by ReadProvenanceHeader and the ownership probe.
+func readHeaderTags(path string) ([]lrcTag, error) {
+	f, _, err := openRegularNoFollow(path)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	tags, _, err := parseLRCHeaderFrom(io.LimitReader(f, MaxHeaderBytes))
+	if err != nil {
+		return nil, fmt.Errorf("scan: %w", err)
+	}
+	return tags, nil
 }
 
 func provenanceFromTags(tags []lrcTag) ProvenanceTags {

@@ -768,7 +768,7 @@ func companionOwnershipOfErr(path string) (companionOwnership, error) {
 	if !fi.Mode().IsRegular() {
 		return companionForeign, nil
 	}
-	tags, _, err := parseLRCHeader(path)
+	tags, err := readHeaderTags(path)
 	if err != nil {
 		return companionForeign, fmt.Errorf("read companion header: %w", err)
 	}

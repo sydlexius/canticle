@@ -47,3 +47,32 @@ func TestReadProvenanceHeader_BoundedAndRegularOnly(t *testing.T) {
 		t.Error("symlink: want a refusal")
 	}
 }
+
+// TestIsOwnedCompanion_NoFollowAndBounded: the ownership probe reads through
+// the same bounded no-follow handle, so a symlinked companion is never owned
+// and a [by:] tag past MaxHeaderBytes is never seen.
+func TestIsOwnedCompanion_NoFollowAndBounded(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.elrc")
+	if err := os.WriteFile(real, []byte("[by:canticle]\n[00:01.00]la\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !IsOwnedCompanion(real) {
+		t.Fatal("regular owned companion not recognized")
+	}
+	link := filepath.Join(dir, "link.elrc")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if IsOwnedCompanion(link) {
+		t.Error("symlinked companion must not be owned")
+	}
+	late := filepath.Join(dir, "late.elrc")
+	body := "[" + strings.Repeat("x", MaxHeaderBytes) + ":v]\n[by:canticle]\n"
+	if err := os.WriteFile(late, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if IsOwnedCompanion(late) {
+		t.Error("[by:] past the cap must not be read")
+	}
+}
