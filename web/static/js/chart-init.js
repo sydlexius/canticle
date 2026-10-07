@@ -143,7 +143,9 @@
         var items = gen(chart);
         items.forEach(function (it) {
           var c = colors[doughnut ? it.index : it.datasetIndex];
-          it.fillStyle = c; it.strokeStyle = c; it.lineWidth = 0;
+          // The doughnut generator sets no borderRadius on its items, so set it
+          // here or doughnut swatches render square beside the rounded bar ones.
+          it.fillStyle = c; it.strokeStyle = c; it.lineWidth = 0; it.borderRadius = 4;
         });
         return items;
       },
