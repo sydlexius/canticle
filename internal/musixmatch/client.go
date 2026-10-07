@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sydlexius/canticle/internal/lrcnormalize"
 	"github.com/sydlexius/canticle/internal/models"
@@ -57,9 +58,9 @@ var (
 	// circuit-breaker signal.
 	ErrRateLimited = errors.New("musixmatch: rate limited")
 	// ErrForbidden indicates HTTP 403 on a lookup: the provider (or its edge)
-	// refused the request outright, as when the egress address is blocked
-	// (#1372). It is neither throttling nor a token rejection, and waiting does
-	// not fix it, so it is kept apart from ErrRateLimited and ErrUnauthorized.
+	// refused the request outright, usually because the egress address is
+	// blocked (#1372). It is kept apart from ErrRateLimited and
+	// ErrUnauthorized: it is not handled as throttling or as a token rejection.
 	ErrForbidden = errors.New("musixmatch: forbidden")
 	// ErrNotFound indicates HTTP 404 or an inner status_code 404 from the
 	// Musixmatch API meaning no matching track or lyrics were found.
@@ -385,9 +386,15 @@ func (c *Client) tokenRenewer() TokenRenewer {
 
 // NewClient creates a new Musixmatch API client.
 func NewClient(token string) *Client {
+	return NewClientWithHTTP(token, &http.Client{Timeout: 30 * time.Second})
+}
+
+// NewClientWithHTTP is NewClient over the caller's HTTP client, so a test in
+// another package can route the client without touching http.DefaultTransport.
+func NewClientWithHTTP(token string, httpClient *http.Client) *Client {
 	return &Client{
 		Token:      token,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: httpClient,
 		now:        time.Now,
 		sleep:      ctxSleep,
 	}
@@ -680,6 +687,13 @@ func (forbiddenError) Is(target error) bool { return target == ErrForbidden }
 func errorBodyPrefix(body io.Reader) string {
 	const maxPrefix = 120
 	b, _ := io.ReadAll(io.LimitReader(body, maxPrefix))
+	// The byte limit can split a multi-byte rune; drop the partial one.
+	for i := 0; i < utf8.UTFMax-1 && len(b) > 0; i++ {
+		if r, size := utf8.DecodeLastRune(b); r != utf8.RuneError || size != 1 {
+			break
+		}
+		b = b[:len(b)-1]
+	}
 	return strings.Join(strings.Fields(string(b)), " ")
 }
 

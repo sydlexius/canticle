@@ -1554,10 +1554,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		failErr := w.fail(ctx, item, err)
 		var partial *orchestrator.PartialFailureError
 		if failErr == nil && errors.As(err, &partial) {
-			// One lane failed but another answered (#1372): the row keeps its own
-			// retry (queue.Fail, no miss charged), while the worker-global backoff
-			// is not fed. It exists for a dispatch in which no lane answered, and
-			// here it would stall rows the answering lanes can settle.
+			// One lane failed and is now open, and another answered (#1372): the
+			// row keeps its own retry (queue.Fail, no miss charged), while the
+			// worker-global backoff is not fed; later rows skip the open lane.
+			// Rows the answering lanes miss meanwhile are charged a miss (#1374).
 			w.consecutiveFailures = 0
 		}
 		return failErr

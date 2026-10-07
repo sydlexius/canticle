@@ -107,6 +107,22 @@ func TestDashboard_RefusedLane(t *testing.T) {
 	}
 }
 
+// A refused lane being re-probed (half-open) still reads as refused, not as a
+// neutral "Probing": the refusal stands until a probe is answered (#1372).
+func TestDashboard_RefusedLaneHalfOpen(t *testing.T) {
+	health := []orchestrator.LaneState{
+		{Provider: "musixmatch", State: orchestrator.LaneStateHalfOpen, Refused: true, EverSucceeded: true},
+		{Provider: "petitlyrics", State: orchestrator.LaneStateHalfOpen, EverSucceeded: true},
+	}
+	body := getDashboard(t, laneHealthTestUI(t, threeLanes, func() []orchestrator.LaneState { return health }))
+	if want := statusSpan("failing", "Refused by the provider (HTTP 403), probing again"); !strings.Contains(body, want) {
+		t.Errorf("dashboard missing %q", want)
+	}
+	if got := strings.Count(body, statusSpan("probing", "Probing")); got != 1 {
+		t.Errorf("plain Probing tiles = %d; want 1 (the lane that was not refused)", got)
+	}
+}
+
 // TestDashboard_HealthOnlyLaneGetsTile is the fresh-install bad-token case: no
 // lane_attempts rows at all, but the configured lane's breaker is open. It
 // must still get a tile (zero counts) with its status, not the empty state.

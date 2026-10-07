@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -322,6 +323,10 @@ func TestWordRecheck_UnansweredStaysQueued(t *testing.T) {
 		// Held words while another word lane did not answer (plan 2.4 row 4).
 		{"held words, other lane throttled", &fakeFetcher{song: held}, &fakeFetcher{err: petitlyrics.ErrRateLimited}, false, nil, 0},
 		{"verifier error", &fakeFetcher{song: words}, nil, true, nil, 3},
+		// A refusal opens its lane and the other word lane answered (#1372): no
+		// global backoff. A fault that leaves its lane closed still feeds it.
+		{"refused lane, other lane missed", &fakeFetcher{err: fmt.Errorf("edge: %w", musixmatch.ErrForbidden)}, nil, false, nil, 0},
+		{"server fault, other lane missed", &fakeFetcher{err: errors.New("status 500")}, nil, false, nil, 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

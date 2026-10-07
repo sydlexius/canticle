@@ -62,11 +62,13 @@ func (e *RefusedUntriedError) Unwrap() error { return ErrTimingRefusedUntried }
 
 // PartialFailureError is how the dispatch (never a lane) returns a lane's
 // transport-class failure when another lyrics lane ANSWERED the catalog
-// question with a clean miss (#1372). The failure still outranks the miss, so
-// the row is not charged one, but the worker must not treat it as "nothing is
-// reachable": its global backoff is for a dispatch in which no lane answered.
-// It renders and unwraps as the lane's error, so its class and stored text are
-// unchanged.
+// question with a clean miss AND every transport-failing lane's breaker is
+// open after the dispatch (#1372): later rows skip that lane. Today that is a
+// provider refusal (HTTP 403). The row is not charged a miss and the worker
+// does not feed its global backoff. A transport failure that leaves its lane
+// closed (5xx, bad body, dial/TLS/timeout) is returned plain and feeds that
+// backoff as before; bounding those is #1375. It renders and unwraps as the
+// lane's error, so its class and stored text are unchanged.
 type PartialFailureError struct{ Err error }
 
 func (e *PartialFailureError) Error() string { return e.Err.Error() }

@@ -52,8 +52,8 @@ type Lane struct {
 	drift   *respdrift.Detector
 	onDrift func(lane, run string)
 	// refused records that the lane's last resolve was refused by its provider
-	// (HTTP 403), so lane health can tell an open refused lane from a throttled
-	// one (#1372). Atomic: parallel dispatch runs lanes on their own goroutines.
+	// (HTTP 403), so lane health can tell an open or re-probing refused lane
+	// from a throttled one (#1372). It holds until the lane's next resolve. Atomic: parallel dispatch runs lanes on their own goroutines.
 	refused atomic.Bool
 }
 
@@ -67,6 +67,9 @@ func (l *Lane) Local() bool { return l.local }
 // the provider-name rule in providers.WordCapable, and never an
 // instrumental-only lane, whatever it is named.
 func (l *Lane) WordCapable() bool { return !l.instrumentalOnly && providers.WordCapable(l.name) }
+
+// open reports whether the lane's breaker is open right now.
+func (l *Lane) open() bool { return l.breaker.Snapshot().State == circuit.StateOpen }
 
 // Breaker exposes the lane's breaker (construction + tests asserting ramp state).
 func (l *Lane) Breaker() *circuit.Breaker { return l.breaker }
@@ -91,8 +94,10 @@ func (l *Lane) FindLyrics(ctx context.Context, track models.Track, sourcePath st
 	}
 
 	song, err := l.resolve(ctx, track, sourcePath)
-	l.refused.Store(errors.Is(err, musixmatch.ErrForbidden) ||
-		errors.Is(err, petitlyrics.ErrForbidden) || errors.Is(err, innertube.ErrForbidden))
+	// innertube.ErrClientVersion wraps ErrForbidden but is an HTTP 400 for a
+	// stale client version, not a refusal, so it is excluded first.
+	l.refused.Store(!errors.Is(err, innertube.ErrClientVersion) && (errors.Is(err, musixmatch.ErrForbidden) ||
+		errors.Is(err, petitlyrics.ErrForbidden) || errors.Is(err, innertube.ErrForbidden)))
 	if err != nil {
 		return models.Song{}, l.classifyErr(l, err)
 	}

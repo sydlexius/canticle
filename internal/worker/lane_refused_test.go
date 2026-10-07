@@ -3,12 +3,15 @@ package worker
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,51 +30,52 @@ import (
 
 const refusedToken = "synthetic-usertoken-1372"
 
-type rewriteTransport struct {
-	target *url.URL
-	next   http.RoundTripper
-}
+// musixmatchHost is the only host the test transport forwards; anything else
+// is refused, so no request can leave the machine.
+const musixmatchHost = "apic.musixmatch.com"
+
+type rewriteTransport struct{ target *url.URL }
 
 func (rt rewriteTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != musixmatchHost {
+		return nil, fmt.Errorf("test transport: refusing request to unexpected host %q", r.URL.Host)
+	}
 	r = r.Clone(r.Context())
 	r.URL.Scheme, r.URL.Host = rt.target.Scheme, rt.target.Host
-	return rt.next.RoundTrip(r)
+	return http.DefaultTransport.RoundTrip(r)
 }
 
-// refusingMusixmatch is the REAL Musixmatch client pointed at a local server
-// that answers every request the way an edge refusal does (#1372): HTTP 403
-// with an HTML body. Clearing refuse makes it answer 404, an ordinary miss.
-func refusingMusixmatch(t *testing.T) (client *musixmatch.Client, hits *atomic.Int64, refuse *atomic.Bool) {
+// stubbedMusixmatch is the REAL Musixmatch client over an HTTP client of its
+// own that reaches only a local server. The server answers every request with
+// status: 403 with an HTML body is an edge refusal (#1372), 500 an ordinary
+// server fault, 404 an ordinary miss.
+func stubbedMusixmatch(t *testing.T, initial int64) (client *musixmatch.Client, hits, status *atomic.Int64) {
 	t.Helper()
-	hits, refuse = &atomic.Int64{}, &atomic.Bool{}
-	refuse.Store(true)
+	hits, status = &atomic.Int64{}, &atomic.Int64{}
+	status.Store(initial)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		if !refuse.Load() {
-			w.WriteHeader(http.StatusNotFound)
-			return
+		code := int(status.Load())
+		w.WriteHeader(code)
+		if code != http.StatusNotFound {
+			_, _ = io.WriteString(w, "<html><head><title>refused</title></head><body>"+strings.Repeat("edge refusal ", 200)+"</body></html>")
 		}
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = io.WriteString(w, "<html><head><title>403 Forbidden</title></head><body>"+strings.Repeat("edge refusal ", 200)+"</body></html>")
 	}))
 	t.Cleanup(srv.Close)
 	target, err := url.Parse(srv.URL)
 	if err != nil {
 		t.Fatalf("parse server URL: %v", err)
 	}
-	// The client has no exported HTTP seam and uses the default transport, so
-	// the redirect is installed there for the life of this (non-parallel) test.
-	prev := http.DefaultTransport
-	http.DefaultTransport = rewriteTransport{target: target, next: prev}
-	t.Cleanup(func() { http.DefaultTransport = prev })
-	return musixmatch.NewClient(refusedToken), hits, refuse
+	hc := &http.Client{Timeout: 10 * time.Second, Transport: rewriteTransport{target: target}}
+	return musixmatch.NewClientWithHTTP(refusedToken, hc), hits, status
 }
 
 // titleFetcher is the healthy second lane: it has lyrics for "Held ..." titles
 // and answers a clean no-match for everything else.
-type titleFetcher struct{}
+type titleFetcher struct{ calls *atomic.Int64 }
 
-func (titleFetcher) FindLyrics(_ context.Context, t models.Track) (models.Song, error) {
+func (f titleFetcher) FindLyrics(_ context.Context, t models.Track) (models.Song, error) {
+	f.calls.Add(1)
 	if strings.HasPrefix(t.TrackName, "Held") {
 		return syncedTrackSong(t), nil
 	}
@@ -95,6 +99,51 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+// laneRig is the real worker, orchestrator, Musixmatch client and SQLite queue
+// with a healthy petitlyrics-named second lane and a frozen, settable clock.
+type laneRig struct {
+	w                           *Worker
+	db                          *sql.DB
+	hits, status, fallbackCalls *atomic.Int64
+	now                         time.Time
+	delays                      []time.Duration
+	enqueue                     func(title string)
+}
+
+func newLaneRig(t *testing.T, mode string, status int64) *laneRig {
+	t.Helper()
+	ctx := context.Background()
+	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	q := queue.NewDBQueue(sqlDB)
+	q.SetRandomized(false)
+	r := &laneRig{db: sqlDB, fallbackCalls: &atomic.Int64{}, now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
+	r.enqueue = func(title string) {
+		t.Helper()
+		if _, err := q.Enqueue(ctx, models.Inputs{
+			Track:      models.Track{ArtistName: "Synthetic Artist", TrackName: title},
+			Outdir:     "/out",
+			Filename:   title + ".lrc",
+			SourcePath: "/library/" + title + ".flac",
+		}, queue.PriorityScan); err != nil {
+			t.Fatalf("enqueue %q: %v", title, err)
+		}
+	}
+	var client *musixmatch.Client
+	client, r.hits, r.status = stubbedMusixmatch(t, status)
+	r.w = New(q, cache.New(sqlDB), client, &capturingWriter{})
+	r.w.SetFallbackProviders(providers.New(providers.PetitLyrics, titleFetcher{calls: r.fallbackCalls}))
+	r.w.SetProviderRecorder(q)
+	r.w.SetRecordingEnrichmentDefault(false)
+	r.w.SetProvidersMode(mode)
+	r.w.setClock(func() time.Time { return r.now })
+	r.w.sleep = func(_ context.Context, d time.Duration) { r.delays = append(r.delays, d) }
+	return r
+}
+
 // TestRun_RefusedLaneDoesNotStallQueue is the #1372 reproduction over the real
 // worker, orchestrator, Musixmatch client and SQLite queue: one lane is refused
 // with HTTP 403 on every call, the other is healthy. The queue must keep
@@ -110,48 +159,20 @@ func TestRun_RefusedLaneDoesNotStallQueue(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
 			t.Cleanup(func() { slog.SetDefault(prevLog) })
 
-			sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
-			if err != nil {
-				t.Fatalf("db.Open: %v", err)
-			}
-			t.Cleanup(func() { _ = sqlDB.Close() })
-			q := queue.NewDBQueue(sqlDB)
-			q.SetRandomized(false)
-			enqueue := func(title string) {
-				t.Helper()
-				if _, err := q.Enqueue(ctx, models.Inputs{
-					Track:      models.Track{ArtistName: "Synthetic Artist", TrackName: title},
-					Outdir:     "/out",
-					Filename:   title + ".lrc",
-					SourcePath: "/library/" + title + ".flac",
-				}, queue.PriorityScan); err != nil {
-					t.Fatalf("enqueue %q: %v", title, err)
-				}
-			}
+			rig := newLaneRig(t, mode, http.StatusForbidden)
+			w, sqlDB, hits := rig.w, rig.db, rig.hits
 			// A row the healthy lane misses comes first, so the refusal is seen by a
 			// dispatch in which both lanes report (parallel cancels a loser).
 			for _, title := range []string{"Missing 1", "Held 1", "Missing 2", "Held 2", "Held 3"} {
-				enqueue(title)
+				rig.enqueue(title)
 			}
-
-			client, hits, refuse := refusingMusixmatch(t)
-			writer := &capturingWriter{}
-			w := New(q, cache.New(sqlDB), client, writer)
-			w.SetFallbackProviders(providers.New(providers.PetitLyrics, titleFetcher{}))
-			w.SetProviderRecorder(q)
-			w.SetRecordingEnrichmentDefault(false)
-			w.SetProvidersMode(mode)
-			now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-			w.setClock(func() time.Time { return now })
-			var delays []time.Duration
-			w.sleep = func(_ context.Context, d time.Duration) { delays = append(delays, d) }
 
 			if err := w.Run(ctx); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 
-			if len(delays) != 0 {
-				t.Errorf("worker-global backoff delays = %v; want none while the healthy lane answers", delays)
+			if len(rig.delays) != 0 {
+				t.Errorf("worker-global backoff delays = %v; want none while the healthy lane answers", rig.delays)
 			}
 			type rowState struct {
 				status, lane, lastErr string
@@ -198,9 +219,9 @@ func TestRun_RefusedLaneDoesNotStallQueue(t *testing.T) {
 
 			// Recovery without a restart: the provider answers again and the open
 			// window has elapsed, so the next row probes the lane and closes it.
-			refuse.Store(false)
-			now = now.Add(2 * time.Hour)
-			enqueue("Missing 3")
+			rig.status.Store(http.StatusNotFound)
+			rig.now = rig.now.Add(2 * time.Hour)
+			rig.enqueue("Missing 3")
 			if err := w.Run(ctx); err != nil {
 				t.Fatalf("Run after recovery: %v", err)
 			}
@@ -210,8 +231,54 @@ func TestRun_RefusedLaneDoesNotStallQueue(t *testing.T) {
 			if h := w.LaneHealth()[0]; h.State != orchestrator.LaneStateClosed || h.Refused {
 				t.Errorf("recovered lane health = %+v; want closed and not Refused", h)
 			}
-			if len(delays) != 0 {
-				t.Errorf("worker-global backoff delays after recovery = %v; want none", delays)
+			if len(rig.delays) != 0 {
+				t.Errorf("worker-global backoff delays after recovery = %v; want none", rig.delays)
+			}
+		})
+	}
+}
+
+// A lane fault that does NOT open its breaker (HTTP 500 here) is not
+// lane-bounded, so with a clean miss on the other lane it still feeds the
+// worker-global backoff as on main; else every such row would re-ask both
+// providers on its own schedule forever (a lane-level bound is #1375).
+func TestRun_UnboundedLaneFaultFeedsGlobalBackoff(t *testing.T) {
+	for _, mode := range []string{orchestrator.ModeOrdered, orchestrator.ModeParallel} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			const rows = 4
+			rig := newLaneRig(t, mode, http.StatusInternalServerError)
+			for i := 1; i <= rows; i++ {
+				rig.enqueue(fmt.Sprintf("Missing %d", i))
+			}
+			w, sqlDB := rig.w, rig.db
+
+			if err := w.Run(ctx); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			// One growing global delay per failed row, as on main.
+			want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}
+			if !slices.Equal(rig.delays, want) {
+				t.Errorf("worker-global backoff delays = %v; want %v", rig.delays, want)
+			}
+			// Each lane is asked once per row in the pass, never more: the rows are
+			// not re-dispatched ahead of their own retry time.
+			if got := rig.hits.Load(); got != rows {
+				t.Errorf("faulting lane was asked %d times for %d rows", got, rows)
+			}
+			if got := rig.fallbackCalls.Load(); got != rows {
+				t.Errorf("answering lane was asked %d times for %d rows", got, rows)
+			}
+			var failed int
+			if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_queue WHERE status = 'failed' AND attempts = 1 AND miss_count = 0`).Scan(&failed); err != nil {
+				t.Fatalf("count failed rows: %v", err)
+			}
+			if failed != rows {
+				t.Errorf("failed rows = %d; want %d", failed, rows)
+			}
+			if h := w.LaneHealth()[0]; h.State != orchestrator.LaneStateClosed || h.Refused {
+				t.Errorf("faulting lane health = %+v; want closed and not Refused (a 500 does not open it)", h)
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -530,6 +531,18 @@ func TestFindLyricsInBodyInvalidTokenReturnsErrUnauthorized(t *testing.T) {
 	}
 	if !errors.Is(err, ErrTokenRenewalRequired) {
 		t.Fatalf("error = %v; want errors.Is(_, ErrTokenRenewalRequired) so the worker can treat hint=renew as a genuine auth failure", err)
+	}
+}
+
+// The body prefix is cut on a rune boundary: a multi-byte rune split by the
+// byte limit is dropped, never emitted as invalid UTF-8.
+func TestErrorBodyPrefixCutsOnRuneBoundary(t *testing.T) {
+	got := errorBodyPrefix(strings.NewReader(strings.Repeat("a", 119) + "\u00e9 tail"))
+	if !utf8.ValidString(got) || got != strings.Repeat("a", 119) {
+		t.Fatalf("prefix = %q (%d bytes); want 119 valid bytes with the split rune dropped", got, len(got))
+	}
+	if got := errorBodyPrefix(strings.NewReader("ab\u00e9")); got != "ab\u00e9" {
+		t.Fatalf("short body = %q; want it unchanged", got)
 	}
 }
 

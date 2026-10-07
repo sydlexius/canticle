@@ -33,7 +33,8 @@ type LaneState struct {
 	// EverSucceeded reports any successful resolve on this lane this session.
 	EverSucceeded bool
 	// Refused reports that the lane's last provider answer was a refusal (HTTP
-	// 403): while State is open, the lane is refused, not throttled (#1372).
+	// 403): while State is open or half-open, the lane is refused, not
+	// throttled (#1372). The next resolve that is not a refusal clears it.
 	Refused bool
 }
 

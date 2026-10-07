@@ -468,7 +468,8 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 
 // laneStatus maps one lane's breaker snapshot to its status class and words.
 // Half-open is "probing", reported apart from open: the lane takes its next
-// request even though it recently tripped. An open lane that has NEVER
+// request even though it recently tripped. A refused lane (HTTP 403) says so
+// in both states, since the refusal stands until a probe is answered. An open lane that has NEVER
 // succeeded this session is "failing", not "throttled": that is the
 // verify-your-token case (orchestrator resolve), and calling it throttling
 // would send the operator waiting instead of fixing config. A closed lane that
@@ -487,6 +488,10 @@ func laneStatus(h orchestrator.LaneState, now time.Time) (status, text string) {
 		}
 		return laneStatusThrottled, "Throttled, " + retryIn(h.OpenUntil, now)
 	case orchestrator.LaneStateHalfOpen:
+		if h.Refused {
+			// The refusal stands until a probe is answered (#1372).
+			return laneStatusFailing, "Refused by the provider (HTTP 403), probing again"
+		}
 		return laneStatusProbing, "Probing"
 	default:
 		if !h.EverSucceeded {
