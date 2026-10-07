@@ -317,6 +317,23 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 		// one failed) must not leave its successful siblings behind.
 		written, err := b.writeMarkers(item)
 		res.MarkersWritten += len(written)
+		var kept *lyrics.KeptError
+		manualKept := errors.As(err, &kept) && kept.Manual
+		if manualKept {
+			// A manual instrumental marker (#1218) is already on disk: the kept
+			// file IS the instrumental verdict, so the row must not be stamped
+			// not-instrumental. Take back any marker this run wrote at another
+			// output path (incomplete rollback: retry next cycle), then fall
+			// through to settle the row instrumental, which removes it from the
+			// candidate listing for good.
+			removed := b.rollback(written, &res)
+			res.MarkersWritten -= removed
+			if removed != len(written) {
+				b.reportOutcome(opts, Outcome{QueueID: item.ID, Status: OutcomeFailed})
+				continue
+			}
+			written, err = nil, nil
+		}
 		if errors.Is(err, lyrics.ErrKeptBetter) {
 			// Better lyrics are already on disk (#553), so no marker can land and
 			// the row must not settle instrumental. It must not stay unclassified

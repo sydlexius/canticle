@@ -10,8 +10,8 @@ import (
 
 // refuseManualMarker is the writer's hard guard for a manual instrumental
 // marker (#1218). It judges the .txt files this write would replace or remove
-// (the exact target when it is a .txt, plus every case variant of the opposite
-// .txt) and refuses when any is a manual marker. Unlike the rung comparison it
+// (the exact target when it is a .txt and its same-extension case variants,
+// plus every case variant of the opposite .txt) and refuses when any is a manual marker. Unlike the rung comparison it
 // ignores the candidate's rung and SetForceOverwrite: a synced .lrc outranks a
 // marker, and --update forces, yet neither may displace a hand-placed verdict.
 func (w *LRCWriter) refuseManualMarker(fp string, l sidecar.Listing) *KeptError {
@@ -20,7 +20,10 @@ func (w *LRCWriter) refuseManualMarker(fp string, l sidecar.Listing) *KeptError 
 	}
 	txts := staleSidecars(fp, l)
 	if sidecar.KindOf(fp) != sidecar.KindLineSynced {
-		txts = append(txts, fp)
+		// The exact target plus its same-extension case variants: on a
+		// case-sensitive filesystem a write to song.txt beside a manual
+		// Song.TXT would otherwise leave two markers. The listing is in hand.
+		txts = append(txts, l.Variants(fp)...) // includes fp itself when it exists
 	}
 	for _, p := range txts {
 		if sidecar.KindOf(p) == sidecar.KindLineSynced || !ManualMarkerOnDisk(p) {

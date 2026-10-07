@@ -1,6 +1,9 @@
 package lyrics
 
-import "bytes"
+import (
+	"bytes"
+	"strings"
+)
 
 // SourceManual is the [source:] token of an instrumental marker an operator
 // placed by hand (#1218). ManualLaneName is the models.Song.WinningLane that
@@ -15,7 +18,9 @@ const maxManualMarkerBytes = 64 << 10
 
 // IsManual reports whether the marker was placed by hand.
 func (p InstrumentalProvenance) IsManual() bool {
-	return p.Source == SourceManual
+	// Case-insensitive: the writer emits lowercase, but a hand-edited "Manual"
+	// is still an operator's verdict and must not be displaced.
+	return strings.EqualFold(p.Source, SourceManual)
 }
 
 // ManualMarkerOnDisk reports whether path is an instrumental marker carrying
