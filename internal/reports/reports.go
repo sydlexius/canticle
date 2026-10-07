@@ -284,9 +284,10 @@ const (
 	// would overstate what the library actually has.
 	ResultRejected ResultClass = "rejected"
 	// ResultUnknown means the row could not be classified: a NULL outcome_type
-	// that is not a miss. That is a legacy row that predates the column, a row
+	// that is not a miss. That is a legacy row that predates the column, or a row
 	// the timing guard quarantined or remediation retired (Detail carries
-	// "timing refused: ..."), or a row a prune retired.
+	// "timing refused: ..."). A row prune retired as unresolvable never reaches
+	// this classifier: Recent outcomes, its only caller, does not list it (#740).
 	//
 	// NARROWER THAN IT USED TO BE, and the change is the point of #655. Guard
 	// rejections also left outcome_type NULL, so this class silently covered two
@@ -339,8 +340,8 @@ type RecentOutcome struct {
 	// unknown row is never blank (#654 AC4: where last_error explains a row's
 	// state, it is reachable from the UI). On a settled row last_error is the
 	// CURRENT reason, never a leftover: every path that settles a row to done
-	// clears it or writes the reason it settled for (e.g. prune's
-	// queue.UnresolvableGoneError on a retired row whose file vanished). Rows
+	// clears it or writes the reason it settled for. (Prune's retirement sentinel,
+	// queue.UnresolvableGoneError, never appears here: that row is not listed.) Rows
 	// still in flight (failed, deferred) are NeedsAttention's, with the same
 	// normalization. Empty therefore remains only for outcomes that need no
 	// detail beyond their class (a plain synced write) and rejections settled
@@ -354,9 +355,13 @@ type RecentOutcome struct {
 	Detail string
 }
 
-// RecentOutcomes returns the most recently completed or retired
-// (status IN ('done','unavailable')) tracks, newest first by completed_at
-// (NULLs sorted last), capped at limit.
+// RecentOutcomes returns the most recently settled tracks (status 'done', or
+// 'unavailable' for an exhausted miss), newest first by completed_at (NULLs
+// sorted last), capped at limit.
+//
+// A row prune retired as unresolvable is excluded BEFORE the limit (#740; see
+// recentWhere), so a sweep retiring a batch of rows cannot push genuine fetch
+// outcomes out of the window.
 //
 // Failed and deferred rows are excluded ON PURPOSE (#654 AC1: this list holds
 // lyric classifications only); NeedsAttention lists them. completed_at, not
@@ -392,12 +397,13 @@ type RecentOutcome struct {
 // status='deferred', and this query's WHERE admits only 'done'/'unavailable',
 // so it is invisible to Recent Outcomes for the whole time it is queued --
 // unlike the retired sync-tier tiles, which included it deliberately (see
-// the #1200 removal of SyncTierCounts). The one done+queued shape reachable here is
-// prune.retireUnresolvable's retired row (#1039), which carries whatever
-// sync_tier it had BEFORE the recheck that was still in flight when it
-// retired; the word_timing_state <> 'queued' guard on the word_synced/
-// line_synced arms below (#1085 review) is what makes this classifier resolve
-// it to ResultSynced rather than asserting that stale tier.
+// the #1200 removal of SyncTierCounts). The one done+queued shape that reached
+// this classifier was prune.retireUnresolvable's retired row (#1039), which
+// carries whatever sync_tier it had BEFORE the recheck that was still in flight
+// when it retired. recentWhere now excludes that row (#740), so the
+// word_timing_state <> 'queued' guard on the word_synced/line_synced arms below
+// (#1085 review) is defensive: it keeps any future done+queued writer resolving
+// to ResultSynced rather than asserting a stale tier.
 //
 // #1075 changed the tier source from word_timing_state to sync_tier (see
 // ResultWordSynced/ResultLineSynced); word_timing_state itself still drives
@@ -443,8 +449,13 @@ func (r *Repo) RecentOutcomesSorted(ctx context.Context, limit int, o tablesort.
 	return scanRecentOutcomes(rows, err)
 }
 
-// recentWhere is the Recent outcomes membership: every settled row.
-const recentWhere = `status IN ('done', 'unavailable')`
+// recentWhere is the Recent outcomes membership: every settled row except one
+// prune retired (#740). That panel describes what a FETCH did; a retirement is
+// filesystem bookkeeping, so a startup sweep retiring a batch of rows would
+// otherwise surface as a burst of results no fetch produced, crowding real ones
+// out of the limit. Retired rows are still counted, in the Results "Other"
+// bucket (resultBucketCaseSQL's retiredPredicate arm).
+const recentWhere = `status IN ('done', 'unavailable') AND NOT (` + retiredPredicate + `)`
 
 // recentSelect is the column list scanRecentOutcomes reads.
 const recentSelect = `SELECT artist, title, album, completed_at, provider_lane, COALESCE(last_error, ''),

@@ -76,7 +76,7 @@ func (b ResultsBreakdown) Total() int64 {
 // word-recheck has been flipped to 'deferred' (queue.MarkWordRecheckQueued)
 // and is counted by the queue-status row, not here, so the Results row can
 // sum to Done exactly. The one reachable done+queued shape (prune's retired
-// row) is still done, and lands in SyncedTierUnknown via TierUnknownPredicate.
+// row) is still done, and lands in Other (the first arm of resultBucketCaseSQL).
 //
 // A row prune retired as unresolvable (last_error = queue.UnresolvableGoneError)
 // is status='done' but keeps whatever outcome_type/sync_tier it had before, so
