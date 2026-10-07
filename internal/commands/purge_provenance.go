@@ -212,7 +212,7 @@ func runPurgeProvenance(ctx context.Context, out io.Writer, args ScanPurgeProven
 	_, _ = fmt.Fprintf(out, "purge-provenance: scanned %d sidecar(s); %s %d%s, requeued %d (%d scan_results reset, %d cache entries invalidated, %d skipped in-flight, %d skipped symlink, %d errors)%s\n",
 		res.Scanned, verb, deleted, companionNote, res.WorkItemsRequeued, res.ScanResultsReset, res.CacheInvalidated, res.SkippedProcessing, res.SkippedSymlink, res.Errors, suffixDryRun(args.Yes))
 	if res.SkippedManual > 0 {
-		_, _ = fmt.Fprintf(out, "note: %d matched sidecar(s) belong to a manually marked instrumental and were left alone (#1405)\n", res.SkippedManual)
+		_, _ = fmt.Fprintf(out, "note: %d matched sidecar(s) belong to a manually marked instrumental and were left alone\n", res.SkippedManual)
 	}
 	if res.SkippedProvenanceMismatch > 0 {
 		// Aggregate only: naming the files would print the library's private

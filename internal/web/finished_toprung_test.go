@@ -26,11 +26,11 @@ func TestFinishedPagesFollowTopRung(t *testing.T) {
 		finishedTip, lineResultTip    string
 	}{
 		{"word sync on", false, "2", "3",
-			"Tracks with word-synced lyrics, the best result there is.",
+			"Tracks with word-synced lyrics, plus tracks marked instrumental by hand: nothing further to gain.",
 			"read-only: they have word timing", false, true,
 			"The only terminal state", "It may still be upgraded."},
 		{"word sync off", true, "3", "2",
-			"Tracks with line- or word-synced lyrics, the best result available here.",
+			"Tracks with line- or word-synced lyrics, plus tracks marked instrumental by hand: the best result available here.",
 			"line-synced ones can also have their timing edited", true, false,
 			"No word-synced tier is available here, so line-synced is the best result", "the best result available here"},
 	}

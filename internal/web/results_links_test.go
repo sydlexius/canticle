@@ -44,6 +44,12 @@ func seedLinkPopulation(t *testing.T, db *sql.DB) {
 	seedLinkRow(t, db, "t1", "done", "synced", "", "", "", "", "")
 	seedLinkRow(t, db, "p1", "pending", "", "", "", "", "", "")
 	seedLinkRow(t, db, "f1", "failed", "", "", "", "", "boom", "")
+	// A hand-marked instrumental is Finished under every rung (#1405).
+	seedLinkRow(t, db, "m1", "done", "instrumental", "", "", "", "", "")
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE work_queue SET manual_instrumental_at = '2026-08-16T05:00:00Z' WHERE title = 'm1'`); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // listFromHref follows a dashboard/report link the way the browser does: the
@@ -93,7 +99,7 @@ func TestResultTilesLinkToEqualPopulations(t *testing.T) {
 		linked map[string]string // tile label -> href
 	}{
 		{"word rung", reports.TopRungWord, map[string]string{
-			"Word-synced": "/queue/finished",
+			// Finished also holds hand-marked instrumentals (#1405): Word-synced stays unlinked.
 			"Line-synced": "/queue/settled?tier=line",
 		}},
 		{"line rung", reports.TopRungLine, map[string]string{

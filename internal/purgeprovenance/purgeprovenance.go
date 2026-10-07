@@ -452,6 +452,13 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 	// restorable record above, before either half runs.
 	if len(scanResultIDs) > 0 || len(workItemIDs) > 0 {
 		srReset, wqReset, invalidated, rerr := p.resetRows(ctx, scanResultIDs, workItemIDs, identities, pt.Source)
+		if errors.Is(rerr, errMarkedUnderfoot) {
+			// Marked by hand after the index snapshot: the file is safe, and the
+			// outcome is the same as for a row marked before the walk.
+			res.SkippedManual++
+			slog.Warn("purge-provenance: sidecar belongs to a manually marked instrumental; leaving it", "scan_result_ids", scanResultIDs)
+			return
+		}
 		if rerr != nil {
 			res.Errors++
 			slog.Warn("purge-provenance: reset rows failed; leaving sidecar in place", "path", path, "error", rerr)
@@ -817,7 +824,7 @@ func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag str
 	}
 	//nolint:gosec // reason: G201 - the interpolated text is a generated "?,?" placeholder
 	// list sized to workItemIDs; every id is bound as a parameter, never formatted in.
-	q := "SELECT id, COALESCE(provider_lane, ''), manual_instrumental_at IS NOT NULL FROM work_queue WHERE id IN (" +
+	q := "SELECT id, COALESCE(provider_lane, '') FROM work_queue WHERE id IN (" +
 		strings.Join(placeholders, ",") + ")"
 	rows, err := tx.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -828,13 +835,10 @@ func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag str
 	for rows.Next() {
 		var id int64
 		var lane string
-		var manual bool
-		if serr := rows.Scan(&id, &lane, &manual); serr != nil {
+		if serr := rows.Scan(&id, &lane); serr != nil {
 			return nil, fmt.Errorf("purgeprovenance: scan provider lane: %w", serr)
 		}
-		// A row marked by hand since the index snapshot (#1405) aborts the
-		// sidecar exactly as a lane change does; the next run counts it skipped.
-		if manual || !provenanceAgrees(tag, lane) {
+		if !provenanceAgrees(tag, lane) {
 			disputed = append(disputed, id)
 		}
 	}
@@ -842,6 +846,41 @@ func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag str
 		return nil, fmt.Errorf("purgeprovenance: re-read provider lanes: %w", rerr)
 	}
 	return disputed, nil
+}
+
+// errMarkedUnderfoot reports that a work_queue row was marked instrumental by
+// hand between the index build and the reset transaction. The sidecar is left
+// alone and counted as skipped-manual, not as an error.
+var errMarkedUnderfoot = errors.New("purgeprovenance: row marked instrumental since the index was built")
+
+// markedRows re-reads the given rows inside tx and returns the ids now marked.
+func markedRows(ctx context.Context, tx *sql.Tx, workItemIDs []int64) ([]int64, error) {
+	placeholders := make([]string, len(workItemIDs))
+	args := make([]any, len(workItemIDs))
+	for i, id := range workItemIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	//nolint:gosec // reason: G201 - the interpolated text is a generated "?,?" placeholder
+	// list sized to workItemIDs; every id is bound as a parameter, never formatted in.
+	q := "SELECT id FROM work_queue WHERE manual_instrumental_at IS NOT NULL AND id IN (" + strings.Join(placeholders, ",") + ")"
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read manual marks: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // reason: read-only cursor; rows.Err() below reports any failure
+	var marked []int64
+	for rows.Next() {
+		var id int64
+		if serr := rows.Scan(&id); serr != nil {
+			return nil, fmt.Errorf("purgeprovenance: scan manual mark: %w", serr)
+		}
+		marked = append(marked, id)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return nil, fmt.Errorf("purgeprovenance: re-read manual marks: %w", rerr)
+	}
+	return marked, nil
 }
 
 // resetRows retries its transaction whole on SQLITE_BUSY (#978). The sidecar's
@@ -881,6 +920,13 @@ func (p *Purger) resetRowsOnce(ctx context.Context, scanResultIDs, workItemIDs [
 	// the transaction either. A lock would also have to be held by a
 	// provider-lane repair path, and no such path exists in the tree.
 	if len(workItemIDs) > 0 {
+		marked, merr := markedRows(ctx, tx, workItemIDs)
+		if merr != nil {
+			return 0, 0, 0, merr
+		}
+		if len(marked) > 0 {
+			return 0, 0, 0, fmt.Errorf("%w: work_queue rows %v", errMarkedUnderfoot, marked)
+		}
 		disputed, verr := disputedLanes(ctx, tx, workItemIDs, tag)
 		if verr != nil {
 			return 0, 0, 0, verr

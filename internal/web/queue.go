@@ -48,7 +48,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketProcessing:  {"Processing", "Tracks a worker has claimed and is working on now."},
 	reports.BucketDeferred:    {"Retrying", "Tracks waiting for the worker to try again: lookups that found nothing yet, and word-sync rechecks."},
 	reports.BucketFailed:      {"Errored", "Tracks whose last lookup hit an error; they are retried automatically."},
-	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, the best result there is."},
+	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, plus tracks marked instrumental by hand: nothing further to gain."},
 	reports.BucketSettled:     {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to word sync."},
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
 }
@@ -56,7 +56,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 // lineTopBucketInfo overrides Finished and Settled when no word tier is reachable
 // (reports.TopRungLine, #1275, #1350: word sync off or no word-capable lane): line-synced is the best result there.
 var lineTopBucketInfo = map[reports.Bucket][2]string{
-	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, the best result available here."},
+	reports.BucketFinished: {"Finished", "Tracks with line- or word-synced lyrics, plus tracks marked instrumental by hand: the best result available here."},
 	reports.BucketSettled:  {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to line sync."},
 }
 

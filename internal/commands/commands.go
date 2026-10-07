@@ -2469,7 +2469,7 @@ func runSweeper(ctx context.Context, sqlDB *sql.DB, interval time.Duration, rcfg
 				"first_old_path", res.Relinked[0].OldPath, "first_new_path", res.Relinked[0].NewPath)
 		}
 		if res.EditHeld > 0 {
-			slog.Info("path-reconciliation sweep relinked hand-edited rows without reopening them", "edit_held", res.EditHeld)
+			slog.Info("path-reconciliation sweep relinked hand-edited or manually marked rows without reopening them", "edit_held", res.EditHeld)
 		}
 		if res.AgedOut > 0 {
 			slog.Info("path-reconciliation sweep deleted rows whose file had been gone for the grace period; each is recorded in the sweep backup beside the database", "sources", res.AgedOut)
@@ -2634,7 +2634,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		// vanished, so delete its rows without a rescan (Exact granularity).
 		res, err := pruner.PrunePath(ctx, path)
 		if res.EditHeld > 0 {
-			slog.Info("reactive prune relinked hand-edited rows without reopening them", "edit_held", res.EditHeld)
+			slog.Info("reactive prune relinked hand-edited or manually marked rows without reopening them", "edit_held", res.EditHeld)
 		}
 		return err
 	})

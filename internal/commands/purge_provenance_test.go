@@ -844,3 +844,38 @@ func TestPurgeProvenance_GeneratedIsExclusive(t *testing.T) {
 		}
 	}
 }
+
+// A manually marked row's sidecar is left alone and the summary says so: the
+// dry-run count excludes it, and the note carries the count.
+func TestPurgeProvenance_ManualMarkedSidecarIsSkippedInSummary(t *testing.T) {
+	ctx, cfgPath, dbPath, root := setupPurgeProvenance(t)
+	dir := filepath.Join(root, "ArtistA")
+	marked, plain := filepath.Join(dir, "marked.lrc"), filepath.Join(dir, "plain.lrc")
+	writePurgeSidecar(t, marked, "musixmatch")
+	writePurgeSidecar(t, plain, "musixmatch")
+	seedPurgeTrack(t, ctx, dbPath, dir, "marked.lrc", "done")
+	seedPurgeTrack(t, ctx, dbPath, dir, "plain.lrc", "done")
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET manual_instrumental_at = '2026-09-01T00:00:00Z' WHERE filename = 'marked.lrc'`); err != nil {
+		t.Fatal(err)
+	}
+	_ = sqlDB.Close()
+
+	var buf bytes.Buffer
+	if code := runPurgeProvenance(ctx, &buf, ScanPurgeProvenanceCmd{ConfigPath: cfgPath, Source: "musixmatch"}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "would delete 1") {
+		t.Errorf("want 'would delete 1' (the marked sidecar excluded); got: %s", out)
+	}
+	if !strings.Contains(out, "note: 1 matched sidecar(s) belong to a manually marked instrumental") {
+		t.Errorf("want the manual-mark note with count 1; got: %s", out)
+	}
+	if strings.Contains(out, "#1405") {
+		t.Errorf("summary must not print an issue number; got: %s", out)
+	}
+}

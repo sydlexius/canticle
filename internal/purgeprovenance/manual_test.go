@@ -54,10 +54,36 @@ func TestResetRowsOnce_RefusesRowMarkedSinceTheIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, _, err := New(sqlDB).resetRowsOnce(ctx, []int64{sr}, []int64{wq}, nil, "manual")
-	if !errors.Is(err, errProvenanceChangedUnderfoot) {
-		t.Fatalf("err = %v, want errProvenanceChangedUnderfoot", err)
+	if !errors.Is(err, errMarkedUnderfoot) {
+		t.Fatalf("err = %v, want errMarkedUnderfoot", err)
 	}
 	if got := rowStatus(t, ctx, sqlDB, "work_queue", wq); got != "done" {
 		t.Errorf("row status = %q, want done", got)
+	}
+}
+
+// #1405: a row marked after the index snapshot is counted skipped-manual, not
+// as an error, and its sidecar survives.
+func TestRun_RowMarkedAfterIndexCountsSkippedManual(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	dir := filepath.Join(root, "ArtistA")
+	file := filepath.Join(dir, "late.lrc")
+	writeSidecar(t, file, "manual")
+	_, wq := seedTrack(t, ctx, sqlDB, libID, dir, "late.lrc", "done")
+	// Mark inside Report: it runs after the index and the walk's own manual
+	// check, before the reset transaction.
+	report := func(Record) error {
+		_, err := sqlDB.ExecContext(ctx, markSQL, wq)
+		return err
+	}
+	res, err := New(sqlDB).Run(ctx, Options{Roots: []string{root}, Filter: Filter{Source: "manual"}, LibraryID: &libID, Report: report})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.SkippedManual != 1 || res.Errors != 0 || res.Deleted != 0 {
+		t.Errorf("SkippedManual=%d Errors=%d Deleted=%d, want 1/0/0", res.SkippedManual, res.Errors, res.Deleted)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Errorf("sidecar must survive: %v", err)
 	}
 }
