@@ -254,6 +254,9 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 		// meantime (every tier reader is scoped to status='done').
 		return w.retryWordRecheckWrite(ctx, item, err)
 	}
+	// A landed recheck counts its tier but NO hit: provider_outcomes counts
+	// ordinary dispatches only, and daily hits must equal it (#1301).
+	w.recordSourceEvent(ctxNoCancel, song.WinningLane, tier)
 	w.consecutiveFailures = 0
 	return w.settleWordRecheck(ctx, item, queue.WordTimingServed)
 }
@@ -451,16 +454,6 @@ func (w *Worker) ordinarySyncTier(item queue.WorkItem, song models.Song) string 
 		}
 	}
 	return queue.SyncTierLine
-}
-
-// stampSyncTier records an ordinary completion's on-disk sync tier before
-// Complete, best-effort like its siblings: a lost stamp leaves the row
-// unclassified (the CLI backfill's candidate set), never a wrong tier. A
-// non-synced outcome clears any tier a reopened row previously carried. It
-// returns an error only when stampOrClearSyncTier's own clear attempt also
-// failed (see there); the caller must not settle the row on that error.
-func (w *Worker) stampSyncTier(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) error {
-	return w.stampOrClearSyncTier(ctxNoCancel, item.ID, w.ordinarySyncTier(item, song))
 }
 
 // stampOrClearSyncTier records tier, best-effort; on failure it attempts to
