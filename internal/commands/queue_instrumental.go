@@ -92,11 +92,23 @@ func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args 
 			ids = append(ids, id)
 		}
 	}
+	seenPath := make(map[string]bool, len(args.Paths))
 	for _, p := range args.Paths {
+		if seenPath[p] {
+			continue
+		}
+		seenPath[p] = true
 		// work_queue.source_path holds the audio file path the scan enqueued
-		// (the same value scan_results.file_path carries); a path can have
-		// more than one row, so every match is processed.
-		found, qerr := rowsForSourcePath(ctx, sqlDB, filepath.Clean(p))
+		// (the same value scan_results.file_path carries); the scan joins an
+		// absolute library root with directory entries, so it is always
+		// absolute and clean. The selector is therefore matched exactly as
+		// given: a non-absolute one is not found, without a query. A path can
+		// have more than one row, so every match is processed.
+		if !filepath.IsAbs(p) {
+			c.notFound++
+			continue
+		}
+		found, qerr := rowsForSourcePath(ctx, sqlDB, p)
 		if qerr != nil {
 			slog.Error("failed to look up path", "error", qerr)
 			return 1
@@ -130,6 +142,11 @@ func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args 
 			f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: G304 -- backupPath is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
 			if ferr != nil {
 				return fmt.Errorf("open instrumental backup: %w", ferr)
+			}
+			// O_CREATE's mode only applies to a new file; tighten an existing one before any write.
+			if cerr := f.Chmod(0o600); cerr != nil {
+				_ = f.Close()
+				return fmt.Errorf("tighten instrumental backup mode: %w", cerr)
 			}
 			backupFile = f
 			lyrics.FsyncDir(filepath.Dir(backupPath))
@@ -198,13 +215,26 @@ func backupPathUnsafe(backup string, roots []string) bool {
 	if err != nil {
 		abs = filepath.Clean(backup)
 	}
-	canon := filepath.Join(pathutil.CanonicalPath(filepath.Dir(abs)), filepath.Base(abs))
-	for _, root := range roots {
-		absRoot, canonRoot := pathutil.CanonicalRoot(root)
-		if pathutil.WithinRoot(absRoot, abs) || pathutil.WithinRoot(canonRoot, canon) {
+	// Three forms: as given, parent-resolved (a path not created yet), and the
+	// complete path resolved (an existing file that is itself a symlink).
+	// Every form gets the extension and the inside-a-library test.
+	forms := []string{abs,
+		filepath.Join(pathutil.CanonicalPath(filepath.Dir(abs)), filepath.Base(abs)),
+		pathutil.CanonicalPath(abs)}
+	for _, form := range forms {
+		switch strings.ToLower(filepath.Ext(form)) {
+		case ".lrc", ".txt", ".elrc":
 			return true
 		}
+		for _, root := range roots {
+			absRoot, canonRoot := pathutil.CanonicalRoot(root)
+			if pathutil.WithinRoot(absRoot, form) || pathutil.WithinRoot(canonRoot, form) {
+				return true
+			}
+		}
 	}
+	// Remaining window: the open follows a final symlink created after this
+	// guard (no no-follow append open exists in the backup helpers).
 	return false
 }
 

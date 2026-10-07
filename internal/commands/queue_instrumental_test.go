@@ -399,3 +399,58 @@ func TestQueueInstrumentalRefusesUnsafeBackupPath(t *testing.T) {
 		t.Errorf("lrc not intact: %q", b)
 	}
 }
+
+func TestQueueInstrumentalTightensAnExistingBackupFile(t *testing.T) {
+	f := newQIFixture(t)
+	backup := filepath.Join(t.TempDir(), "b.jsonl")
+	if err := os.WriteFile(backup, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(backup, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := f.run(t, false, QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Yes: true, Backup: backup}); code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	fi, err := os.Stat(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("existing backup mode = %o; want 600", perm)
+	}
+}
+
+func TestQueueInstrumentalRefusesSymlinkedBackupToALyric(t *testing.T) {
+	f := newQIFixture(t)
+	link := filepath.Join(t.TempDir(), "backup.jsonl")
+	if err := os.Symlink(f.lrcPath, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	out, code := f.run(t, false, QueueMarkInstrumentalCmd{IDs: []int64{f.id}, Yes: true, Backup: link})
+	if code != 2 || !strings.Contains(out, "--backup must not be") {
+		t.Errorf("exit = %d; want 2 with a refusal:\n%s", code, out)
+	}
+	if marked := f.row(t, f.id); marked || f.markerExists() {
+		t.Errorf("a refused run changed state: marked=%v marker=%v", marked, f.markerExists())
+	}
+	if b, _ := os.ReadFile(f.lrcPath); string(b) != qiLRC {
+		t.Errorf("lrc not intact: %q", b)
+	}
+}
+
+func TestQueueInstrumentalPathMatchesExactlyAndCountsOnce(t *testing.T) {
+	f := newQIFixture(t)
+	unclean := f.dir + "/../" + qiAlbum + "/song.flac"
+	for name, paths := range map[string][]string{
+		"unclean":   {unclean},
+		"relative":  {"song.flac"},
+		"dup twice": {filepath.Join(f.dir, "nope.flac"), filepath.Join(f.dir, "nope.flac")},
+	} {
+		out, code := f.run(t, false, QueueMarkInstrumentalCmd{Paths: paths})
+		want := "not found: 1"
+		if code != 1 || !strings.Contains(out, want) || strings.Contains(out, "would mark: 1") {
+			t.Errorf("%s: exit = %d; want 1 with %q and nothing selected:\n%s", name, code, want, out)
+		}
+	}
+}
