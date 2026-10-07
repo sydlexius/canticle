@@ -213,7 +213,7 @@ func TestWordRecheckSweepDoesNotReadmitAnUnflippedRow(t *testing.T) {
 	if _, err := dbh.Exec(`UPDATE work_queue SET status = 'processing' WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
-	released, err := q.DeferWordRecheck(context.Background(), 1, time.Hour, 0, "lane down")
+	released, err := q.DeferWordRecheck(context.Background(), 1, time.Hour, 0, "lane down", queue.FailureThrottle)
 	if err != nil || !released {
 		t.Fatalf("un-flip = %v, %v; want released", released, err)
 	}

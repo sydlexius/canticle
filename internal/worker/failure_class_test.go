@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/orchestrator"
@@ -28,9 +29,14 @@ func TestFailureClassMapping(t *testing.T) {
 		{"breaker open", orchestrator.ErrLaneUnavailable, queue.FailureThrottle},
 		{"timing-refused, lane untried", &orchestrator.RefusedUntriedError{Lane: "a", Cause: "x"}, queue.FailureThrottle},
 		{"refused with 403", fmt.Errorf("lane a: %w", musixmatch.ErrForbidden), queue.FailureThrottle},
-		{"failing lane now open", &orchestrator.PartialFailureError{Err: errors.New("lane a: stale client")}, queue.FailureThrottle},
+		{"refused, failing lane now open", &orchestrator.PartialFailureError{Err: fmt.Errorf("lane a: %w", musixmatch.ErrForbidden)}, queue.FailureThrottle},
+		{"stale client version", fmt.Errorf("lane a: %w", innertube.ErrClientVersion), queue.FailureOther},
+		{"stale client version, lane now open", &orchestrator.PartialFailureError{Err: fmt.Errorf("lane a: %w", innertube.ErrClientVersion)}, queue.FailureOther},
 		{"detector outage", orchestrator.ErrLaneOutage, queue.FailureNetwork},
 		{"transport", errors.New("lane a: transport error: dial tcp 192.0.2.1:443: i/o timeout"), queue.FailureNetwork},
+		{"local lock", errors.New("worker: complete item 7: queue: complete: database is locked"), queue.FailureOther},
+		{"local lock, driver text", errors.New("worker: store cache: database is locked (5) (SQLITE_BUSY)"), queue.FailureOther},
+		{"local lock, code only", errors.New("worker: store cache: SQLITE_BUSY"), queue.FailureOther},
 		{"anything else", errors.New("worker: settle guard-rejected item 5: constraint failed"), queue.FailureOther},
 	} {
 		if got := failureClass(tc.cause); got != tc.want {
@@ -66,5 +72,20 @@ func TestWorkerFailureWritesCarryTheClass(t *testing.T) {
 		if len(causes) != 1 || queue.FailureClassOf(causes[0]) != tc.want {
 			t.Errorf("%s: causes %v carry class %q, want one cause classed %q", tc.name, causes, queue.FailureClassOf(errors.Join(causes...)), tc.want)
 		}
+	}
+}
+
+// The word-recheck defer and the stuck-item Fail carry the class too (#1285).
+func TestWorkerRecheckAndStuckWritesCarryTheClass(t *testing.T) {
+	ctx, item := context.Background(), queue.WorkItem{ID: 7}
+	q := &fakeQueue{}
+	w := New(q, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
+	_ = w.deferWordRecheck(ctx, item, fmt.Errorf("recheck: %w", errNoWordAnswer))
+	if len(q.wordRecheckClasses) != 1 || q.wordRecheckClasses[0] != queue.FailureMiss {
+		t.Errorf("deferWordRecheck passed classes %q, want one %q", q.wordRecheckClasses, queue.FailureMiss)
+	}
+	_ = w.failStuckItem(ctx, item, capNever, errors.New("worker: complete item 7: dial tcp 192.0.2.1:443: i/o timeout"))
+	if len(q.failCauses) != 1 || queue.FailureClassOf(q.failCauses[0]) != queue.FailureNetwork {
+		t.Errorf("failStuckItem causes %v, want one cause classed %q", q.failCauses, queue.FailureNetwork)
 	}
 }

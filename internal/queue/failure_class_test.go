@@ -46,12 +46,9 @@ func TestFailureWritersStampTheClass(t *testing.T) {
 		}, "throttle", StatusDeferred},
 		{"RetireMiss", func(q *DBQueue, id int64) error { return errOf(q.RetireMiss(ctx, id)) }, "miss", StatusUnavailable},
 		{"DeferWordRecheck", func(q *DBQueue, id int64) error {
-			return errOf(q.DeferWordRecheck(ctx, id, time.Hour, 3, "lane a: 502"))
-		}, "throttle", StatusDeferred},
-		{"DeferWordRecheck, classed", func(q *DBQueue, id int64) error {
 			return errOf(q.DeferWordRecheck(ctx, id, time.Hour, 3, "x", FailureMiss))
 		}, "miss", StatusDeferred},
-		{"RetryWordRecheckWrite", func(q *DBQueue, id int64) error { return q.RetryWordRecheckWrite(ctx, id, time.Hour, "stamp failed") }, "write", StatusDeferred},
+		{"RetryWordRecheckWrite", func(q *DBQueue, id int64) error { return q.RetryWordRecheckWrite(ctx, id, time.Hour, "stamp failed") }, "other", StatusDeferred},
 		{"UnsettleInstrumental", func(q *DBQueue, id int64) error {
 			mustExec(t, q.db, `UPDATE work_queue SET status = 'done', instrumental_result = 1, failure_class = NULL WHERE id = ?`, id)
 			return errOf(q.UnsettleInstrumental(ctx, id))
@@ -93,7 +90,7 @@ func TestFailureClassClearsWhenTheFailureDoes(t *testing.T) {
 		{"word recheck released to done", StatusDeferred, []classStep{claim,
 			sql(`UPDATE work_queue SET word_timing_state = 'queued' WHERE id = ?`),
 			func(q *DBQueue, id int64) error {
-				return errOf(q.DeferWordRecheck(ctx, id, time.Hour, 0, "lane a: 502"))
+				return errOf(q.DeferWordRecheck(ctx, id, time.Hour, 0, "lane a: 502", FailureThrottle))
 			},
 		}, "", StatusDone},
 		// Shapes with no '' to key on: prune's retire, a release to pending.

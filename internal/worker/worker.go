@@ -110,7 +110,7 @@ type Queue interface {
 	// DeferWordRecheck re-parks an unanswered word-recheck row after retryAfter,
 	// still 'queued', touching no miss or failure counter; past maxWaits it
 	// un-flips the row to done with no verdict and reports released.
-	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string, class ...queue.FailureClass) (bool, error)
+	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string, class queue.FailureClass) (bool, error)
 	// RetryWordRecheckWrite re-parks a recheck row after a post-write
 	// bookkeeping failure (#1086), without spending DeferWordRecheck's
 	// refused_waits budget: status='deferred' + word_timing_state='queued' only.

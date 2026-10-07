@@ -104,7 +104,7 @@ func TestDoneWritebacksHonorLiveSibling(t *testing.T) {
 		}},
 		"DeferWordRecheck release": {"status = 'processing', word_timing_state = 'queued', refused_waits = 1",
 			func(ctx context.Context, q *DBQueue, id int64) error {
-				released, err := q.DeferWordRecheck(ctx, id, time.Hour, 1, "x")
+				released, err := q.DeferWordRecheck(ctx, id, time.Hour, 1, "x", FailureThrottle)
 				if err == nil && !released {
 					t.Errorf("DeferWordRecheck did not release")
 				}

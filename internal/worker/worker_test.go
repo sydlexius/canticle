@@ -114,6 +114,7 @@ type fakeQueue struct {
 	onComplete         func(id int64)
 	failCauses         []error
 	deferCauses        []error
+	wordRecheckClasses []queue.FailureClass
 	deferDurations     []time.Duration
 	completeErr        error
 	failErr            error
@@ -199,13 +200,14 @@ func (q *fakeQueue) Defer(_ context.Context, id int64, retryAfter time.Duration,
 }
 
 // SettleWordRecheck and DeferWordRecheck are exercised end to end over the
-// real DBQueue (word_recheck_test.go); no fake-queue test produces a recheck row.
+// real DBQueue (word_recheck_test.go); the fake only records the class it is handed.
 func (q *fakeQueue) SettleWordRecheck(context.Context, int64, string, int64) error {
 	return errors.New("fakeQueue: SettleWordRecheck not modeled")
 }
 
-func (q *fakeQueue) DeferWordRecheck(context.Context, int64, time.Duration, int, string, ...queue.FailureClass) (bool, error) {
-	return false, errors.New("fakeQueue: DeferWordRecheck not modeled")
+func (q *fakeQueue) DeferWordRecheck(_ context.Context, _ int64, _ time.Duration, _ int, _ string, class queue.FailureClass) (bool, error) {
+	q.wordRecheckClasses = append(q.wordRecheckClasses, class)
+	return false, nil
 }
 
 func (q *fakeQueue) RetryWordRecheckWrite(context.Context, int64, time.Duration, string) error {

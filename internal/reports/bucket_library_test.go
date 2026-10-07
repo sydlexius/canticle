@@ -398,6 +398,15 @@ func TestReasonCategoriesPartitionTheBucket(t *testing.T) {
 	insertReasonRow(t, d, "failed", "unclassed text", "lane a: rate limited")
 	want[ReasonNone] = append(want[ReasonNone], "unclassed empty")
 	want[ReasonOther] = append(want[ReasonOther], "unclassed text")
+	// So does a stored value that is not a category key.
+	insertReasonRow(t, d, "failed", "foreign class", "lane a: rate limited")
+	insertReasonRow(t, d, "failed", "empty class", "lane a: rate limited")
+	for title, class := range map[string]string{"foreign class": "quota", "empty class": ""} {
+		if _, err := d.Exec(`UPDATE work_queue SET failure_class = ? WHERE title = ?`, class, title); err != nil {
+			t.Fatal(err)
+		}
+		want[ReasonOther] = append(want[ReasonOther], title)
+	}
 
 	var union []string
 	for _, def := range reasonDefs {
