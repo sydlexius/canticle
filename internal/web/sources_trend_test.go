@@ -204,3 +204,32 @@ func TestSourcePagesTilesHaveNoEmptyTitle(t *testing.T) {
 		t.Error("word-synced tile lost its tooltip")
 	}
 }
+
+// TestSourceTilesUseRungTooltip: the source page's result-type tiles carry the
+// rung-specific tooltip, as the dashboard Results tiles do (#1275).
+func TestSourceTilesUseRungTooltip(t *testing.T) {
+	var line *resultBucket
+	for i := range resultBuckets {
+		if resultBuckets[i].Label == "Line-synced" {
+			line = &resultBuckets[i]
+		}
+	}
+	if line == nil || line.LineTooltip == "" || line.LineTooltip == line.Tooltip {
+		t.Fatal("Line-synced bucket must carry a distinct LineTooltip")
+	}
+	sb := reports.SourceBreakdown{Lane: "musixmatch", Counts: reports.TypeCounts{LineSynced: 2}}
+	for _, tc := range []struct {
+		top  reports.TopRung
+		want string
+	}{{reports.TopRungLine, line.LineTooltip}, {reports.TopRungWord, line.Tooltip}} {
+		var got string
+		for _, tile := range buildSourceView(sb, tc.top).Types.Tiles {
+			if tile.Label == "Line-synced" {
+				got = tile.Tooltip
+			}
+		}
+		if got != tc.want {
+			t.Errorf("top rung %v: Line-synced tooltip = %q, want %q", tc.top, got, tc.want)
+		}
+	}
+}

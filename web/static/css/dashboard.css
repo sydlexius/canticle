@@ -134,10 +134,10 @@
 }
 
 /* Inline mini hit-rate bar inside a Lyrics Sources tile (#318): a thin rail
- * with an accent-colored fill whose width encodes the hit-rate percent. The
+ * with a --mx-chart-hit colored fill whose width encodes the hit-rate percent. The
  * fill width is applied by chart-init.js from the data-hit-rate attribute (the
- * serve-mode CSP forbids an inline style="" width). The fill reuses --mx-accent
- * so it matches the former standalone hit-rate bar chart's series color. */
+ * serve-mode CSP forbids an inline style="" width). The fill uses the
+ * --mx-chart-hit token, the same color as the hit-rate legend swatch. */
 .mx-dash-tile-bar {
   margin-top: 0.5rem;
   width: 100%;
@@ -197,7 +197,7 @@
   --mx-chart-failed: #ff4d7a;     /* hot rose: errored */
   --mx-chart-deferred: #ffb020;   /* amber: unsynced / retrying */
   --mx-chart-unavailable: #b45cff; /* ultraviolet: instrumental / given up */
-  --mx-chart-hit: #19e0a8;        /* hit-rate legend swatch and strong end of the value ramp */
+  --mx-chart-hit: #19e0a8;        /* hit-rate legend swatch, strong end of the value ramp and the mini hit-rate bar fill */
   /* Upstream names: hues kept clear of every result-type color and the rose error hue. */
   --mx-chart-up-lyricfind: #c4e538;   /* lime */
   --mx-chart-up-musixmatch: #ff8a4c;  /* coral */

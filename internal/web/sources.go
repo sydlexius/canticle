@@ -117,8 +117,9 @@ func (u *UI) serveSource(w http.ResponseWriter, r *http.Request, pick func([]rep
 }
 
 // trendRangeDays are the selectable windows; trendDefaultDays applies when the
-// range parameter is absent or unknown. A repeated parameter is ambiguous and
-// rejected, as parseQueueViewState does.
+// range parameter is absent, unknown or not in canonical spelling (a default of
+// 30 applies). A repeated parameter is ambiguous and rejected with a 400, as
+// parseQueueViewState does.
 var trendRangeDays = []int{7, 30, 90}
 
 const trendDefaultDays = 30
@@ -127,7 +128,8 @@ func parseTrendRange(vals []string) (int, error) {
 	if len(vals) > 1 {
 		return 0, errors.New("repeated parameter range")
 	}
-	// Only the canonical spelling selects a range: "+7" and "007" parse as 7.
+	// Only the canonical spelling selects a range: "+7" and "007" are NOT
+	// accepted and fall back to the default.
 	if len(vals) == 1 {
 		for _, d := range trendRangeDays {
 			if vals[0] == strconv.Itoa(d) {
@@ -244,7 +246,7 @@ func buildSourceView(sb reports.SourceBreakdown, top reports.TopRung) templates.
 	// Every type is a tile and a legend entry, zero included, as on the dashboard.
 	for i, l := range labels {
 		n := strconv.FormatInt(vals[i], 10)
-		t.Tiles = append(t.Tiles, templates.StatTile{Label: l, Value: n, Href: sourceTypeLink(sb, l, top), Tooltip: resultBuckets[i].Tooltip})
+		t.Tiles = append(t.Tiles, templates.StatTile{Label: l, Value: n, Href: sourceTypeLink(sb, l, top), Tooltip: resultBuckets[i].tooltip(top)})
 		t.Chart.Labels = append(t.Chart.Labels, l)
 		t.Chart.Values = append(t.Chart.Values, float64(vals[i]))
 	}

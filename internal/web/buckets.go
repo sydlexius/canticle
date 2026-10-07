@@ -88,6 +88,14 @@ var queueBuckets = []queueBucket{
 	},
 }
 
+// tooltip is the hover text under rung top.
+func (b resultBucket) tooltip(top reports.TopRung) string {
+	if top == reports.TopRungLine && b.LineTooltip != "" {
+		return b.LineTooltip
+	}
+	return b.Tooltip
+}
+
 // resultBucket is one Results tile: what a COMPLETED track ended up with.
 type resultBucket struct {
 	Label   string

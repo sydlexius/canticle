@@ -326,10 +326,7 @@ func queueBucketHref(b reports.Bucket) string { return "/queue/" + string(b) }
 func buildResultsTiles(b reports.ResultsBreakdown) []templates.StatTile {
 	tiles := make([]templates.StatTile, 0, len(resultBuckets))
 	for _, rb := range resultBuckets {
-		tip := rb.Tooltip
-		if b.TopRung == reports.TopRungLine && rb.LineTooltip != "" {
-			tip = rb.LineTooltip
-		}
+		tip := rb.tooltip(b.TopRung)
 		href := ""
 		if rb.Href != nil {
 			href = rb.Href(b.TopRung, "")

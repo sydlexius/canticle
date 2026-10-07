@@ -108,7 +108,12 @@
 
   // catColor: the single resolver for a category's color.
   function catColor(label) {
-    var v = (Object.prototype.hasOwnProperty.call(CAT_VARS, label) && CAT_VARS[label]) || FALLBACK_COLOR_VARS[hashLabel(String(label)) % FALLBACK_COLOR_VARS.length];
+    // Exact label first (result-type and queue keys are mixed case), then the
+    // lowercased one (a stored upstream is not normalized on every write path),
+    // then a hash of the LOWERCASED label so LyricFind and lyricfind always agree.
+    var name = String(label), lower = name.toLowerCase();
+    var own = function (k) { return Object.prototype.hasOwnProperty.call(CAT_VARS, k) && CAT_VARS[k]; };
+    var v = own(name) || own(lower) || FALLBACK_COLOR_VARS[hashLabel(lower) % FALLBACK_COLOR_VARS.length];
     return resolveVar(probe, v, accentColor);
   }
 
@@ -224,15 +229,17 @@
 
   // renderTime draws the multi-series UTC-day charts (#1302). A null point is a
   // gap: spanGaps stays false so a no-attempt day breaks the line. Bars are SOLID
-  // category colors (no pattern fill); the non-color cues are the tooltip, the
-  // legend order (= stack order) and the daily-numbers table. details is the
+  // category colors (no pattern fill) with a 1px surface-colored border that
+  // separates adjacent stacked segments; the non-color cues are those
+  // separators, the tooltip, the legend order (= stack order) and the
+  // daily-numbers table. details is the
   // per-day tooltip line (data-chart-detail), or null.
   function renderTime(canvas, type, labels, series, suffix, details) {
     var stacked = type === 'stacked-bar';
     var colors = series.map(function (se) { return stacked ? catColor(se.label) : hitColor; });
     var datasets = series.map(function (se, i) {
       if (stacked) {
-        return { label: se.label, data: se.data, backgroundColor: colors[i], borderWidth: 0, borderSkipped: false, borderRadius: topRadius(6), maxBarThickness: 24 };
+        return { label: se.label, data: se.data, backgroundColor: colors[i], borderColor: surfaceBg, borderWidth: 1, borderSkipped: false, borderRadius: topRadius(6), maxBarThickness: 24 };
       }
       // Value-shaded line over a soft fill; the gradient spans the chart area.
       function ramp(stop) {
