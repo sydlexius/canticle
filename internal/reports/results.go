@@ -37,9 +37,10 @@ const resultBucketCaseSQL = `CASE
 // Every field reads work_queue only (status, outcome_type, sync_tier,
 // timing_outcome, word_timing_state); no other table is consulted.
 type ResultsBreakdown struct {
-	// WordSynced: outcome_type='synced' AND wordTierPredicate. The same
-	// predicate as QueueSummary.Finished under TopRungWord, so the two always
-	// agree; under TopRungLine Finished is WordSynced + LineSynced (#1275).
+	// WordSynced: outcome_type='synced' AND wordTierPredicate. QueueSummary.Finished
+	// is this PLUS the hand-marked instrumental rows (#1405), which land in
+	// Instrumental here: Finished = WordSynced + marked rows under TopRungWord,
+	// and WordSynced + LineSynced + marked rows under TopRungLine (#1275).
 	WordSynced int64
 	// LineSynced: outcome_type='synced' AND lineTierPredicate.
 	LineSynced int64

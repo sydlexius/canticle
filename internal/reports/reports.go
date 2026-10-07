@@ -87,7 +87,8 @@ type QueueSummary struct {
 	// Finished and SettledUpgradable split Done (#553, maintainer decision
 	// 2026-09-24): once word-synced output is the only terminal state, most
 	// 'done' rows are a snapshot of the current best rung, not an endpoint.
-	// Finished counts the 'done' rows at the top rung (finishedPredicate);
+	// Finished counts the 'done' rows at the top rung (finishedPredicate) plus
+	// hand-marked instrumentals (#1405);
 	// SettledUpgradable is every other 'done' row -- line-synced, tier
 	// unknown, unsynced, instrumental (provider- and detector-written alike),
 	// rejected, legacy. The pair ALWAYS sums to Done, because

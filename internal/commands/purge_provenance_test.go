@@ -869,8 +869,8 @@ func TestPurgeProvenance_ManualMarkedSidecarIsSkippedInSummary(t *testing.T) {
 		t.Fatalf("exit=%d out=%s", code, buf.String())
 	}
 	out := buf.String()
-	if !strings.Contains(out, "would delete 1") {
-		t.Errorf("want 'would delete 1' (the marked sidecar excluded); got: %s", out)
+	if !strings.Contains(out, "would delete 1,") {
+		t.Errorf("want 'would delete 1,' (the marked sidecar excluded); got: %s", out)
 	}
 	if !strings.Contains(out, "note: 1 matched sidecar(s) belong to a manually marked instrumental") {
 		t.Errorf("want the manual-mark note with count 1; got: %s", out)

@@ -87,3 +87,25 @@ func TestRun_RowMarkedAfterIndexCountsSkippedManual(t *testing.T) {
 		t.Errorf("sidecar must survive: %v", err)
 	}
 }
+
+// #1405: a mark landing after the reset commit but before the unlink leaves the
+// sidecar in place and counts skipped-manual, not an error.
+func TestRun_MarkedBetweenResetAndUnlinkKeepsSidecar(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	dir := filepath.Join(root, "ArtistA")
+	file := filepath.Join(dir, "gap.lrc")
+	writeSidecar(t, file, "manual")
+	_, wq := seedTrack(t, ctx, sqlDB, libID, dir, "gap.lrc", "done")
+	afterResetHook = func() { _, _ = sqlDB.ExecContext(ctx, markSQL, wq) }
+	t.Cleanup(func() { afterResetHook = nil })
+	res, err := New(sqlDB).Run(ctx, Options{Roots: []string{root}, Filter: Filter{Source: "manual"}, LibraryID: &libID})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.SkippedManual != 1 || res.Errors != 0 || res.Deleted != 0 {
+		t.Errorf("SkippedManual=%d Errors=%d Deleted=%d, want 1/0/0", res.SkippedManual, res.Errors, res.Deleted)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Errorf("sidecar must survive: %v", err)
+	}
+}

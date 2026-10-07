@@ -274,9 +274,10 @@ const (
 
 // bucketChips and lineTopBucketChips are the ONE place the chip set per bucket
 // is decided, in display order. Under TopRungWord, Finished is status done AND
-// synced AND word tier (which excludes
-// mis_synced) and Settled is its complement within done, so only Hand-edited
-// can match on Finished, while Line-synced and Mis-synced only ever match on
+// (a hand-marked instrumental OR synced at the word tier, which excludes
+// mis_synced) and Settled is its complement within done. Word-synced and
+// Hand-edited can match on Finished (a manual mark matches neither chip, only
+// the unfiltered list), while Line-synced and Mis-synced only ever match on
 // Settled. A chip a bucket does not list is never offered and never honored.
 var bucketChips = map[Bucket][]Chip{
 	BucketFinished: {ChipWordSynced, ChipEdited},

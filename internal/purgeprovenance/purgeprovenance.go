@@ -477,10 +477,37 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		slog.Warn("purge-provenance: sidecar has no linked scan_results row; cannot invalidate its cache entry", "path", path)
 	}
 
+	if afterResetHook != nil {
+		afterResetHook()
+	}
+	// stillUnmarked re-reads the marks just before an unlink. It narrows the
+	// window in which a concurrent mark loses its file; it does not close it (a
+	// mark landing between this read and the unlink still can).
+	stillUnmarked := func() bool {
+		if len(workItemIDs) == 0 {
+			return true
+		}
+		marked, merr := markedRows(ctx, p.db, workItemIDs)
+		if merr != nil {
+			res.Errors++
+			slog.Warn("purge-provenance: mark re-check failed; leaving sidecar", "path", path, "error", merr)
+			return false
+		}
+		if len(marked) > 0 {
+			res.SkippedManual++
+			slog.Warn("purge-provenance: sidecar belongs to a manually marked instrumental; leaving it", "scan_result_ids", scanResultIDs)
+			return false
+		}
+		return true
+	}
+
 	// Companion BEFORE the .lrc, the writer's rule: a failed companion removal
 	// leaves the .lrc too, so the pair is never split. The re-fetch's writer
 	// removes an owned companion before it writes, so the retry is safe.
 	if companion != "" {
+		if !stillUnmarked() {
+			return
+		}
 		if rerr := removeFile(companion); rerr != nil && !os.IsNotExist(rerr) {
 			res.Errors++
 			slog.Warn("purge-provenance: companion delete failed; leaving the sidecar too", "path", companion, "error", rerr)
@@ -489,6 +516,9 @@ func (p *Purger) processSidecar(ctx context.Context, path string, idx map[string
 		res.CompanionsDeleted++
 	}
 
+	if !stillUnmarked() {
+		return
+	}
 	if rerr := removeFile(path); rerr != nil {
 		if !os.IsNotExist(rerr) {
 			res.Errors++
@@ -853,8 +883,17 @@ func disputedLanes(ctx context.Context, tx *sql.Tx, workItemIDs []int64, tag str
 // alone and counted as skipped-manual, not as an error.
 var errMarkedUnderfoot = errors.New("purgeprovenance: row marked instrumental since the index was built")
 
+// rowQuerier is the read side of *sql.Tx and *sql.DB.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// afterResetHook, when non-nil, runs between the reset commit and the first
+// unlink. Test seam only.
+var afterResetHook func()
+
 // markedRows re-reads the given rows inside tx and returns the ids now marked.
-func markedRows(ctx context.Context, tx *sql.Tx, workItemIDs []int64) ([]int64, error) {
+func markedRows(ctx context.Context, tx rowQuerier, workItemIDs []int64) ([]int64, error) {
 	placeholders := make([]string, len(workItemIDs))
 	args := make([]any, len(workItemIDs))
 	for i, id := range workItemIDs {

@@ -64,15 +64,15 @@ var queueBuckets = []queueBucket{
 	{
 		Key:         reports.BucketFinished,
 		Label:       "Finished",
-		Tooltip:     "Completed tracks whose lyrics carry word-level timing on disk. The only terminal state: nothing further to gain.",
-		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk. No word-synced tier is available here, so line-synced is the best result: nothing further to gain.",
+		Tooltip:     "Completed tracks with word-level timing on disk, plus instrumentals you marked by hand. The only terminal state: nothing further to gain.",
+		LineTooltip: "Completed tracks with line- or word-synced lyrics on disk, plus instrumentals you marked by hand. No word-synced tier is available here, so line-synced is the best result: nothing further to gain.",
 		Value:       func(s reports.QueueSummary) int64 { return s.Finished },
 	},
 	{
 		Key:         reports.BucketSettled,
 		Label:       "Settled (upgradable)",
-		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, instrumental, or tier not yet recorded). Not treated as finished: word-synced is the only finished state.",
-		LineTooltip: "Completed tracks below line sync (unsynced, instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync.",
+		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, detected or provider-flagged instrumental, or tier not yet recorded). Not finished: a later run may still improve them. Hand-marked instrumentals are not here.",
+		LineTooltip: "Completed tracks below line sync (unsynced, detected or provider-flagged instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync. Hand-marked instrumentals are not here.",
 		Value:       func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{
@@ -178,7 +178,7 @@ var resultBuckets = []resultBucket{
 	},
 	{
 		Label:   "Instrumental",
-		Tooltip: "Tracks marked instrumental (no lyrics expected), by audio detection or a provider's own flag.",
+		Tooltip: "Tracks marked instrumental (no lyrics expected): by audio detection, a provider's own flag, or by hand.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.Instrumental },
 	},
 	{
