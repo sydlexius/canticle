@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/pressly/goose/v3"
 
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/musixmatch"
@@ -347,6 +350,21 @@ func insertReasonRow(t *testing.T, d *sql.DB, status, title, lastErr string) {
 	}
 }
 
+// backfillReasons re-runs the real migration 067 (down past it, up again) over the rows inserted so far.
+func backfillReasons(t *testing.T, d *sql.DB) {
+	t.Helper()
+	p, err := goose.NewProvider(goose.DialectSQLite3, d, os.DirFS("../db/migrations"))
+	if err == nil {
+		_, err = p.DownTo(context.Background(), 66)
+	}
+	if err == nil {
+		_, err = p.Up(context.Background())
+	}
+	if err != nil {
+		t.Fatalf("re-run migration 067: %v", err)
+	}
+}
+
 func titlesOf(t *testing.T, d *sql.DB, b Bucket, f BucketFilter) []string {
 	t.Helper()
 	rows, err := New(d).ListBucketFiltered(context.Background(), b, f, BucketSpec(b).Default, tablesort.Cursor{}, MaxBucketLimit)
@@ -362,7 +380,9 @@ func titlesOf(t *testing.T, d *sql.DB, b Bucket, f BucketFilter) []string {
 }
 
 // Every category returns exactly the rows whose shape belongs to it, and the
-// categories together return every row of the bucket once (a partition).
+// categories together return every row of the bucket once (a partition). The
+// rows are classified by migration 067's backfill, so the backfilled column
+// agrees row for row with the text classifier it replaced (#1285).
 func TestReasonCategoriesPartitionTheBucket(t *testing.T) {
 	d := openReasonDB(t)
 	want := map[string][]string{}
@@ -372,6 +392,26 @@ func TestReasonCategoriesPartitionTheBucket(t *testing.T) {
 		want[s.want] = append(want[s.want], title)
 	}
 	insertReasonRow(t, d, "deferred", "elsewhere", "no results found") // another bucket never leaks in
+	backfillReasons(t, d)
+	// A row with no class (an older binary's write) still lands in one category.
+	insertReasonRow(t, d, "failed", "unclassed empty", "")
+	insertReasonRow(t, d, "failed", "unclassed text", "lane a: rate limited")
+	want[ReasonNone] = append(want[ReasonNone], "unclassed empty")
+	// A blank message with no class reads as no reason, like the display.
+	for title, msg := range map[string]string{"unclassed spaces": "   ", "unclassed tab": "\t", "unclassed newline": "\n"} {
+		insertReasonRow(t, d, "failed", title, msg)
+		want[ReasonNone] = append(want[ReasonNone], title)
+	}
+	want[ReasonOther] = append(want[ReasonOther], "unclassed text")
+	// So does a stored value that is not a category key.
+	insertReasonRow(t, d, "failed", "foreign class", "lane a: rate limited")
+	insertReasonRow(t, d, "failed", "empty class", "lane a: rate limited")
+	for title, class := range map[string]string{"foreign class": "quota", "empty class": ""} {
+		if _, err := d.Exec(`UPDATE work_queue SET failure_class = ? WHERE title = ?`, class, title); err != nil {
+			t.Fatal(err)
+		}
+		want[ReasonOther] = append(want[ReasonOther], title)
+	}
 
 	var union []string
 	for _, def := range reasonDefs {
@@ -433,6 +473,7 @@ func TestReasonFilterPagingWalkReturnsEachRowOnce(t *testing.T) {
 			insertReasonRow(t, d, "deferred", strings.Replace(title, "walk", "stray", 1), "lane a: musixmatch: no results found")
 		}
 	}
+	backfillReasons(t, d)
 	spec := BucketSpec(BucketDeferred)
 	order := tablesort.Order{Key: tablesort.KeyTitle}
 	f := BucketFilter{Reason: ReasonMiss, Query: "walk"}

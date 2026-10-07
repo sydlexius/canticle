@@ -645,7 +645,7 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	if err := q.SettleWordRecheck(ctx, absent, WordTimingAbsent, 9); err != nil {
 		t.Fatalf("settle absent: %v", err)
 	}
-	if released, err := q.DeferWordRecheck(ctx, deferred, time.Hour, 1, "throttled"); err != nil || released {
+	if released, err := q.DeferWordRecheck(ctx, deferred, time.Hour, 1, "throttled", FailureThrottle); err != nil || released {
 		t.Fatalf("defer = (%v, %v); want parked", released, err)
 	}
 	if got := laneRows(); got != lane0 {
@@ -680,7 +680,7 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	if lastErr != "throttled" {
 		t.Fatalf("deferred last_error = %q; want throttled", lastErr)
 	}
-	deferErr := func(id int64) error { _, err := q.DeferWordRecheck(ctx, id, time.Hour, 1, "x"); return err }
+	deferErr := func(id int64) error { return errOf(q.DeferWordRecheck(ctx, id, time.Hour, 1, "x", FailureThrottle)) }
 	for name, err := range map[string]error{
 		"settle ordinary": q.SettleWordRecheck(ctx, ordinary, WordTimingAbsent, 9),
 		"defer ordinary":  deferErr(ordinary),
@@ -699,7 +699,7 @@ func TestWordRecheckSettleAndDefer(t *testing.T) {
 	// The wait budget (maxWaits=1) is spent: the next unanswered defer un-flips
 	// the row to done with no verdict, completed_at and counters untouched.
 	mustExec(t, dbh, `UPDATE work_queue SET status = 'processing' WHERE id = ?`, deferred)
-	if released, err := q.DeferWordRecheck(ctx, deferred, time.Hour, 1, "again"); err != nil || !released {
+	if released, err := q.DeferWordRecheck(ctx, deferred, time.Hour, 1, "again", FailureThrottle); err != nil || !released {
 		t.Fatalf("defer past cap = (%v, %v); want released", released, err)
 	}
 	if st, s, c, _, g, m, a := read(deferred); st != "done" || s != "" || c != "2026-01-10T00:00:00Z" || g.Valid || m != 3 || a != 1 || lastErr != "" {

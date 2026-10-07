@@ -4,6 +4,8 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 // pathFreeError reports an OS error without the library path it embeds. The
@@ -20,7 +22,8 @@ func (e *pathFreeError) Unwrap() error { return e.err }
 // scrubWritePaths rebuilds each *fs.PathError, *os.LinkError and
 // *os.SyscallError in err's chain as "op: cause" so a filename or directory
 // (which may contain ": ") never reaches last_error or a /metrics label. The
-// full path stays in the caller's Warn log attributes.
+// full path stays in the caller's Warn log attributes. Every write failure
+// passes through here, so it is also where one gets its failure class (#1285).
 func scrubWritePaths(err error) error {
 	if err == nil {
 		return nil
@@ -49,8 +52,8 @@ func scrubWritePaths(err error) error {
 		}
 	}
 	walk(err)
-	if msg == err.Error() {
-		return err
+	if msg != err.Error() {
+		err = &pathFreeError{msg: msg, err: err}
 	}
-	return &pathFreeError{msg: msg, err: err}
+	return queue.WithFailureClass(err, queue.FailureWrite)
 }

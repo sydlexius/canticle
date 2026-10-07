@@ -460,7 +460,7 @@ func (q *DBQueue) SettleWordRecheck(ctx context.Context, id int64, state string,
 // (#950's contract); a caller with a DIFFERENT reason to re-park (a post-write
 // bookkeeping failure, #1086) must not spend it here -- see
 // RetryWordRecheckWrite below, which shares none of this budget.
-func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (released bool, err error) {
+func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string, class FailureClass) (released bool, err error) {
 	// Retried like Settle: a lost write strands the row in 'processing', which
 	// nothing reclaims.
 	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
@@ -477,8 +477,9 @@ func (q *DBQueue) DeferWordRecheck(ctx context.Context, id int64, retryAfter tim
              word_timing_state = CASE WHEN refused_waits >= ? THEN NULL ELSE word_timing_state END,
              next_attempt_at = CASE WHEN refused_waits >= ? THEN next_attempt_at ELSE ? END,
              last_error = CASE WHEN refused_waits >= ? THEN '' ELSE ? END,
+             failure_class = ?, -- the caller's class; a release drops it (067)
              refused_waits = CASE WHEN refused_waits >= ? THEN 0 ELSE refused_waits + 1 END`+wordRecheckOwned+
-			` RETURNING status = 'done'`, maxWaits, maxWaits, maxWaits, next, maxWaits, cause, maxWaits, id).Scan(&released)
+			` RETURNING status = 'done'`, maxWaits, maxWaits, maxWaits, next, maxWaits, cause, storedClass(cause, class), maxWaits, id).Scan(&released)
 		if err != nil {
 			return fmt.Errorf("queue: defer word recheck id %d: %w", id, err)
 		}
@@ -514,8 +515,8 @@ func (q *DBQueue) RetryWordRecheckWrite(ctx context.Context, id int64, retryAfte
 	return db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
 		next := formatTime(q.now().Add(retryAfter))
 		res, err := q.db.ExecContext(ctx,
-			`UPDATE work_queue SET status = 'deferred', next_attempt_at = ?, last_error = ?`+wordRecheckOwned,
-			next, cause, id,
+			`UPDATE work_queue SET status = 'deferred', next_attempt_at = ?, last_error = ?, failure_class = ?`+wordRecheckOwned,
+			next, cause, storedClass(cause, FailureOther), id,
 		)
 		if err != nil {
 			return fmt.Errorf("queue: retry word recheck write %d: %w", id, err)

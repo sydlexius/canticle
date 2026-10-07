@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/pressly/goose/v3"
 
 	"github.com/sydlexius/canticle/internal/reports"
 )
@@ -415,6 +418,17 @@ func seedReasons(t *testing.T, db *sql.DB) {
 	if _, err := db.ExecContext(context.Background(), `UPDATE work_queue SET provider_lane =
          CASE title WHEN 'Other 006' THEN 'musixmatch' ELSE 'petitlyrics' END WHERE title IN ('Other 006', 'Other 008')`); err != nil {
 		t.Fatal(err)
+	}
+	// Classify the rows as an upgrade does: re-run migration 067's backfill.
+	p, err := goose.NewProvider(goose.DialectSQLite3, db, os.DirFS("../db/migrations"))
+	if err == nil {
+		_, err = p.DownTo(context.Background(), 66)
+	}
+	if err == nil {
+		_, err = p.Up(context.Background())
+	}
+	if err != nil {
+		t.Fatalf("re-run migration 067: %v", err)
 	}
 }
 

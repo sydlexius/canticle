@@ -184,7 +184,7 @@ func (w *Worker) wordSyncOff() bool {
 // as SettleWordRecheck's sql.ErrNoRows handling: the row is not this worker's
 // to fix up.
 func (w *Worker) releaseWordRecheckOff(ctx context.Context, item queue.WorkItem) error {
-	released, err := w.queue.DeferWordRecheck(context.WithoutCancel(ctx), item.ID, 0, 0, "worker: word recheck: output.word_sync_mode is off")
+	released, err := w.queue.DeferWordRecheck(context.WithoutCancel(ctx), item.ID, 0, 0, "worker: word recheck: output.word_sync_mode is off", queue.FailureOther)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("worker: release word recheck %d under word_sync_mode off: %w", item.ID, err)
 	}
@@ -319,7 +319,7 @@ func (w *Worker) deferWordRecheck(ctx context.Context, item queue.WorkItem, caus
 		}
 		return nil
 	}
-	released, err := w.queue.DeferWordRecheck(noCancel, item.ID, w.circuitOpenDuration, maxWordRecheckWaits, cause.Error())
+	released, err := w.queue.DeferWordRecheck(noCancel, item.ID, w.circuitOpenDuration, maxWordRecheckWaits, cause.Error(), failureClass(cause))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("worker: defer word recheck %d after %v: %w", item.ID, cause, err)
 	}
