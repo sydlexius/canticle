@@ -1448,3 +1448,21 @@ func TestInstrumentalInventoryAlbumIsPerFile(t *testing.T) {
 		}
 	}
 }
+
+// TestCountInstrumentalCountsManualMark (#1218): a hand-marked row is outcome
+// 'instrumental' with no detector verdict, and the report counts it.
+func TestCountInstrumentalCountsManualMark(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openTestDB(t)
+	var id int64
+	if err := sqlDB.QueryRow(`INSERT INTO work_queue (artist, title, artist_key, title_key, status, outcome_type)
+        VALUES ('A', 'T', 'a', 't', 'done', 'synced') RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.NewDBQueue(sqlDB).MarkManualInstrumental(ctx, id); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if n, err := reports.New(sqlDB).CountInstrumental(ctx); err != nil || n != 1 {
+		t.Errorf("CountInstrumental = (%d, %v); want 1", n, err)
+	}
+}

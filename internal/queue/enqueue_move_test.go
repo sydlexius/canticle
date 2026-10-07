@@ -97,6 +97,9 @@ func TestEnqueueMovesRowToSameStemReplacement(t *testing.T) {
 		{"hand-edited retired row moves but is not reopened",
 			"last_error = '" + UnresolvableGoneError + "', lyric_edited_at = '2026-02-01T00:00:00Z'", gone, moveNew,
 			moveNew + settled + "|0" + moveTail},
+		{"manually marked retired row moves but is not reopened",
+			"last_error = '" + UnresolvableGoneError + "', manual_instrumental_at = '2026-02-01T00:00:00Z'", gone, moveNew,
+			moveNew + settled + "|0" + moveTail},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

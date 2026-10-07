@@ -1941,7 +1941,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
 // the number of rows deleted.
 func (q *DBQueue) ClearDone(ctx context.Context) (int64, error) {
 	res, err := q.db.ExecContext(ctx,
-		`DELETE FROM work_queue WHERE status = 'done'`,
+		`DELETE FROM work_queue WHERE status = 'done' AND manual_instrumental_at IS NULL`,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("queue: clear done: %w", err)
@@ -1959,7 +1959,7 @@ func (q *DBQueue) ClearDone(ctx context.Context) (int64, error) {
 func (q *DBQueue) CountDone(ctx context.Context) (int64, error) {
 	var n int64
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE status = 'done'`,
+		`SELECT COUNT(*) FROM work_queue WHERE status = 'done' AND manual_instrumental_at IS NULL`,
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("queue: count done: %w", err)
 	}
@@ -4078,7 +4078,8 @@ func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (
              evaluated_at = NULL,
              refused_waits = 0,
              `+ClearWordRecheckQueued+`
-         WHERE id = ? AND (status = 'done' OR (status = 'deferred' AND word_timing_state = 'queued'))`,
+         WHERE id = ? AND (status = 'done' OR (status = 'deferred' AND word_timing_state = 'queued'))
+           AND manual_instrumental_at IS NULL`,
 		PriorityScan, formatTime(now), id,
 	)
 	if err != nil {

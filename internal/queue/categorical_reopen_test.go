@@ -173,6 +173,7 @@ func TestEnqueueReopenCategoricalIsDecidedInTheTransaction(t *testing.T) {
 		{name: "linked to a settled file", status: "done", otherLink: "done", reopen: true, wantRow: "pending|/m/b.flac|"},
 		{name: "own unfinished link", status: "done", ownLinked: true, reopen: true, wantRow: "pending|/m/b.flac|"},
 		{name: "hand-edited", status: "done", setup: "lyric_edited_at = '2026-02-01T00:00:00Z'", reopen: true, refused: true},
+		{name: "manually marked", status: "done", setup: "manual_instrumental_at = '2026-02-01T00:00:00Z'", reopen: true, refused: true},
 		{name: "file kept by the sweep", status: "done", setup: "outcome_type = 'synced'", reopen: true, refused: true},
 		{name: "tier recorded", status: "done", setup: "sync_tier = 'line'", reopen: true, refused: true},
 		{name: "pending outside a trip", status: "pending", reopen: true, wantRow: "pending|/m/b.flac|categorical"},

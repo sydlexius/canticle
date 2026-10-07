@@ -8,9 +8,10 @@ import (
 )
 
 // notLyricEdited keeps automatic replacement paths away from a file a person
-// adjusted by ear (#481 Stage 2). Shared by the upgrade sweep and the word
-// recheck predicates. Leading AND.
-const notLyricEdited = ` AND lyric_edited_at IS NULL`
+// adjusted by ear (#481 Stage 2) and away from a row an operator marked
+// instrumental by hand (#1218). Shared by the upgrade sweep, word recheck,
+// categorical reopen and gone-source move predicates. Leading AND.
+const notLyricEdited = ` AND lyric_edited_at IS NULL AND manual_instrumental_at IS NULL`
 
 // SetLyricEdit records a hand edit of the row's .lrc: the net offset from the
 // original and the edit time. Non-fatal for the caller only in the sense that
