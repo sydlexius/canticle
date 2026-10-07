@@ -224,3 +224,40 @@ func TestMarkManualInstrumentalSQLRefusesProcessing(t *testing.T) {
 		t.Errorf("status = %q err=%v; want processing", status, err)
 	}
 }
+
+// A prior outcome's explanation must not outlive the outcome it described:
+// recentSelect coalesces outcome_detail first, so a stale one would label the
+// manual instrumental (or the re-queued row) with the old rejection reason.
+func TestManualMarkClearsOutcomeDetail(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	id := seedUpgradeRow(t, dbh, "detail", "outcome_type = 'rejected', outcome_detail = 'script guard: wrong language'")
+
+	detail := func() sql.NullString {
+		t.Helper()
+		var d sql.NullString
+		if err := dbh.QueryRow(`SELECT outcome_detail FROM work_queue WHERE id = ?`, id).Scan(&d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	if d := detail(); !d.Valid {
+		t.Fatal("seed did not record an outcome_detail")
+	}
+	if changed, err := q.MarkManualInstrumental(ctx, id); err != nil || !changed {
+		t.Fatalf("mark = (%v, %v); want (true, nil)", changed, err)
+	}
+	if d := detail(); d.Valid {
+		t.Errorf("outcome_detail after mark = %q; want NULL", d.String)
+	}
+
+	if _, err := dbh.Exec(`UPDATE work_queue SET outcome_detail = 'stale' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := q.UnmarkManualInstrumental(ctx, id); err != nil || !ok {
+		t.Fatalf("unmark = (%v, %v); want (true, nil)", ok, err)
+	}
+	if d := detail(); d.Valid {
+		t.Errorf("outcome_detail after unmark = %q; want NULL", d.String)
+	}
+}
