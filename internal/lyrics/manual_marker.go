@@ -3,6 +3,8 @@ package lyrics
 import (
 	"bytes"
 	"strings"
+
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // SourceManual is the [source:] token of an instrumental marker an operator
@@ -39,4 +41,17 @@ func ManualMarkerOnDisk(path string) bool {
 	}
 	prov, isMarker := provenanceOf(tags, lines)
 	return isMarker && prov.IsManual()
+}
+
+// OwnedCompanions is every canticle-owned word-synced companion variant beside
+// the line-synced path fp, whether or not fp itself exists: exactly the set a
+// write to fp removes. Exported so the manual-mark backup inventories the same
+// files the writer will delete rather than re-deriving the rule.
+func OwnedCompanions(fp string, l sidecar.Listing) []string { return ownedCompanions(fp, l) }
+
+// ReadRegularNoFollow reads path through one no-follow handle that must fstat
+// as a regular file and refuses a file over limit bytes. Exported for the
+// manual-mark backup, which must not follow a symlink swapped in after a stat.
+func ReadRegularNoFollow(path string, limit int64) ([]byte, error) {
+	return readRegularNoFollow(path, limit)
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -69,7 +70,9 @@ type Marker struct {
 	w  *lyrics.LRCWriter
 }
 
-// New returns a Marker over db and writer w.
+// New returns a Marker over db and writer w. The caller wires the writer's
+// selfwrite registry; a separate CLI process cannot share the serve process's
+// registry, so the watcher there rescans the settled row, which is harmless.
 func New(db *sql.DB, w *lyrics.LRCWriter) *Marker { return &Marker{db: db, w: w} }
 
 type target struct {
@@ -87,9 +90,11 @@ const busyAttempts = 5
 // row; (2) back up every lyric file the marker will replace via opts.Report;
 // (3) one transaction settles the row and invalidates the track's cache entry
 // (a surviving entry would let the next scan resurrect the old lyrics); (4)
-// write the marker. A step-4 failure unmarks a row this call marked, which
-// re-queues it so a scan rewrites the files (originals remain in the backup
-// record); calling Mark again on a marked row with no marker repairs it.
+// write the marker. A step-4 failure before ANY marker was written unmarks a
+// row this call marked, which re-queues it so a scan rewrites the files
+// (originals remain in the backup record). Once any marker is written, or the
+// post-settle re-inventory fails, the row stays marked and the error says so:
+// calling Mark again on a marked row without every marker repairs it.
 func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, error) {
 	t, err := m.load(ctx, id)
 	if err != nil {
@@ -112,12 +117,9 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 	if opts.DryRun {
 		return Result{Outcome: OutcomeDryRun, FilesBackedUp: len(files)}, nil
 	}
+	reported := make(map[string]bool)
 	for _, p := range files {
-		rec, rerr := readRecord(id, p)
-		if rerr == nil && opts.Report != nil {
-			rerr = opts.Report(rec)
-		}
-		if rerr != nil {
+		if rerr := backup(id, p, opts.Report, reported); rerr != nil {
 			return Result{}, fmt.Errorf("instrumentalmark: backup of work item %d failed, nothing changed: %w", id, rerr)
 		}
 	}
@@ -125,13 +127,31 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
+	// Second inventory: a file that appeared after the first (a hand-written
+	// .txt, a .lrc a worker finished) is backed up too. A failure here leaves
+	// the row marked with no marker written; a retry of Mark repairs it. A file
+	// created between this inventory and the writer's rename can still be lost:
+	// there is no per-stem lock.
+	late, _, err := inventory(t, dirs)
+	if err != nil {
+		return Result{}, fmt.Errorf("instrumentalmark: work item %d is marked but no marker was written; retry the mark to repair: %w", id, err)
+	}
+	for _, p := range late {
+		if rerr := backup(id, p, opts.Report, reported); rerr != nil {
+			return Result{}, fmt.Errorf("instrumentalmark: work item %d is marked but a late file could not be backed up and no marker was written; retry the mark to repair: %w", id, rerr)
+		}
+	}
+	written := 0
 	song := models.Song{
 		Track:       models.Track{ArtistName: t.artist, TrackName: t.title, AlbumName: t.album, Instrumental: 1},
 		WinningLane: lyrics.ManualLaneName,
 	}
 	for i, o := range t.outputs {
 		if werr := m.w.WriteManualMarker(song, o.Filename, dirs[i]); werr != nil {
-			werr = fmt.Errorf("instrumentalmark: write marker for work item %d: %w", id, werr)
+			werr = fmt.Errorf("instrumentalmark: write marker for work item %d: %w", id, stripPath(werr))
+			if written > 0 {
+				return Result{}, fmt.Errorf("%w (%d of %d markers written; the row stays marked, retry the mark to repair)", werr, written, len(t.outputs))
+			}
 			if changed {
 				if uerr := m.unmark(ctx, id); uerr != nil {
 					slog.Warn("instrumentalmark: could not unmark after a failed marker write; calling Mark again repairs it", "id", id, "error", uerr)
@@ -140,6 +160,7 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 			}
 			return Result{}, werr
 		}
+		written++
 	}
 	return Result{Outcome: OutcomeMarked, FilesBackedUp: len(files)}, nil
 }
@@ -221,38 +242,41 @@ func inventory(t target, dirs []string) (files []string, allMarked bool, err err
 	allMarked = true
 	for i, o := range t.outputs {
 		l := sidecar.List(dirs[i])
-		var txtFp string
+		var txtFp, lrcFp string
 		for _, synced := range []bool{true, false} {
 			name, nerr := lyrics.SidecarName(t.artist, t.title, o.Filename, synced)
 			if nerr != nil {
 				return nil, false, fmt.Errorf("instrumentalmark: sidecar name: %w", nerr)
 			}
 			fp := filepath.Join(dirs[i], name)
-			if !synced {
+			if synced {
+				lrcFp = fp
+			} else {
 				txtFp = fp
 			}
 			for _, v := range l.Variants(fp) {
 				fi, serr := os.Lstat(v)
 				if serr != nil {
-					return nil, false, fmt.Errorf("instrumentalmark: stat lyric file: %w", serr)
+					return nil, false, fmt.Errorf("instrumentalmark: stat lyric file: %w", stripPath(serr))
 				}
 				if fi.Mode()&os.ModeSymlink != 0 {
 					return nil, false, ErrSymlinkedSidecar
 				}
-				cands := []string{v}
-				if synced {
-					if c := lyrics.OwnedCompanionOf(v); c != "" {
-						cands = append(cands, c)
-					}
-				} else if lyrics.ManualMarkerOnDisk(v) {
+				if !synced && lyrics.ManualMarkerOnDisk(v) {
 					continue
 				}
-				for _, c := range cands {
-					if !seen[c] {
-						seen[c] = true
-						files = append(files, c)
-					}
+				if !seen[v] {
+					seen[v] = true
+					files = append(files, v)
 				}
+			}
+		}
+		// Every owned .elrc variant the writer will remove, with or without a
+		// .lrc beside it; the writer's own predicate, not a copy of its rule.
+		for _, c := range lyrics.OwnedCompanions(lrcFp, l) {
+			if !seen[c] {
+				seen[c] = true
+				files = append(files, c)
 			}
 		}
 		if !lyrics.ManualMarkerOnDisk(txtFp) {
@@ -262,23 +286,43 @@ func inventory(t target, dirs []string) (files []string, allMarked bool, err err
 	return files, allMarked, nil
 }
 
-// readRecord captures path's bytes for the backup, never following a symlink.
+// backup reports path once; reported dedupes across the two inventories.
+func backup(id int64, path string, report func(Record) error, reported map[string]bool) error {
+	if reported[path] {
+		return nil
+	}
+	rec, err := readRecord(id, path)
+	if err == nil && report != nil {
+		err = report(rec)
+	}
+	if err == nil {
+		reported[path] = true
+	}
+	return err
+}
+
+// readRecord captures path's bytes for the backup through one no-follow
+// handle, so a file swapped for a symlink after the inventory is refused.
+// Errors never carry the path (a sidecar path is private library metadata).
 func readRecord(id int64, path string) (Record, error) {
-	fi, err := os.Lstat(path)
+	b, err := lyrics.ReadRegularNoFollow(path, MaxBackupBytes)
 	if err != nil {
-		return Record{}, fmt.Errorf("stat %q: %w", path, err)
-	}
-	if !fi.Mode().IsRegular() {
-		return Record{}, fmt.Errorf("%q is not a regular file", path)
-	}
-	if fi.Size() > MaxBackupBytes {
-		return Record{}, fmt.Errorf("%q is over the %d-byte backup limit", path, MaxBackupBytes)
-	}
-	b, err := os.ReadFile(path) //nolint:gosec // reason: G304: path is a lyric sidecar confined to a library root and Lstat'ed regular above
-	if err != nil {
-		return Record{}, fmt.Errorf("read %q: %w", path, err)
+		return Record{}, fmt.Errorf("read lyric file (not regular, over the %d-byte backup limit, or unreadable): %w", MaxBackupBytes, stripPath(err))
 	}
 	return Record{Op: OpMark, WorkItemID: id, Path: path, Content: b}, nil
+}
+
+// stripPath drops the path an os error carries, keeping only its cause.
+func stripPath(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Err
+	}
+	return err
 }
 
 // settle marks the row and invalidates every cache key a re-scan could look up

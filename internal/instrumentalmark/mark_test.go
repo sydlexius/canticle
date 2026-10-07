@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/cache"
@@ -132,6 +133,9 @@ func TestMarkReplacesSyncedLyricsBackupFirst(t *testing.T) {
 	}
 	if !lyrics.ManualMarkerOnDisk(filepath.Join(f.dir, "song.txt")) {
 		t.Error("no manual marker on disk")
+	}
+	if mb, _ := os.ReadFile(filepath.Join(f.dir, "song.txt")); !bytes.Contains(mb, []byte("[source:manual]")) || bytes.Contains(mb, []byte("[dv:")) || bytes.Contains(mb, []byte("[upstream:")) {
+		t.Errorf("marker = %q; want [source:manual] and no [dv:/[upstream:", mb)
 	}
 	if !f.marked(t) {
 		t.Error("row not marked")
@@ -289,5 +293,91 @@ func TestMarkDryRunWritesNothing(t *testing.T) {
 	}
 	if len(rec.recs) != 0 || !f.exists("song.lrc") || f.exists("song.txt") || f.marked(t) {
 		t.Error("dry run changed something")
+	}
+}
+
+func TestMarkBacksUpAFileThatAppearsAfterTheFirstInventory(t *testing.T) {
+	f := newFixture(t)
+	f.write(t, "song.lrc", "[00:01.00]hi\n")
+	rec := &recorder{}
+	report := func(r Record) error {
+		if len(rec.recs) == 0 {
+			f.write(t, "song.txt", "hand written late\n")
+		}
+		return rec.report(r)
+	}
+	if _, err := f.m.Mark(f.ctx, f.id, Options{Report: report}); err != nil {
+		t.Fatal(err)
+	}
+	var got bool
+	for _, r := range rec.recs {
+		got = got || (filepath.Base(r.Path) == "song.txt" && string(r.Content) == "hand written late\n")
+	}
+	if !got || !lyrics.ManualMarkerOnDisk(filepath.Join(f.dir, "song.txt")) {
+		t.Errorf("late song.txt backed up=%v; records=%d", got, len(rec.recs))
+	}
+}
+
+func TestMarkBacksUpALoneOwnedCompanion(t *testing.T) {
+	f := newFixture(t)
+	body := "[by:canticle]\n[00:01.00]<00:01.00>hi\n"
+	f.write(t, "song.elrc", body)
+	rec := &recorder{}
+	if _, err := f.m.Mark(f.ctx, f.id, Options{Report: rec.report}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.recs) != 1 || filepath.Base(rec.recs[0].Path) != "song.elrc" || string(rec.recs[0].Content) != body || f.exists("song.elrc") {
+		t.Errorf("records = %d; want the lone .elrc backed up and removed", len(rec.recs))
+	}
+}
+
+func TestMarkPartWrittenMarkKeepsTheRowMarkedAndRetryCompletes(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	f := newFixture(t)
+	dir2 := filepath.Join(f.root, "album2")
+	if err := os.MkdirAll(dir2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := json.Marshal([]models.OutputPath{{Outdir: f.dir, Filename: "song.flac"}, {Outdir: dir2, Filename: "other.flac"}})
+	if _, err := f.db.Exec(`UPDATE work_queue SET output_paths = ? WHERE id = ?`, string(paths), f.id); err != nil {
+		t.Fatal(err)
+	}
+	f.write(t, "song.lrc", "[00:01.00]hi\n")
+	report := func(Record) error { return os.Chmod(dir2, 0o555) }
+	t.Cleanup(func() { _ = os.Chmod(dir2, 0o755) })
+	_, err := f.m.Mark(f.ctx, f.id, Options{Report: report})
+	if err == nil || !strings.Contains(err.Error(), "retry the mark") {
+		t.Fatalf("err = %v; want a retry-the-mark error", err)
+	}
+	if !f.marked(t) || !lyrics.ManualMarkerOnDisk(filepath.Join(f.dir, "song.txt")) {
+		t.Fatalf("marked=%v; want the row kept marked beside the written marker", f.marked(t))
+	}
+	_ = os.Chmod(dir2, 0o755)
+	if res, err := f.m.Mark(f.ctx, f.id, Options{}); err != nil || res.Outcome != OutcomeMarked {
+		t.Fatalf("retry = %+v, %v", res, err)
+	}
+	if !lyrics.ManualMarkerOnDisk(filepath.Join(dir2, "other.txt")) {
+		t.Error("retry did not write the second marker")
+	}
+}
+
+func TestMarkBackupErrorCarriesNoPath(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	f := newFixture(t)
+	p := f.write(t, "song.lrc", "[00:01.00]hi\n")
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+	_, err := f.m.Mark(f.ctx, f.id, Options{})
+	if err == nil {
+		t.Fatal("want a backup error")
+	}
+	if strings.Contains(err.Error(), f.dir) || strings.Contains(err.Error(), "song") {
+		t.Errorf("error leaks a path: %q", err)
 	}
 }
