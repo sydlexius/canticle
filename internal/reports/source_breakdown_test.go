@@ -166,3 +166,45 @@ func TestSourceBreakdownSumsAndAgreesWithDashboard(t *testing.T) {
 		t.Errorf("per-type sums over sources = %+v, ResultsBreakdown = %+v", all, want)
 	}
 }
+
+// TestSourceBreakdownTieBreakOrder pins the ordering when totals are equal:
+// sources fall back to lane ascending and licensors to name ascending. There
+// are more than 12 lanes with mixed totals because sort.Slice is a stable
+// insertion sort at or below that size and would keep SQL's alphabetical order,
+// hiding a missing tie-break; the licensors come out of a map, so eight make a
+// missing tie-break near certain to show.
+func TestSourceBreakdownTieBreakOrder(t *testing.T) {
+	sqlDB := openTestDB(t)
+	it := providers.InnerTube
+	ups := []string{"Up-h", "Up-g", "Up-f", "Up-e", "Up-d", "Up-c", "Up-b", "Up-a"}
+	for c := 'p'; c >= 'c'; c-- {
+		for n := 0; n < 1+int(c)%3; n++ {
+			insertWorkItem(t, sqlDB, workItem{title: string(c) + string(rune('a'+n)), artist: "A", status: "done", providerLane: "lane-" + string(c), outcomeType: "unsynced"})
+		}
+	}
+	for _, u := range ups {
+		id := insertWorkItem(t, sqlDB, workItem{title: "it-" + u, artist: "A", status: "done", providerLane: it, outcomeType: "unsynced"})
+		if _, err := sqlDB.Exec(`UPDATE work_queue SET upstream = ? WHERE id = ?`, u, id); err != nil {
+			t.Fatalf("set upstream: %v", err)
+		}
+	}
+	got, err := reports.New(sqlDB).SourceBreakdown(context.Background())
+	if err != nil {
+		t.Fatalf("SourceBreakdown: %v", err)
+	}
+	for i := 1; i < len(got); i++ {
+		if a, b := got[i-1], got[i]; a.Counts.Total() < b.Counts.Total() || (a.Counts.Total() == b.Counts.Total() && a.Lane >= b.Lane) {
+			t.Fatalf("equal-total sources must order by lane ascending, got %q before %q", got[i-1].Lane, got[i].Lane)
+		}
+	}
+	for _, s := range got {
+		if s.Lane != it {
+			continue
+		}
+		for i := 1; i < len(s.Upstreams); i++ {
+			if s.Upstreams[i-1].Upstream >= s.Upstreams[i].Upstream {
+				t.Fatalf("equal-total upstreams must order by name ascending, got %q before %q", s.Upstreams[i-1].Upstream, s.Upstreams[i].Upstream)
+			}
+		}
+	}
+}
