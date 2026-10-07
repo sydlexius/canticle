@@ -266,14 +266,15 @@ func buildQueueColumns(bucket string, state queueViewState, spec tablesort.Spec,
 var queueChipLabels = map[reports.Chip]string{
 	reports.ChipLineSynced: "Line-synced (editable)",
 	reports.ChipEdited:     "Hand-edited",
+	reports.ChipWordSynced: "Word-synced",
 	reports.ChipMissynced:  "Mis-synced",
 }
 
 // buildQueueChips is the chip row for the buckets that offer chips (nil
 // elsewhere). Each chip links to the same view with that one chip toggled,
 // keeping search, sort and the other chips and dropping the cursor (a stale
-// position would hide rows). Line-synced and Mis-synced are mutually exclusive:
-// turning one on turns the other off in the link.
+// position would hide rows). Line-synced, Word-synced and Mis-synced are mutually
+// exclusive: turning one on turns the others off in the link.
 //
 // No chip shows a count, and nothing issues one. tier and edited read unindexed
 // columns, so a count is a scan of the done partition per page view. A Settled
@@ -297,8 +298,11 @@ func buildQueueChips(bucket reports.Bucket, state queueViewState, top reports.To
 			if active {
 				next.Tier = ""
 			} else {
-				next.Tier, next.MisSynced = reports.TierLine, false
+				next.Tier, next.MisSynced, next.Word = reports.TierLine, false, false
 			}
+		case reports.ChipWordSynced:
+			active = state.Word
+			next.Word = !state.Word
 		case reports.ChipEdited:
 			active = state.Edited
 			next.Edited = !state.Edited
@@ -363,7 +367,7 @@ func queueHiddenFilters(state queueViewState) []templates.QueueHidden {
 	v := state.filterValues()
 	v.Del("q")
 	out := make([]templates.QueueHidden, 0, len(v))
-	for _, k := range []string{"tier", "edited", "missync"} {
+	for _, k := range []string{"tier", "word", "edited", "missync"} {
 		if val := v.Get(k); val != "" {
 			out = append(out, templates.QueueHidden{Name: k, Value: val})
 		}

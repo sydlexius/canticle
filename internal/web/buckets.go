@@ -146,16 +146,11 @@ var resultBuckets = []resultBucket{
 		Label:   "Word-synced",
 		Tooltip: "Synced lyrics with word-level timing on disk. Terminal: nothing further to gain from a re-fetch or word-sync recheck.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.WordSynced },
-		// Finished is the word tier only under the word rung, plus hand-marked
-		// instrumentals (#1405), whose lane is "manual" and so never matches a
-		// provider-lane filter. Unfiltered, no chip separates them from the word
-		// tier, so the tile stays plain there; under the line rung Finished also
-		// holds the line tier and no word chip exists.
-		Href: func(top reports.TopRung, lane string) string {
-			if top == reports.TopRungLine || lane == "" {
-				return ""
-			}
-			return resultsHref(reports.BucketFinished, queueViewState{Lane: lane})
+		// Finished also holds hand-marked instrumentals (#1405), and under the
+		// line rung the line tier; the Word-synced chip (word=1) narrows it to
+		// exactly this tile's population under both rungs.
+		Href: func(_ reports.TopRung, lane string) string {
+			return resultsHref(reports.BucketFinished, queueViewState{Lane: lane, Word: true})
 		},
 	},
 	{

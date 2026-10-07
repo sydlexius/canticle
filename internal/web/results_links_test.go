@@ -99,11 +99,13 @@ func TestResultTilesLinkToEqualPopulations(t *testing.T) {
 		linked map[string]string // tile label -> href
 	}{
 		{"word rung", reports.TopRungWord, map[string]string{
-			// Finished also holds hand-marked instrumentals (#1405): Word-synced stays unlinked.
+			// Finished also holds the hand-marked row (m1): the word chip excludes it (#1405).
+			"Word-synced": "/queue/finished?word=1",
 			"Line-synced": "/queue/settled?tier=line",
 		}},
 		{"line rung", reports.TopRungLine, map[string]string{
-			// Finished = word + line there and no word chip exists: Word-synced stays unlinked.
+			// Finished = word + line + the marked row there; each tier has its own chip.
+			"Word-synced": "/queue/finished?word=1",
 			"Line-synced": "/queue/finished?tier=line",
 		}},
 	}

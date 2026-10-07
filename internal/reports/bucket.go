@@ -160,6 +160,10 @@ type BucketFilter struct {
 	Tier      string
 	Edited    bool
 	MisSynced bool
+	// Word keeps only word-synced rows (outcome synced AND wordTierPredicate), the
+	// Results tile's own population. It drops hand-marked instrumentals, which
+	// Finished also holds (#1405).
+	Word bool
 	// LibraryID, when positive, keeps only rows linked to that library (a
 	// work_queue row dedupes several files, so it can belong to several
 	// libraries; a CLI-enqueued row belongs to none and never matches). The id
@@ -243,9 +247,13 @@ var tierPredicates = map[string]string{
 	TierLine: `outcome_type = 'synced' AND ` + lineTierPredicate,
 }
 
-// Hand-edited (#1213) and mis-synced chips: constant fragments, no caller text.
+// Hand-edited (#1213), mis-synced and word-synced (#1405) chips: constant
+// fragments, no caller text.
 const (
-	editedPredicate = `lyric_edited_at IS NOT NULL`
+	// wordSyncedPredicate is ResultsBreakdown.WordSynced's own arm, so the Word-synced
+	// tile and the chip it links to cannot drift.
+	wordSyncedPredicate = `outcome_type = 'synced' AND (` + wordTierPredicate + `)`
+	editedPredicate     = `lyric_edited_at IS NOT NULL`
 	// timingWrongPredicate means exactly timing_outcome = 'mis_synced' on done rows
 	// (composed with a done bucket), NOT the review queue's wider
 	// ('mis_synced', 'categorical') set over any status.
@@ -261,6 +269,7 @@ const (
 	ChipLineSynced Chip = "tier"
 	ChipEdited     Chip = "edited"
 	ChipMissynced  Chip = "missync"
+	ChipWordSynced Chip = "word"
 )
 
 // bucketChips and lineTopBucketChips are the ONE place the chip set per bucket
@@ -270,7 +279,7 @@ const (
 // can match on Finished, while Line-synced and Mis-synced only ever match on
 // Settled. A chip a bucket does not list is never offered and never honored.
 var bucketChips = map[Bucket][]Chip{
-	BucketFinished: {ChipEdited},
+	BucketFinished: {ChipWordSynced, ChipEdited},
 	BucketSettled:  {ChipLineSynced, ChipEdited, ChipMissynced},
 }
 
@@ -278,7 +287,7 @@ var bucketChips = map[Bucket][]Chip{
 // are Finished there, so the Line-synced chip moves with them (it would always
 // be empty on Settled). Mis-synced stays on Settled: the line tier excludes it.
 var lineTopBucketChips = map[Bucket][]Chip{
-	BucketFinished: {ChipLineSynced, ChipEdited},
+	BucketFinished: {ChipWordSynced, ChipLineSynced, ChipEdited},
 	BucketSettled:  {ChipEdited, ChipMissynced},
 }
 
@@ -309,6 +318,9 @@ func (f BucketFilter) chipSQL() string {
 	out := ""
 	if p, ok := tierPredicates[f.Tier]; ok {
 		out += ` AND (` + p + `)`
+	}
+	if f.Word {
+		out += ` AND ` + wordSyncedPredicate
 	}
 	if f.Edited {
 		out += ` AND ` + editedPredicate

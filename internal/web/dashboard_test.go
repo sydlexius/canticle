@@ -501,10 +501,10 @@ func TestHandleDashboard_QueueTilesLinkToBuckets(t *testing.T) {
 	}
 	body := rec.Body.String()
 	matches := dashTileAnchorRE.FindAllStringSubmatch(body, -1)
-	// Plus the one Results tile with an exact unfiltered view under the default
-	// word rung (Line-synced; #1237, #1405).
-	if want := len(reports.Buckets()) - 1 + 1; len(matches) != want {
-		t.Fatalf("tile anchors = %d, want %d (one per bucket except processing, plus one Results tile)", len(matches), want)
+	// Plus the two Results tiles with an exact filtered view under the default
+	// word rung (Word-synced, Line-synced; #1237, #1405).
+	if want := len(reports.Buckets()) - 1 + 2; len(matches) != want {
+		t.Fatalf("tile anchors = %d, want %d (one per bucket except processing, plus two Results tiles)", len(matches), want)
 	}
 	seen := map[string]bool{}
 	for _, m := range matches {

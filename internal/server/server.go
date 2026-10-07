@@ -945,6 +945,7 @@ var loggableQueryKeys = map[string]func(string) bool{
 	// tier (line only), edited, missync: the #1235 queue filter chips, fixed vocabularies.
 	"tier":    reports.ValidTier,
 	"edited":  func(v string) bool { return v == "1" },
+	"word":    func(v string) bool { return v == "1" },
 	"missync": func(v string) bool { return v == "1" },
 	// lane: the queue Source filter (#1235), a provider lane name.
 	"lane": reports.ValidLane,
