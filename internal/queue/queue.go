@@ -112,6 +112,14 @@ func (q *InputsQueue) Empty() bool {
 	return len(q.Queue) == 0
 }
 
+// IdentityKeys is the (artist_key, title_key) a work_queue row is stored under
+// for track: Enqueue writes exactly these, and a lyric block is keyed by them
+// (#1394). Pass the row's own Inputs.Track (the raw track artist, never a
+// resolved album artist) to get the row's identity.
+func IdentityKeys(track models.Track) (artistKey, titleKey string) {
+	return normalize.NormalizeKey(track.ArtistName), normalize.NormalizeKey(track.TrackName)
+}
+
 // WorkItem represents a persisted queue row.
 type WorkItem struct {
 	ID        int64
@@ -302,6 +310,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		}
 	}
 
+	artistKey, titleKey := IdentityKeys(inputs.Track)
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
              artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, detect_instrumental, next_attempt_at
@@ -398,8 +407,8 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		inputs.Track.TrackName,
 		inputs.Track.AlbumName,
 		inputs.Track.AlbumArtist,
-		normalize.NormalizeKey(inputs.Track.ArtistName),
-		normalize.NormalizeKey(inputs.Track.TrackName),
+		artistKey,
+		titleKey,
 		inputs.Outdir,
 		inputs.Filename,
 		inputs.SourcePath,

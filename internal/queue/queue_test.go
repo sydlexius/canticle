@@ -5669,3 +5669,21 @@ func TestDBQueue_DequeueStampsClaimedAtOnEveryPath(t *testing.T) {
 		})
 	}
 }
+
+// IdentityKeys is the key pair Enqueue stores, so a block keyed by it matches the row (#1394).
+func TestIdentityKeys_MatchesStoredRowKeys(t *testing.T) {
+	ctx := context.Background()
+	q := NewDBQueue(openQueueTestDB(t))
+	track := models.Track{ArtistName: "  Héllo  ", TrackName: " Wörld ", AlbumArtist: "Someone Else"}
+	if _, err := q.Enqueue(ctx, models.Inputs{Track: track, Outdir: "out", Filename: "a.lrc"}, 1); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	var artistKey, titleKey string
+	if err := q.db.QueryRowContext(ctx, `SELECT artist_key, title_key FROM work_queue`).Scan(&artistKey, &titleKey); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	gotA, gotT := IdentityKeys(track)
+	if gotA != artistKey || gotT != titleKey || gotA == "" || gotT == "" {
+		t.Fatalf("IdentityKeys = %q/%q; row stores %q/%q", gotA, gotT, artistKey, titleKey)
+	}
+}
