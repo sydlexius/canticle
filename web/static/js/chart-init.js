@@ -45,7 +45,19 @@
     Finished: '--mx-chart-finished',
     'Settled (upgradable)': '--mx-chart-settled',
     'Given up': '--mx-chart-unavailable',
+    // Source page by-type doughnut (#1300): the Results tile labels.
+    'Word-synced': '--mx-chart-finished',
+    'Line-synced': '--mx-chart-settled',
+    Unsynced: '--mx-chart-deferred',
+    Instrumental: '--mx-chart-unavailable',
+    'Tier unknown': '--mx-chart-pending',
+    Other: '--mx-chart-processing',
+    'Not recorded': '--mx-chart-pending',
   };
+
+  // Unmapped labels (upstream names, #1300) take these in order.
+  var FALLBACK_COLOR_VARS = ['--mx-chart-processing', '--mx-chart-finished', '--mx-chart-settled',
+    '--mx-chart-deferred', '--mx-chart-unavailable', '--mx-chart-failed'];
 
   // resolveVar reads a CSS custom property off an element, trimmed. Returns the
   // fallback (and logs) when the property is unset, so a missing token surfaces
@@ -81,9 +93,9 @@
   Chart.defaults.maintainAspectRatio = false;
 
   function renderDoughnut(canvas, labels, values) {
-    var colors = labels.map(function (label) {
-      var varName = QUEUE_COLOR_VARS[label];
-      return varName ? resolveVar(canvas, varName, accentColor) : accentColor;
+    var colors = labels.map(function (label, i) {
+      var varName = QUEUE_COLOR_VARS[label] || FALLBACK_COLOR_VARS[i % FALLBACK_COLOR_VARS.length];
+      return resolveVar(canvas, varName, accentColor);
     });
     return new Chart(canvas, {
       type: 'doughnut',

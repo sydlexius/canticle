@@ -103,6 +103,8 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		view.ProviderTiles = buildProviderTiles(pe)
 	}
 
+	view.UnattributedHref = unattributedPath
+
 	results, err := u.reports.ResultsBreakdown(ctx)
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: results breakdown: %w", err)
@@ -397,6 +399,7 @@ func buildProviderTile(p reports.ProviderEffectiveness) templates.StatTile {
 		ShowBar:   true,
 		BarPct:    barPct,
 		BarLabel:  barLabel,
+		Href:      sourceHref(p.Lane),
 	}
 }
 
