@@ -30,7 +30,7 @@ templ dashboardContent(view DashboardView) {
 		</div>
 		@dashQueueTiles(view.QueueTiles, view.QueueChart)
 		@dashResultsTiles(view.ResultsTiles)
-		@dashProviderTiles(view.ProviderTiles)
+		@dashProviderTiles(view.ProviderTiles, view.UnattributedHref)
 		@dashUpNext(view.InFlightRows, view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
 		@dashRecentOutcomes(view.RecentRows)
 		@dashNeedsAttention(view.AttentionRows, view.AttentionLimit)
@@ -153,7 +153,7 @@ templ dashResultsTiles(tiles []StatTile) {
 // hit-rate bar chart. The fill width is applied by chart-init.js from the
 // data-hit-rate attribute -- the serve-mode CSP (style-src 'self', no
 // unsafe-inline) forbids an inline style="" width.
-templ dashProviderTiles(tiles []StatTile) {
+templ dashProviderTiles(tiles []StatTile, unattributedHref string) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-provider-heading"
@@ -166,19 +166,34 @@ templ dashProviderTiles(tiles []StatTile) {
 			}
 			for _, t := range tiles {
 				<div class="mx-dash-tile" role="listitem">
-					<span class="mx-dash-tile-label">@laneCell(t.Label, t.LabelMark)</span>
-					<span class="mx-dash-tile-value">{ t.Value }</span>
-					if t.Sub != "" {
-						<span class="mx-dash-tile-sub">{ t.Sub }</span>
-					}
-					@dashTileHitBar(t)
-					if t.Status != "" {
-						<span class={ "mx-dash-tile-status mx-dash-tile-status-" + t.Status }>{ t.StatusText }</span>
+					if t.Href != "" {
+						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title="Results by type for this source">
+							@dashProviderTileBody(t)
+						</a>
+					} else {
+						@dashProviderTileBody(t)
 					}
 				</div>
 			}
 		</div>
+		if unattributedHref != "" {
+			<p class="mx-dash-section-sub"><a class="mx-source-link" href={ templ.SafeURL(unattributedHref) }>Results with no recorded source</a></p>
+		}
 	</section>
+}
+
+// dashProviderTileBody is a Lyrics Sources tile's content, shared by the linked
+// and plain forms so the two cannot drift.
+templ dashProviderTileBody(t StatTile) {
+	<span class="mx-dash-tile-label">@laneCell(t.Label, t.LabelMark)</span>
+	<span class="mx-dash-tile-value">{ t.Value }</span>
+	if t.Sub != "" {
+		<span class="mx-dash-tile-sub">{ t.Sub }</span>
+	}
+	@dashTileHitBar(t)
+	if t.Status != "" {
+		<span class={ "mx-dash-tile-status mx-dash-tile-status-" + t.Status }>{ t.StatusText }</span>
+	}
 }
 
 // dashTileHitBar renders the inline mini hit-rate bar for a provider/cache tile
@@ -213,7 +228,7 @@ templ dashChart(canvasID, kind, ariaLabel, suffix string, chart ChartData) {
 			data-chart-values={ chart.ValuesJSON() }
 		></canvas>
 		<noscript>
-			<p class="mx-dash-empty">Chart requires JavaScript; the same data is shown in the tiles above.</p>
+			<p class="mx-dash-empty">Chart requires JavaScript; the same numbers are shown as text on this page.</p>
 		</noscript>
 	</div>
 }

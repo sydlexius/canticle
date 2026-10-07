@@ -216,6 +216,47 @@
   height: 100%;
 }
 
+/* -- Source page (#1300) --------------------------------------------------- */
+.mx-source-block {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.mx-source-block .mx-dash-chart-wrap {
+  margin-top: 0;
+  flex: 0 1 18rem;
+  width: 100%;
+}
+
+.mx-source-table {
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+.mx-source-num {
+  text-align: right;
+  font-family: var(--mx-font-mono);
+  white-space: nowrap;
+}
+
+.mx-source-link {
+  color: var(--mx-sidebar-active-text);
+  text-decoration: none;
+}
+
+.mx-source-link:hover,
+.mx-source-link:focus-visible { text-decoration: underline; }
+
+.mx-source-link:focus-visible {
+  outline: 2px solid var(--mx-sidebar-active-text);
+  outline-offset: 2px;
+}
+
+/* The unattributed link follows the tile grid, which has no bottom margin. */
+.mx-dash-tiles + .mx-dash-section-sub { margin-top: 0.875rem; }
+
 /* -- Up next panel (#572) -------------------------------------------------- */
 /* The panel reuses .mx-table / .mx-table-wrap / .mx-cell-mono from the shared
  * stylesheet; only the tier badge and the narrow numeric columns are panel

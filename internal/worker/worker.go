@@ -146,6 +146,14 @@ type ProviderRecorder interface {
 	RecordLaneAttempts(ctx context.Context, queueID int64, attempts []models.LaneAttempt) error
 }
 
+// SourceEventRecorder receives the per-day, per-lane counters (#1301): hit/miss
+// beside provider_outcomes and the delivered type where a result lands. The
+// timestamp comes from the worker's clock. Nil is a no-op; failures are logged
+// and never fatal.
+type SourceEventRecorder interface {
+	RecordSourceEvent(ctx context.Context, at time.Time, lane, event string) error
+}
+
 // ScriptGuard rejects lyric results whose body is dominated by scripts outside
 // a configured allowlist. A nil guard, or one whose Enabled reports false,
 // imposes no filtering. See internal/langguard for the concrete implementation.
@@ -310,6 +318,7 @@ type Worker struct {
 	// mxlrcgo_provider_misses_total{lane}. Errors from it are non-fatal (logged at
 	// Warn). Nil means no recording (safe no-op). Set via SetProviderRecorder.
 	providerRecorder    ProviderRecorder
+	sourceEvents        SourceEventRecorder
 	consecutiveFailures int
 	// lastItemContactedProvider reports whether the most recently processed item
 	// issued an outbound provider request. The run loop reads it to decide
@@ -965,6 +974,37 @@ func (w *Worker) SetProviderRecorder(r ProviderRecorder) {
 	w.providerRecorder = r
 }
 
+// SetSourceEventRecorder installs the per-day source event recorder (#1301).
+// Nil disables it.
+func (w *Worker) SetSourceEventRecorder(r SourceEventRecorder) {
+	w.sourceEvents = r
+}
+
+// recordSourceEvent bumps today's (lane, event) counter, non-fatally.
+func (w *Worker) recordSourceEvent(ctx context.Context, lane, event string) {
+	if lane == "" || event == "" || w.sourceEvents == nil {
+		return
+	}
+	if err := w.sourceEvents.RecordSourceEvent(ctx, w.now(), lane, event); err != nil {
+		slog.Warn("worker: record source event failed", "lane", lane, "event", event, "error", err)
+	}
+}
+
+// deliveredEvent maps a landed result's outcome type and sync tier to its
+// source event; "" counts nothing (a categorical result, an unknown tier).
+func deliveredEvent(outcome, tier string) string {
+	switch outcome {
+	case outcomeTypeInstrumental:
+		return queue.SourceEventInstrumental
+	case outcomeTypeUnsynced:
+		return queue.SourceEventUnsynced
+	case outcomeTypeSynced:
+		return tier // word or line; "" when unjudged
+	default:
+		return ""
+	}
+}
+
 // recordHit increments the provider outcome hit counter for the winning lane and
 // stamps the lane name onto the work_queue row for per-track provenance. Both
 // operations are non-fatal: errors are logged at Warn and do not affect the
@@ -1009,7 +1049,12 @@ func (w *Worker) stampLane(ctx context.Context, id int64, song models.Song) {
 // tracks the detector resolves, #282) but its per-track attribution is written
 // transactionally by SettleInstrumental.
 func (w *Worker) recordHitCounter(ctx context.Context, lane string) {
-	if lane == "" || w.providerRecorder == nil {
+	if lane == "" {
+		return
+	}
+	// Beside provider_outcomes.hits at this one site, so the two agree (#1301).
+	w.recordSourceEvent(ctx, lane, queue.SourceEventHit)
+	if w.providerRecorder == nil {
 		return
 	}
 	if err := w.providerRecorder.RecordProviderHit(ctx, lane); err != nil {
@@ -1022,10 +1067,11 @@ func (w *Worker) recordHitCounter(ctx context.Context, lane string) {
 // orchestrator tried all lanes and found nothing). Errors are logged at Warn
 // and do not affect the processing outcome.
 func (w *Worker) recordMisses(ctx context.Context) {
-	if w.providerRecorder == nil {
-		return
-	}
 	for _, name := range w.currentOrch().LaneNames() {
+		w.recordSourceEvent(ctx, name, queue.SourceEventMiss)
+		if w.providerRecorder == nil {
+			continue
+		}
 		if err := w.providerRecorder.RecordProviderMiss(ctx, name); err != nil {
 			slog.Warn("worker: record provider miss failed", "lane", name, "error", err)
 		}
@@ -1808,11 +1854,17 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// #1085) must not reach Complete: the row would settle describing a file
 	// this same completion may have just changed. Fail it via the same path
 	// a failed Complete already takes, below.
-	if err := w.stampSyncTier(ctxNoCancel, item, song); err != nil {
+	tier := w.ordinarySyncTier(item, song)
+	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
 		return w.failStuckItem(ctxNoCancel, item, capNever, err)
 	}
 	if err := w.queue.Complete(ctxNoCancel, item.ID); err != nil {
 		return w.failStuckItem(ctxNoCancel, item, capLanded, fmt.Errorf("worker: complete item %d: %w", item.ID, err))
+	}
+	// Known drift (#1301): tier is counted even if its stamp failed and was cleared to NULL.
+	// Delivered type (#1301): a fresh fetch that landed (upgrade trips too); not a cache hit or kept write.
+	if !cacheHit {
+		w.recordSourceEvent(ctxNoCancel, song.WinningLane, deliveredEvent(outcomeTypeFromSong(song), tier))
 	}
 	w.consecutiveFailures = 0
 	return nil
@@ -2355,6 +2407,8 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// later pass rewrites it idempotently.
 	switch outcome {
 	case queue.Settled:
+		// A detector settle is a delivered instrumental for the detector lane (#1301).
+		w.recordSourceEvent(ctxNoCancel, song.WinningLane, queue.SourceEventInstrumental)
 	case queue.SettleAlreadyInstrumental, queue.SettleRowGone:
 		// The row is NOT in 'processing' any more -- a peer settled it, or it was
 		// pruned -- so there is nothing to strand and nothing to release. Releasing
