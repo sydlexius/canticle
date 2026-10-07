@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/providers"
@@ -374,7 +373,7 @@ func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, 
 		args = append(args, f.Lane)
 	}
 	if ValidReason(f.Reason) {
-		search += ` AND (` + reasonCaseSQL + `) = ?`
+		search += ` AND ` + reasonKeySQL + ` = ?`
 		args = append(args, f.Reason)
 	}
 	if f.LibraryID > 0 {
@@ -488,33 +487,22 @@ func (r *Repo) attachLibraries(ctx context.Context, items []BucketRow) error {
 	return nil
 }
 
-// The failure-reason filter (#1235) on the Retrying and Errored buckets. last_error is free text and the displayed Reason is its failsig
-// signature, computed in Go; a filter has to run in SQL so keyset paging sees
-// every matching row exactly once. failsig.Classify cannot be expressed there
-// (it reads segment starts and a status regex), so the categories are a small
-// fixed set of case-insensitive substring tests over the RAW last_error, tried
-// in order by one CASE expression. A CASE yields exactly one key per row, so the
-// categories partition a bucket by construction. A marker can only misfile a
-// row into another category; it can never hide one, because "other" is the ELSE.
-// Accepted limit: path or response-body text holding a marker can misfile a
-// row. A value of only whitespace is "none" for every Unicode space, because
-// the SQL trim set is derived from unicode.IsSpace, the same predicate
-// strings.TrimSpace (the displayed Reason) uses.
-//
-// Not indexable (a scan of one status's rows). These buckets hold the retry
-// backlog, not the done rows. Cost scales with message bytes, since
-// lower(last_error) is evaluated per marker: about 60 to 125 ms over 14,000
-// deferred rows of short messages, about 3 s when every message is near 4 KiB
-// (title sort).
+// The failure-reason filter (#1235) on the Retrying and Errored buckets reads
+// work_queue.failure_class, which the writer of last_error stamps in the same
+// statement (#1285, queue.FailureClass); nothing here reads the message text.
+// One expression yields one key per row, so the categories partition a bucket.
+// A row with no class (an older binary's write, or a writer that could not
+// classify) is "none" with no message and "other" with one; it is never hidden.
+const reasonKeySQL = `COALESCE(failure_class, CASE WHEN last_error = '' THEN 'none' ELSE 'other' END)`
 
-// Reason category keys: the URL values of the reason parameter.
+// Reason category keys: the reason parameter's values, as failure_class stores them.
 const (
-	ReasonNone     = "none"
-	ReasonWrite    = "write"
-	ReasonThrottle = "throttle"
-	ReasonNetwork  = "network"
-	ReasonMiss     = "miss"
-	ReasonOther    = "other"
+	ReasonNone     = string(queue.FailureNone)
+	ReasonWrite    = string(queue.FailureWrite)
+	ReasonThrottle = string(queue.FailureThrottle)
+	ReasonNetwork  = string(queue.FailureNetwork)
+	ReasonMiss     = string(queue.FailureMiss)
+	ReasonOther    = string(queue.FailureOther)
 )
 
 // ReasonCategory is one selectable failure-reason category.
@@ -523,112 +511,26 @@ type ReasonCategory struct {
 	Label string
 }
 
-// reasonDef is a category and its lower-case markers. Order is CASE order, so
-// an earlier category wins a row that matches several. A marker holding "[" is
-// a GLOB pattern; any other is a plain substring. "none" has no markers
-// (an empty or blank last_error) and "other" is the ELSE.
-type reasonDef struct {
-	ReasonCategory
-	markers []string
-}
-
-// httpStatusMarkers are the status shapes the providers print ("status 503",
-// "status_code 502", "HTTP 500"). Three digits, never "status 5": an ffmpeg
-// "exit status 5" must not read as a server error.
-func httpStatusMarkers(codes ...string) []string {
-	var out []string
-	for _, p := range []string{"status ", "status_code ", "http "} {
-		for _, c := range codes {
-			out = append(out, p+c)
-		}
-	}
-	return out
-}
-
-var reasonDefs = []reasonDef{
-	{ReasonCategory{ReasonNone, "No reason recorded"}, nil},
-	{ReasonCategory{ReasonWrite, "Write or file error"}, []string{
-		"write item", "refusing to write", "permission denied", "no space left",
-		"read-only file system", "nothing to save"}},
-	{ReasonCategory{ReasonThrottle, "Rate limited or refused"}, append([]string{
-		"rate limited", "unauthorized", "forbidden", "token renewal", "throttled",
-		"circuit open", "lane unavailable", "lane not ready",
-		// petitlyrics' confirmed and latched outage: both wrap "no results found".
-		"application id revoked"},
-		httpStatusMarkers("429", "403")...)},
-	{ReasonCategory{ReasonNetwork, "Server or network error"}, append([]string{
-		"transport error", "connection refused", "connection reset", "dial tcp",
-		"timeout", "timed out", "deadline exceeded", "unexpected eof", ": eof",
-		"tls handshake", "no such host", "lane outage", "context canceled",
-		"broken pipe", "goaway", "stream error", "network is unreachable"},
-		httpStatusMarkers("408", "5[0-9][0-9]")...)},
-	{ReasonCategory{ReasonMiss, "Not found or no lyrics"}, []string{
-		"no results found", "no songs in response", "no lyrics", "does not match the requested track",
-		"benign miss", "truncated or empty", "unrecognized subtitle_body", "no title or alternate",
-		"no timings", "miss limit reached", "matcher rejected"}},
-	{ReasonCategory{ReasonOther, "Other"}, nil},
+// reasonDefs is every category with its label.
+var reasonDefs = []ReasonCategory{
+	{ReasonNone, "No reason recorded"},
+	{ReasonWrite, "Write or file error"},
+	{ReasonThrottle, "Rate limited or refused"},
+	{ReasonNetwork, "Server or network error"},
+	{ReasonMiss, "Not found or no lyrics"},
+	{ReasonOther, "Other"},
 }
 
 // reasonOffered is the ONE place the categories per bucket are decided, in
 // display order: only those the worker and queue can write there. Retrying holds
 // benign misses, parked lanes (Defer, DeferRefused) and a word recheck's failed
-// write; Errored holds hard failures (Fail), which can still carry a miss
-// message: a dispatch where one lane missed and another failed in a shape no
-// marker names is failed with both texts. Given up is not listed: RetireMiss
-// is its only writer, so every row there reads "miss limit reached" and a filter
-// would be vacuous. A category a bucket does not list is never offered or
-// honored.
+// write; Errored holds hard failures (Fail), which can still be classed a miss.
+// Given up is not listed: RetireMiss is its only writer, so every row there is
+// a miss and a filter would be vacuous. A category a bucket does not list is
+// never offered or honored.
 var reasonOffered = map[Bucket][]string{
 	BucketDeferred: {ReasonNone, ReasonMiss, ReasonWrite, ReasonThrottle, ReasonNetwork, ReasonOther},
 	BucketFailed:   {ReasonNone, ReasonMiss, ReasonWrite, ReasonThrottle, ReasonNetwork, ReasonOther},
-}
-
-// reasonCaseSQL is the CASE expression yielding a row's category key. Built once
-// from reasonDefs; every literal is a constant marker (checked at init), never
-// caller input.
-var reasonCaseSQL = buildReasonCase()
-
-// spaceCharSQL is a SQL expression yielding exactly the code points
-// unicode.IsSpace accepts, as char(...) of integer constants, so the "none"
-// trim agrees with strings.TrimSpace in normalizedReason. Built once at init
-// from the rune table; nothing from a request reaches it.
-var spaceCharSQL = buildSpaceCharSQL()
-
-func buildSpaceCharSQL() string {
-	var cps []string
-	for r := rune(0); r <= unicode.MaxRune; r++ {
-		if unicode.IsSpace(r) {
-			cps = append(cps, strconv.Itoa(int(r)))
-		}
-	}
-	return "char(" + strings.Join(cps, ", ") + ")"
-}
-
-func buildReasonCase() string {
-	var b strings.Builder
-	b.WriteString("CASE")
-	for _, d := range reasonDefs {
-		switch {
-		case d.Key == ReasonNone:
-			// Blank counts as none, as normalizedReason does for the display.
-			b.WriteString(` WHEN TRIM(COALESCE(last_error, ''), ` + spaceCharSQL + `) = '' THEN '` + d.Key + `'`)
-		case len(d.markers) > 0:
-			conds := make([]string, 0, len(d.markers))
-			for _, m := range d.markers {
-				if m != strings.ToLower(m) || strings.ContainsAny(m, "'%\\") {
-					panic("reports: bad reason marker " + m)
-				}
-				if strings.Contains(m, "[") {
-					conds = append(conds, "lower(last_error) GLOB '*"+m+"*'")
-					continue
-				}
-				conds = append(conds, "instr(lower(last_error), '"+m+"') > 0")
-			}
-			b.WriteString(" WHEN " + strings.Join(conds, " OR ") + " THEN '" + d.Key + "'")
-		}
-	}
-	b.WriteString(" ELSE '" + ReasonOther + "' END")
-	return b.String()
 }
 
 // ValidReason reports whether key is a reason category key.
@@ -648,7 +550,7 @@ func ReasonCategories(b Bucket) []ReasonCategory {
 	for _, key := range reasonOffered[b] {
 		for _, d := range reasonDefs {
 			if d.Key == key {
-				out = append(out, d.ReasonCategory)
+				out = append(out, d)
 			}
 		}
 	}

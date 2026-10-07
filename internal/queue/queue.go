@@ -1309,6 +1309,7 @@ func (q *DBQueue) failOnce(ctx context.Context, id int64, cause error) (WorkItem
          SET status = 'failed',
              attempts = ?,
              next_attempt_at = ?,
+             failure_class = ?,
              last_error = ?
          WHERE id = ?
            AND status = 'processing'
@@ -1316,6 +1317,7 @@ func (q *DBQueue) failOnce(ctx context.Context, id int64, cause error) (WorkItem
                    miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`,
 		nextAttempts,
 		nextAttemptAt,
+		storedClass(lastError, FailureClassOf(cause)),
 		lastError,
 		id,
 	)
@@ -1376,12 +1378,14 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
              miss_count = miss_count + 1,
              priority = -100,
              next_attempt_at = ?,
+             failure_class = ?,
              last_error = ?
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
                    miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`,
 		nextAttemptAt,
+		storedClass(lastError, FailureClassOf(cause)),
 		lastError,
 		id,
 	)
@@ -1457,10 +1461,11 @@ func (q *DBQueue) deferRefusedOnce(ctx context.Context, id int64, retryAfter tim
          SET status = 'deferred',
              refused_waits = refused_waits + 1,
              next_attempt_at = ?,
+             failure_class = ?, -- parked on a lane that did not answer (#1285)
              last_error = ?
          WHERE id = ?
            AND status = 'processing'`,
-		nextAttemptAt, cause, id,
+		nextAttemptAt, storedClass(cause, FailureThrottle), cause, id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: defer refused: %w", err)
@@ -1513,6 +1518,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
          SET status = 'unavailable',
              completed_at = ?,
              last_error = ?,
+             failure_class = 'miss',
              refused_waits = 0
          WHERE id = ?
            AND status = 'processing'
@@ -3825,6 +3831,7 @@ func (q *DBQueue) UnsettleInstrumental(ctx context.Context, id int64) (bool, err
              next_attempt_at = ?,
              refused_waits = 0,
              last_error = 'instrumental verdict reversed by a tightened vocal gate',
+             failure_class = 'other',
              `+ClearWordRecheckQueued+`
          WHERE id = ?
            AND status = 'done'

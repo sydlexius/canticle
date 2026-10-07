@@ -308,7 +308,7 @@ func (w *Worker) deferWordRecheck(ctx context.Context, item queue.WorkItem, caus
 		}
 		return nil
 	}
-	released, err := w.queue.DeferWordRecheck(noCancel, item.ID, w.circuitOpenDuration, maxWordRecheckWaits, cause.Error())
+	released, err := w.queue.DeferWordRecheck(noCancel, item.ID, w.circuitOpenDuration, maxWordRecheckWaits, cause.Error(), failureClass(cause))
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("worker: defer word recheck %d after %v: %w", item.ID, cause, err)
 	}

@@ -95,13 +95,10 @@ func (l *Lane) FindLyrics(ctx context.Context, track models.Track, sourcePath st
 	}
 
 	song, err := l.resolve(ctx, track, sourcePath)
-	// innertube.ErrClientVersion wraps ErrForbidden but is an HTTP 400 for a
-	// stale client version, not a refusal, so it is excluded first.
 	// A canceled probe (parallel mode, another lane won) is not an answer, so
 	// it leaves the mark as it was.
 	if !errors.Is(err, context.Canceled) {
-		l.refused.Store(!errors.Is(err, innertube.ErrClientVersion) && (errors.Is(err, musixmatch.ErrForbidden) ||
-			errors.Is(err, petitlyrics.ErrForbidden) || errors.Is(err, innertube.ErrForbidden)))
+		l.refused.Store(IsRefusal(err))
 	}
 	if err != nil {
 		return models.Song{}, l.classifyErr(l, err)
@@ -173,4 +170,12 @@ func (l *Lane) notifySuccess() {
 	if l.pacer != nil {
 		l.pacer.OnSuccess()
 	}
+}
+
+// IsRefusal reports a provider refusing the request itself (HTTP 403).
+// innertube.ErrClientVersion wraps ErrForbidden but is an HTTP 400 for a stale
+// client version, not a refusal, so it is excluded first.
+func IsRefusal(err error) bool {
+	return !errors.Is(err, innertube.ErrClientVersion) && (errors.Is(err, musixmatch.ErrForbidden) ||
+		errors.Is(err, petitlyrics.ErrForbidden) || errors.Is(err, innertube.ErrForbidden))
 }

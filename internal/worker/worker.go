@@ -110,7 +110,7 @@ type Queue interface {
 	// DeferWordRecheck re-parks an unanswered word-recheck row after retryAfter,
 	// still 'queued', touching no miss or failure counter; past maxWaits it
 	// un-flips the row to done with no verdict and reports released.
-	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string) (bool, error)
+	DeferWordRecheck(ctx context.Context, id int64, retryAfter time.Duration, maxWaits int, cause string, class ...queue.FailureClass) (bool, error)
 	// RetryWordRecheckWrite re-parks a recheck row after a post-write
 	// bookkeeping failure (#1086), without spending DeferWordRecheck's
 	// refused_waits budget: status='deferred' + word_timing_state='queued' only.
@@ -1934,7 +1934,7 @@ func (w *Worker) failStuckItem(ctxNoCancel context.Context, item queue.WorkItem,
 		}
 	}
 	w.consecutiveFailures++
-	if _, err := w.queue.Fail(ctxNoCancel, item.ID, cause); err != nil {
+	if _, err := w.queue.Fail(ctxNoCancel, item.ID, classed(cause)); err != nil {
 		return fmt.Errorf("worker: item %d and mark failed: %w", item.ID, errors.Join(cause, err))
 	}
 	return fmt.Errorf("worker: item %d (marked failed): %w", item.ID, cause)
@@ -2582,7 +2582,7 @@ func (w *Worker) failPass(ctx context.Context, item queue.WorkItem, cause error,
 	w.lastFailID = item.ID
 	w.lastFailArtist = item.Inputs.Track.ArtistName
 	w.lastFailTrack = item.Inputs.Track.TrackName
-	if _, err := w.queue.Fail(context.WithoutCancel(ctx), item.ID, cause); err != nil {
+	if _, err := w.queue.Fail(context.WithoutCancel(ctx), item.ID, classed(cause)); err != nil {
 		return fmt.Errorf("worker: fail item %d after %v: %w", item.ID, cause, err)
 	}
 	return nil
@@ -2673,7 +2673,7 @@ func (w *Worker) requeueDeferred(ctx context.Context, item queue.WorkItem, cause
 	}
 
 	cooldown := backoff.MissCooldown(nextMissCount, w.missBackoffBase, w.missBackoffCap)
-	deferred, err := w.queue.Defer(noCancel, item.ID, cooldown, cause)
+	deferred, err := w.queue.Defer(noCancel, item.ID, cooldown, classed(cause))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			slog.Debug("benign miss defer skipped; item moved on", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "cause", cause)
