@@ -44,11 +44,16 @@ var (
 type Outcome string
 
 // Outcomes: marked (files replaced, row settled), already_marked (row and
-// marker both present, nothing written) and dry_run (nothing written).
+// marker both present, nothing written), dry_run (nothing written), unmarked
+// (an Unmark removed the mark and re-queued the row) and not_marked (an Unmark
+// found no mark on the row, or found it already withdrawn, and reported or
+// removed no file).
 const (
 	OutcomeMarked        Outcome = "marked"
 	OutcomeAlreadyMarked Outcome = "already_marked"
 	OutcomeDryRun        Outcome = "dry_run"
+	OutcomeUnmarked      Outcome = "unmarked"
+	OutcomeNotMarked     Outcome = "not_marked"
 )
 
 // Options configures one Mark call.
@@ -62,8 +67,10 @@ type Options struct {
 	Report func(Record) error
 }
 
-// Result describes a Mark call. FilesBackedUp counts the files that were (or
-// in a dry run would be) replaced.
+// Result describes a Mark or Unmark call. FilesBackedUp counts the files that
+// were (or in a dry run would be) backed up: for Mark the lyric files it
+// replaces, for Unmark every lyric file beside the audio (the manual markers it removes
+// and any real lyric file it leaves).
 type Result struct {
 	Outcome       Outcome
 	FilesBackedUp int
@@ -73,8 +80,13 @@ type Result struct {
 // it should carry the serve process's selfwrite registry, which records every
 // path the writer writes or removes.
 type Marker struct {
-	db *sql.DB
-	w  *lyrics.LRCWriter
+	db    *sql.DB
+	w     *lyrics.LRCWriter
+	locks rowLocks
+	// afterClear, when set (tests only), runs in Unmark right after the
+	// transaction that clears the mark commits, to place a marker in the window
+	// the post-commit sweep exists to narrow.
+	afterClear func()
 }
 
 // New returns a Marker over db and writer w. The caller wires the writer's
@@ -103,6 +115,7 @@ const busyAttempts = 5
 // post-settle re-inventory fails, the row stays marked and the error says so:
 // calling Mark again on a marked row without every marker repairs it.
 func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, error) {
+	defer m.locks.lock(id)() // serialized with Unmark on this row, see Unmark
 	t, err := m.load(ctx, id)
 	if err != nil {
 		return Result{}, err
@@ -114,7 +127,7 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	files, markerPresent, err := inventory(t, dirs)
+	files, markerPresent, err := inventory(t, dirs, false)
 	if err != nil {
 		return Result{}, err
 	}
@@ -131,7 +144,7 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 	}
 	reported := make(map[string]bool)
 	for _, p := range files {
-		if rerr := backup(id, p, opts.Report, reported); rerr != nil {
+		if rerr := backup(OpMark, id, p, opts.Report, reported); rerr != nil {
 			return Result{}, fmt.Errorf("instrumentalmark: backup of work item %d failed, nothing changed: %w", id, rerr)
 		}
 	}
@@ -149,7 +162,7 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 	// It is re-read before the late backups and before each marker write, which
 	// narrows the window to the gap between that read and the write; it does not
 	// close it.
-	late, _, err := inventory(t, dirs)
+	late, _, err := inventory(t, dirs, false)
 	if err != nil {
 		return Result{}, fmt.Errorf("instrumentalmark: work item %d is marked but no marker was written; retry the mark to repair: %w", id, err)
 	}
@@ -159,7 +172,7 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 		}
 	}
 	for _, p := range late {
-		if rerr := backup(id, p, opts.Report, reported); rerr != nil {
+		if rerr := backup(OpMark, id, p, opts.Report, reported); rerr != nil {
 			return Result{}, fmt.Errorf("instrumentalmark: work item %d is marked but a late file could not be backed up and no marker was written; retry the mark to repair: %w", id, rerr)
 		}
 	}
@@ -178,7 +191,7 @@ func (m *Marker) Mark(ctx context.Context, id int64, opts Options) (Result, erro
 				return Result{}, fmt.Errorf("%w (%d of %d markers written; the row stays marked, retry the mark to repair)", werr, written, len(t.outputs))
 			}
 			if changed {
-				if uerr := m.unmark(ctx, id); uerr != nil {
+				if _, uerr := m.unmark(ctx, id, t.keys); uerr != nil {
 					slog.Warn("instrumentalmark: could not unmark after a failed marker write; calling Mark again repairs it", "id", id, "error", uerr)
 					werr = errors.Join(werr, uerr)
 				}
@@ -284,8 +297,9 @@ func (m *Marker) resolveDirs(ctx context.Context, id int64, t *target) ([]string
 // inventory lists the existing lyric files the marker will replace (every
 // case variant of the .lrc and .txt, plus an owned .elrc) and reports whether
 // every output already carries a manual marker. A manual marker itself is not
-// a file to back up.
-func inventory(t target, dirs []string) (files []string, allMarked bool, err error) {
+// a file to back up unless withMarkers is set (Unmark, which backs up the
+// marker it removes along with any real lyric file beside it).
+func inventory(t target, dirs []string, withMarkers bool) (files []string, allMarked bool, err error) {
 	seen := make(map[string]bool)
 	allMarked = true
 	for i, o := range t.outputs {
@@ -313,7 +327,7 @@ func inventory(t target, dirs []string) (files []string, allMarked bool, err err
 				if fi.Mode()&os.ModeSymlink != 0 {
 					return nil, false, ErrSymlinkedSidecar
 				}
-				if !synced && lyrics.ManualMarkerOnDisk(v) {
+				if !withMarkers && !synced && lyrics.ManualMarkerOnDisk(v) {
 					continue
 				}
 				if !seen[v] {
@@ -338,14 +352,14 @@ func inventory(t target, dirs []string) (files []string, allMarked bool, err err
 }
 
 // backup reports path once; reported dedupes across the two inventories.
-func backup(id int64, path string, report func(Record) error, reported map[string]bool) error {
+func backup(op string, id int64, path string, report func(Record) error, reported map[string]bool) error {
 	if reported[path] {
 		return nil
 	}
 	if report == nil {
 		return ErrNoBackupSink
 	}
-	rec, err := readRecord(id, path)
+	rec, err := readRecord(op, id, path)
 	if err == nil {
 		err = report(rec)
 	}
@@ -358,12 +372,12 @@ func backup(id int64, path string, report func(Record) error, reported map[strin
 // readRecord captures path's bytes for the backup through one no-follow
 // handle, so a file swapped for a symlink after the inventory is refused.
 // Errors never carry the path (a sidecar path is private library metadata).
-func readRecord(id int64, path string) (Record, error) {
+func readRecord(op string, id int64, path string) (Record, error) {
 	b, err := lyrics.ReadRegularNoFollow(path, MaxBackupBytes)
 	if err != nil {
 		return Record{}, fmt.Errorf("read lyric file (not regular, over the %d-byte backup limit, or unreadable): %w", MaxBackupBytes, stripPath(err))
 	}
-	return Record{Op: OpMark, WorkItemID: id, Path: path, Content: b}, nil
+	return Record{Op: op, WorkItemID: id, Path: path, Content: b}, nil
 }
 
 // stripPath drops the path an os error carries, keeping only its cause.
@@ -392,10 +406,8 @@ func (m *Marker) settle(ctx context.Context, id int64, t target) (changed bool, 
 		if merr != nil {
 			return merr
 		}
-		for _, k := range t.keys {
-			if _, ierr := cache.Invalidate(ctx, tx, k[0], k[1]); ierr != nil {
-				return ierr
-			}
+		if ierr := invalidateKeys(ctx, tx, t.keys); ierr != nil {
+			return ierr
 		}
 		if cerr := tx.Commit(); cerr != nil {
 			return fmt.Errorf("instrumentalmark: commit: %w", cerr)
@@ -406,16 +418,36 @@ func (m *Marker) settle(ctx context.Context, id int64, t target) (changed bool, 
 	return changed, err
 }
 
-func (m *Marker) unmark(ctx context.Context, id int64) error {
-	return dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
-		tx, err := m.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("instrumentalmark: begin unmark: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-		if _, err := queue.UnmarkManualInstrumentalTx(ctx, tx, id, time.Now()); err != nil {
+// invalidateKeys drops the cache entry of every (artist, title) key in tx.
+func invalidateKeys(ctx context.Context, tx *sql.Tx, keys [][2]string) error {
+	for _, k := range keys {
+		if _, err := cache.Invalidate(ctx, tx, k[0], k[1]); err != nil {
 			return err
 		}
-		return tx.Commit()
+	}
+	return nil
+}
+
+// unmark clears the row's mark and invalidates keys in one transaction.
+func (m *Marker) unmark(ctx context.Context, id int64, keys [][2]string) (changed bool, err error) {
+	err = dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
+		tx, berr := m.db.BeginTx(ctx, nil)
+		if berr != nil {
+			return fmt.Errorf("instrumentalmark: begin unmark: %w", berr)
+		}
+		defer func() { _ = tx.Rollback() }()
+		c, uerr := queue.UnmarkManualInstrumentalTx(ctx, tx, id, time.Now())
+		if uerr != nil {
+			return uerr
+		}
+		if ierr := invalidateKeys(ctx, tx, keys); ierr != nil {
+			return ierr
+		}
+		if cerr := tx.Commit(); cerr != nil {
+			return fmt.Errorf("instrumentalmark: commit unmark: %w", cerr)
+		}
+		changed = c
+		return nil
 	})
+	return changed, err
 }
