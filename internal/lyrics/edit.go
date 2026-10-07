@@ -51,10 +51,16 @@ func ShiftLines(lines []TimedLine, offsetMS int) []TimedLine {
 }
 
 // isOffsetTag reports whether a header line is an [offset:] ID tag, classified
-// by lrcnormalize like every other tag (no second parser).
+// by lrcnormalize like every other tag (no second parser). A line is an offset
+// tag only when it is exactly ONE tag: lrcnormalize reads "[offset:10][foo:bar]"
+// as a single tag whose value is "10][foo:bar", and treating that as an offset
+// would drop or replace the neighboring tag with it.
 func isOffsetTag(line string) (value string, ok bool) {
 	for _, tg := range lrcnormalize.ParseBody(line).Tags {
 		if strings.EqualFold(strings.TrimSpace(tg.Key), "offset") {
+			if strings.ContainsAny(tg.Value, "[]") {
+				return "", false
+			}
 			return tg.Value, true
 		}
 	}
@@ -64,7 +70,11 @@ func isOffsetTag(line string) (value string, ok bool) {
 // WithOffsetTag returns headerTags with an [offset:<ms>] tag recording shiftMS,
 // the shift the editor REQUESTED (#1385), summed with any value the original
 // already carried. It REPLACES an existing [offset:] in place, never stacking a
-// second; with none it appends one. A zero shiftMS returns the tags untouched.
+// second; with none it appends one. A zero shiftMS returns the tags untouched,
+// so a zero-shift save or a revert reproduces the original, including an
+// [offset:] the original carried itself. An existing [offset:] whose value is
+// not an integer is left untouched and no new tag is written: the original
+// value is never destroyed by guessing it was zero.
 //
 // The header is the requested shift, not a measurement of what moved: when
 // ShiftLines clamps a line at zero (a large negative shift) that line moved
@@ -85,6 +95,14 @@ func isOffsetTag(line string) (value string, ok bool) {
 func WithOffsetTag(headerTags []string, shiftMS int) []string {
 	if shiftMS == 0 {
 		return headerTags
+	}
+	for _, tag := range headerTags {
+		if v, ok := isOffsetTag(tag); ok {
+			if _, err := strconv.Atoi(strings.TrimSpace(v)); err != nil {
+				return headerTags
+			}
+			break
+		}
 	}
 	out := make([]string, 0, len(headerTags)+1)
 	at, total := -1, shiftMS
