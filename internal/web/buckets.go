@@ -182,6 +182,18 @@ var resultBuckets = []resultBucket{
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.Instrumental },
 	},
 	{
+		Label:   "Blocked",
+		Tooltip: "Tracks where every lyric result found was one you marked wrong, so nothing is on disk. Not a miss: the lookup found lyrics, they were refused.",
+		Value:   func(b reports.ResultsBreakdown) int64 { return b.Blocked },
+		// A blocked row keeps no lane, so a per-source link would list nothing.
+		Href: func(_ reports.TopRung, lane string) string {
+			if lane != "" {
+				return ""
+			}
+			return resultsHref(reports.BucketBlocked, queueViewState{})
+		},
+	},
+	{
 		Label:   "Tier unknown",
 		Tooltip: "A synced .lrc with no recorded tier: completed before tier tracking, served from cache, or later demoted by the timing guard. 'canticle scan reconcile-sync-tier' classifies most from the file itself.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.SyncedTierUnknown },

@@ -44,6 +44,9 @@ func seedLinkPopulation(t *testing.T, db *sql.DB) {
 	seedLinkRow(t, db, "t1", "done", "synced", "", "", "", "", "")
 	seedLinkRow(t, db, "p1", "pending", "", "", "", "", "", "")
 	seedLinkRow(t, db, "f1", "failed", "", "", "", "", "boom", "")
+	// A blocked track: every result refused, nothing on disk (#1395, #1396).
+	seedLinkRow(t, db, "bl1", "done", "blocked", "", "", "", "", "")
+	seedLinkRow(t, db, "bl2", "done", "blocked", "", "", "", "", "")
 	// A hand-marked instrumental is Finished under every rung (#1405).
 	seedLinkRow(t, db, "m1", "done", "instrumental", "", "", "", "", "")
 	if _, err := db.ExecContext(context.Background(),
@@ -102,11 +105,13 @@ func TestResultTilesLinkToEqualPopulations(t *testing.T) {
 			// Finished also holds the hand-marked row (m1): the word chip excludes it (#1405).
 			"Word-synced": "/queue/finished?word=1",
 			"Line-synced": "/queue/settled?tier=line",
+			"Blocked":     "/queue/blocked",
 		}},
 		{"line rung", reports.TopRungLine, map[string]string{
 			// Finished = word + line + the marked row there; each tier has its own chip.
 			"Word-synced": "/queue/finished?word=1",
 			"Line-synced": "/queue/finished?tier=line",
+			"Blocked":     "/queue/blocked",
 		}},
 	}
 	for _, tc := range cases {
@@ -191,5 +196,47 @@ func TestReviewQueueLinks(t *testing.T) {
 				t.Errorf("Mis-synced view lists %d rows, want %d, a strict subset of the report's %d", n, want, len(report))
 			}
 		})
+	}
+}
+
+// TestBlockedTileAndBucketPage pins #1396 on the rendered pages: the dashboard
+// Results row carries a "Blocked" tile linking to /queue/blocked with the
+// blocked count, and that page lists the blocked rows under a "Blocked"
+// heading and no others.
+func TestBlockedTileAndBucketPage(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	seedLinkRow(t, sqlDB, "bl-one", "done", "blocked", "", "", "", "", "")
+	seedLinkRow(t, sqlDB, "bl-two", "done", "blocked", "", "", "", "", "")
+	seedLinkRow(t, sqlDB, "plain", "done", "unsynced", "", "", "", "", "")
+	mux := newReportsUIServer(t, sqlDB)
+
+	dash := getQueue(t, mux, "/dashboard", false)
+	if dash.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard = %d", dash.Code)
+	}
+	body := dash.Body.String()
+	if !strings.Contains(body, `<span class="mx-dash-tile-label">Blocked</span>`) ||
+		!strings.Contains(body, `href="/queue/blocked"`) {
+		t.Errorf("dashboard has no Blocked tile linking to /queue/blocked:\n%s", body)
+	}
+	if got := dashSectionTiles(t, body, "mx-dash-results-heading")["Blocked"]; got != 2 {
+		t.Errorf("Blocked tile value = %d, want 2", got)
+	}
+
+	page := getQueue(t, mux, "/queue/blocked", false)
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET /queue/blocked = %d", page.Code)
+	}
+	pb := page.Body.String()
+	for _, want := range []string{"bl-one", "bl-two"} {
+		if !strings.Contains(pb, want) {
+			t.Errorf("/queue/blocked missing row %q", want)
+		}
+	}
+	if strings.Contains(pb, "plain") {
+		t.Error("/queue/blocked lists a row that is not blocked")
+	}
+	if !strings.Contains(pb, ">Blocked<") {
+		t.Error("/queue/blocked has no Blocked heading")
 	}
 }

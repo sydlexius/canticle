@@ -18,6 +18,8 @@ type TypeCounts struct {
 	Instrumental int64
 	// TierUnknown is ResultsBreakdown.SyncedTierUnknown.
 	TierUnknown int64
+	// Blocked is ResultsBreakdown.Blocked.
+	Blocked int64
 	// Other is ResultsBreakdown.Other (retired, rejected, legacy NULL outcome),
 	// kept so the counts sum to the group's total by construction.
 	Other int64
@@ -25,7 +27,7 @@ type TypeCounts struct {
 
 // Total is the sum of every type.
 func (c TypeCounts) Total() int64 {
-	return c.WordSynced + c.LineSynced + c.Unsynced + c.Instrumental + c.TierUnknown + c.Other
+	return c.WordSynced + c.LineSynced + c.Unsynced + c.Instrumental + c.TierUnknown + c.Blocked + c.Other
 }
 
 func (c *TypeCounts) add(bucket string, n int64) {
@@ -40,6 +42,8 @@ func (c *TypeCounts) add(bucket string, n int64) {
 		c.Unsynced += n
 	case "instrumental":
 		c.Instrumental += n
+	case "blocked":
+		c.Blocked += n
 	default:
 		c.Other += n
 	}

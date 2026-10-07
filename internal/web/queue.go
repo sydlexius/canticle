@@ -51,6 +51,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, plus tracks marked instrumental by hand: nothing further to gain."},
 	reports.BucketSettled:     {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to word sync."},
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
+	reports.BucketBlocked:     {"Blocked", "Tracks where every lyric result found was one you marked wrong, so nothing is on disk."},
 }
 
 // lineTopBucketInfo overrides Finished and Settled when no word tier is reachable

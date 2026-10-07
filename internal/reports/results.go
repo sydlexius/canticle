@@ -15,7 +15,7 @@ const lineTierPredicate = lineTierFilePredicate + `
                       AND ` + timingVerdictExclusion
 
 // resultBucketCaseSQL is the ONE classification of a done row into its result
-// bucket ('word', 'line', 'tier_unknown', 'unsynced', 'instrumental', 'other').
+// bucket ('word', 'line', 'tier_unknown', 'unsynced', 'instrumental', 'blocked', 'other').
 // ResultsBreakdown and SourceBreakdown both select it, so a per-source count can
 // never disagree with the dashboard tile. A single CASE chain: no row matches
 // two arms and an unmatched row falls to 'other'. No leading SELECT.
@@ -26,13 +26,14 @@ const resultBucketCaseSQL = `CASE
                   WHEN outcome_type = 'synced' AND ` + TierUnknownPredicate + ` THEN 'tier_unknown'
                   WHEN outcome_type = 'unsynced' THEN 'unsynced'
                   WHEN outcome_type = 'instrumental' THEN 'instrumental'
+                  WHEN outcome_type = 'blocked' THEN 'blocked'
                   ELSE 'other'
                 END`
 
 // ResultsBreakdown is the complete split of the completed population
 // (work_queue rows with status='done', the same rows QueueSummary.Done counts)
 // by result type (#599, maintainer decision 2026-09-30). Every done row lands
-// in EXACTLY ONE field, so the six always sum to QueueSummary.Done.
+// in EXACTLY ONE field, so the seven always sum to QueueSummary.Done.
 //
 // Every field reads work_queue only (status, outcome_type, sync_tier,
 // timing_outcome, word_timing_state); no other table is consulted.
@@ -50,6 +51,10 @@ type ResultsBreakdown struct {
 	// provider-written alike (the CountInstrumental population, restricted
 	// to status='done').
 	Instrumental int64
+	// Blocked: outcome_type='blocked' (#1395): every result for the track was
+	// one an operator marked wrong, so it settled with nothing on disk. Not a
+	// miss and not Other; a prune-retired row stays in Other.
+	Blocked int64
 	// SyncedTierUnknown: outcome_type='synced' AND TierUnknownPredicate (no
 	// recorded tier, an 'unsynced' tier on a .lrc, a timing-remediated tier,
 	// or a row mid word-recheck).
@@ -67,7 +72,7 @@ type ResultsBreakdown struct {
 
 // Total is the sum of every bucket; it equals QueueSummary.Done.
 func (b ResultsBreakdown) Total() int64 {
-	return b.WordSynced + b.LineSynced + b.Unsynced + b.Instrumental + b.SyncedTierUnknown + b.Other
+	return b.WordSynced + b.LineSynced + b.Unsynced + b.Instrumental + b.SyncedTierUnknown + b.Blocked + b.Other
 }
 
 // ResultsBreakdown returns the result-type split of status='done' rows in one
@@ -115,6 +120,8 @@ func (r *Repo) ResultsBreakdown(ctx context.Context) (ResultsBreakdown, error) {
 			b.Unsynced = n
 		case "instrumental":
 			b.Instrumental = n
+		case "blocked":
+			b.Blocked = n
 		default:
 			b.Other += n
 		}

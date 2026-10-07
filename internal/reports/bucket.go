@@ -30,7 +30,21 @@ const (
 	BucketFinished    Bucket = "finished"
 	BucketSettled     Bucket = "settled"
 	BucketUnavailable Bucket = "unavailable"
+	// BucketBlocked lists the tracks whose every result an operator blocked
+	// (#1396): the population behind the Results "Blocked" tile. It is a Results
+	// drill-down only, so Buckets() (the Work Queue row) does not list it, but
+	// ParseBucket accepts it.
+	BucketBlocked Bucket = "blocked"
 )
+
+// blockedExistsSQL is the Blocked column: whether the row's track has a block
+// (#1396). An EXISTS in the select list, never a JOIN, so a track with several
+// blocks cannot repeat a row and break the keyset cursor, and it is evaluated
+// only for the page's rows. It probes lyric_blocks through the
+// UNIQUE(artist_key, title_key, fingerprint) index on the identity prefix. The
+// outer table is always work_queue. Constant text, no bound parameter.
+const blockedExistsSQL = `EXISTS (SELECT 1 FROM lyric_blocks lb
+        WHERE lb.artist_key = work_queue.artist_key AND lb.title_key = work_queue.title_key)`
 
 // bucketPredicates is the ONE place a bucket becomes SQL. Each value is a
 // constant fragment (never built from caller input) with no leading AND/WHERE.
@@ -44,6 +58,8 @@ var bucketPredicates = map[Bucket]string{
 	BucketFinished:    finishedPredicate,
 	BucketSettled:     settledPredicate(finishedPredicate),
 	BucketUnavailable: `status = 'unavailable'`,
+	// A prune-retired row is Other on the dashboard, so it is not listed here.
+	BucketBlocked: `status = 'done' AND outcome_type = 'blocked' AND NOT (` + retiredPredicate + `)`,
 }
 
 // lineTopBucketPredicates overrides Finished and Settled under TopRungLine
@@ -67,7 +83,8 @@ func bucketPredicate(b Bucket, top TopRung) (string, bool) {
 	return p, ok
 }
 
-// Buckets returns every valid bucket in display order.
+// Buckets returns the Work Queue row's buckets in display order. BucketBlocked
+// is deliberately absent: it is a Results drill-down (see its doc comment).
 func Buckets() []Bucket {
 	return []Bucket{
 		BucketPending, BucketProcessing, BucketDeferred, BucketFailed,
@@ -122,6 +139,9 @@ type BucketRow struct {
 	OffsetMS     int64
 	// ManualInstrumental is the manual mark (manual_instrumental_at, #1218).
 	ManualInstrumental bool
+	// Blocked is true when the track has at least one lyric_blocks row for its
+	// identity (#1396). Row data only; it drives no control yet (#1249).
+	Blocked bool
 	// SortVal is the row's value under the listing's sort, encoded for a
 	// tablesort.Cursor ("n" when NULL or unsorted); the next page's cursor reads it.
 	SortVal string
@@ -405,6 +425,7 @@ func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, 
                  AND ((` + wordTierPredicate + `) OR (` + lineTierPredicate + `)), 0),
                 COALESCE(` + lineEditableSQL + `, 0), ` + editedPredicate + `, COALESCE(lyric_offset_ms, 0),
                 ` + manualMarkPredicate + `,
+                ` + blockedExistsSQL + `,
                 ` + spec.SelectExpr(o) + `
          FROM work_queue
          WHERE (` + pred + `)` + keyset + search + `
@@ -440,7 +461,7 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 		)
 		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
 			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable,
-			&it.LineEditable, &it.Edited, &it.OffsetMS, &it.ManualInstrumental, &sv); err != nil {
+			&it.LineEditable, &it.Edited, &it.OffsetMS, &it.ManualInstrumental, &it.Blocked, &sv); err != nil {
 			return nil, fmt.Errorf("reports: scan bucket row: %w", err)
 		}
 		it.SortVal = tablesort.EncodeValue(sv)

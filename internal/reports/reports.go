@@ -289,9 +289,12 @@ const (
 	// re-fetching yields the same wrong-script result. Counting it as coverage
 	// would overstate what the library actually has.
 	ResultRejected ResultClass = "rejected"
+	// ResultBlocked means every result for the track was one an operator marked
+	// wrong, so it settled with nothing on disk (outcome_type='blocked', #1395).
+	// Not a miss: the lookup found lyrics, they were refused.
+	ResultBlocked ResultClass = "blocked"
 	// ResultUnknown means the row could not be classified: an outcome_type this
-	// classifier has no arm for (a NULL one that is not a miss, or 'blocked',
-	// #1395, whose own class is a later slice). That is a legacy row that predates the column, or a row
+	// classifier has no arm for (a NULL one that is not a miss). That is a legacy row that predates the column, or a row
 	// the timing guard quarantined or remediation retired (Detail carries
 	// "timing refused: ..."). A row prune retired as unresolvable never reaches
 	// this classifier: Recent outcomes, its only caller, does not list it (#740).
@@ -329,6 +332,11 @@ type RecentOutcome struct {
 	// ManualInstrumental is true for a row an operator marked instrumental by
 	// hand (manual_instrumental_at, #1218); ProviderLane is then "manual".
 	ManualInstrumental bool
+	// Blocked is true when the track has at least one row in lyric_blocks for
+	// its identity (#1396), whatever its Result: a blocked track settles as
+	// ResultBlocked, but a track that was re-fetched after a block shows the
+	// block here too. Row data only; it drives no control yet (#1249).
+	Blocked bool
 	// Detail is the recorded reason WITHIN the Result class (work_queue
 	// outcome_detail, #773) -- today the script guard's own verdict on a
 	// 'rejected' row, e.g. "foreign-script share 1.00 exceeds 0.05".
@@ -395,9 +403,8 @@ type RecentOutcome struct {
 // source-of-truth rationale) -- EXCLUDING a row the timing guard later
 // remediated (timing_outcome 'categorical'/'mis_synced'/'degenerate'), which reads
 // ResultSynced regardless of its stale sync_tier, per ResultLineSynced's
-// doc comment; 'unsynced'/'instrumental'/'rejected' map to the matching
-// ResultClass unchanged; any other outcome_type (a NULL one, or 'blocked',
-// #1395, whose own class is a later slice) -> unknown. An 'unavailable' row
+// doc comment; 'unsynced'/'instrumental'/'rejected'/'blocked' map to the matching
+// ResultClass unchanged; any other outcome_type (a NULL one) -> unknown. An 'unavailable' row
 // always has a NULL outcome_type (RetireMiss never stamps one) and the miss
 // sentinel, so it always classifies as 'miss', never 'unknown'. output_paths is
 // no longer consulted -- it holds the stale enqueue-time .lrc plan, which is
@@ -483,7 +490,8 @@ const recentSelect = `SELECT artist, title, album, completed_at, provider_lane, 
             ) AS detail,
             ` + recentTimingVerdictExpr + ` AS timing_verdict,
             ` + recentResultExpr + ` AS result,
-            manual_instrumental_at IS NOT NULL`
+            manual_instrumental_at IS NOT NULL,
+            ` + blockedExistsSQL
 
 // recentTimingVerdictExpr is true for a row with a recorded timing verdict;
 // scanRecentOutcomes keeps such a row's lane, and the Source sort mirrors that.
@@ -512,6 +520,7 @@ const recentResultExpr = `CASE
                 WHEN outcome_type = 'unsynced' THEN 'unsynced'
                 WHEN outcome_type = 'instrumental' THEN 'instrumental'
                 WHEN outcome_type = 'rejected' THEN 'rejected'
+                WHEN outcome_type = 'blocked' THEN 'blocked'
                 ELSE 'unknown'
             END`
 
@@ -552,7 +561,7 @@ func scanRecentOutcomes(rows *sql.Rows, err error) ([]RecentOutcome, error) {
 			result        string
 			manual        bool
 		)
-		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &lastError, &detail, &timingVerdict, &result, &manual); err != nil {
+		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &lastError, &detail, &timingVerdict, &result, &manual, &o.Blocked); err != nil {
 			return nil, fmt.Errorf("reports: scan recent outcome: %w", err)
 		}
 		if completedAt.Valid && completedAt.String != "" {

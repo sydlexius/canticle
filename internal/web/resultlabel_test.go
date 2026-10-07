@@ -24,6 +24,7 @@ func TestResultLabel(t *testing.T) {
 		{"line-synced gets a hyphenated label", reports.ResultLineSynced, "line-synced"},
 		{"tier-unknown synced says so in text, not only color", reports.ResultSynced, "synced (tier unknown)"},
 		{"unsynced passes through unchanged", reports.ResultUnsynced, "unsynced"},
+		{"blocked renders its own word, not the unknown dash", reports.ResultBlocked, "blocked"},
 		{"unknown renders a dash, not a fourth class word", reports.ResultUnknown, "-"},
 	}
 	for _, tt := range tests {
@@ -48,6 +49,7 @@ func TestResultTierClass(t *testing.T) {
 		{"instrumental has no tier badge", reports.ResultInstrumental, ""},
 		{"miss has no tier badge", reports.ResultMiss, ""},
 		{"rejected has no tier badge", reports.ResultRejected, ""},
+		{"blocked has no tier badge", reports.ResultBlocked, ""},
 		{"unknown gets the muted pill", reports.ResultUnknown, "mx-result-tier mx-result-tier-unknown"},
 	}
 	for _, tt := range tests {
@@ -63,10 +65,10 @@ func TestResultTierClass(t *testing.T) {
 // each carrying its value and a non-empty tooltip, zero included (never
 // omitted), and that the tiles never merge word/line/tier-unknown.
 func TestBuildResultsTiles(t *testing.T) {
-	b := reports.ResultsBreakdown{WordSynced: 1, LineSynced: 2, Unsynced: 3, Instrumental: 4, SyncedTierUnknown: 5, Other: 6}
+	b := reports.ResultsBreakdown{WordSynced: 1, LineSynced: 2, Unsynced: 3, Instrumental: 4, Blocked: 7, SyncedTierUnknown: 5, Other: 6}
 	want := []struct{ label, value string }{
 		{"Word-synced", "1"}, {"Line-synced", "2"}, {"Unsynced", "3"},
-		{"Instrumental", "4"}, {"Tier unknown", "5"}, {"Other", "6"},
+		{"Instrumental", "4"}, {"Blocked", "7"}, {"Tier unknown", "5"}, {"Other", "6"},
 	}
 	tiles := buildResultsTiles(b)
 	if len(tiles) != len(want) {
