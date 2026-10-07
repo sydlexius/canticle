@@ -14,6 +14,21 @@ import (
 const lineTierPredicate = lineTierFilePredicate + `
                       AND ` + timingVerdictExclusion
 
+// resultBucketCaseSQL is the ONE classification of a done row into its result
+// bucket ('word', 'line', 'tier_unknown', 'unsynced', 'instrumental', 'other').
+// ResultsBreakdown and SourceBreakdown both select it, so a per-source count can
+// never disagree with the dashboard tile. A single CASE chain: no row matches
+// two arms and an unmatched row falls to 'other'. No leading SELECT.
+const resultBucketCaseSQL = `CASE
+                  WHEN ` + retiredPredicate + ` THEN 'other'
+                  WHEN outcome_type = 'synced' AND ` + wordTierPredicate + ` THEN 'word'
+                  WHEN outcome_type = 'synced' AND ` + lineTierPredicate + ` THEN 'line'
+                  WHEN outcome_type = 'synced' AND ` + TierUnknownPredicate + ` THEN 'tier_unknown'
+                  WHEN outcome_type = 'unsynced' THEN 'unsynced'
+                  WHEN outcome_type = 'instrumental' THEN 'instrumental'
+                  ELSE 'other'
+                END`
+
 // ResultsBreakdown is the complete split of the completed population
 // (work_queue rows with status='done', the same rows QueueSummary.Done counts)
 // by result type (#599, maintainer decision 2026-09-30). Every done row lands
@@ -72,15 +87,7 @@ func (b ResultsBreakdown) Total() int64 {
 // falls to Other rather than vanishing, and no row can match two arms.
 func (r *Repo) ResultsBreakdown(ctx context.Context) (ResultsBreakdown, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT CASE
-                  WHEN `+retiredPredicate+` THEN 'other'
-                  WHEN outcome_type = 'synced' AND `+wordTierPredicate+` THEN 'word'
-                  WHEN outcome_type = 'synced' AND `+lineTierPredicate+` THEN 'line'
-                  WHEN outcome_type = 'synced' AND `+TierUnknownPredicate+` THEN 'tier_unknown'
-                  WHEN outcome_type = 'unsynced' THEN 'unsynced'
-                  WHEN outcome_type = 'instrumental' THEN 'instrumental'
-                  ELSE 'other'
-                END AS bucket, COUNT(*)
+		`SELECT `+resultBucketCaseSQL+` AS bucket, COUNT(*)
          FROM work_queue
          WHERE status = 'done'
          GROUP BY bucket`)
