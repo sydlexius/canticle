@@ -147,8 +147,9 @@ type ProviderRecorder interface {
 }
 
 // SourceEventRecorder receives the per-day, per-lane counters (#1301): hit/miss
-// beside provider_outcomes and the delivered type where a result lands. at is
-// the worker's clock. Nil is a no-op; failures are logged and never fatal.
+// beside provider_outcomes and the delivered type where a result lands. The
+// timestamp comes from the worker's clock. Nil is a no-op; failures are logged
+// and never fatal.
 type SourceEventRecorder interface {
 	RecordSourceEvent(ctx context.Context, at time.Time, lane, event string) error
 }
