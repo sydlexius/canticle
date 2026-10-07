@@ -133,20 +133,41 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Block, error) {
 	return out, nil
 }
 
-// Blocked reports whether fingerprint is blocked for the identity. It FAILS
-// OPEN: a read error is logged and reads as not blocked, so a broken store can
-// never stop good lyrics from being written. An empty fingerprint is never
-// blocked.
+// Blocked reports whether one fingerprint is blocked for the identity; see
+// AnyBlocked.
 func (s *Store) Blocked(ctx context.Context, artistKey, titleKey, fingerprint string) bool {
+	return s.AnyBlocked(ctx, artistKey, titleKey, []string{fingerprint})
+}
+
+// AnyBlocked reports whether ANY of fingerprints (empties ignored) is blocked
+// for the identity, in one query. Pass SongFingerprints of a fetched result. It
+// FAILS OPEN: a read error reads as not blocked, so a broken store can never
+// stop good lyrics from being written. A real read failure is logged at Error;
+// a canceled or expired context (shutdown) is logged at Warn only. It reads
+// committed state through the store's own handle, so a block inserted in a
+// caller's still-uncommitted transaction is not visible to it.
+func (s *Store) AnyBlocked(ctx context.Context, artistKey, titleKey string, fingerprints []string) bool {
+	args := []any{normalize.NormalizeKey(artistKey), normalize.NormalizeKey(titleKey)}
+	for _, fp := range fingerprints {
+		if fp != "" {
+			args = append(args, fp)
+		}
+	}
+	if len(args) == 2 {
+		return false
+	}
+	q := `SELECT 1 FROM lyric_blocks WHERE artist_key = ? AND title_key = ? AND fingerprint IN (?` + strings.Repeat(",?", len(args)-3) + `) LIMIT 1`
 	var one int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM lyric_blocks WHERE artist_key = ? AND title_key = ? AND fingerprint = ?`,
-		normalize.NormalizeKey(artistKey), normalize.NormalizeKey(titleKey), fingerprint).Scan(&one)
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false
 	}
 	if err != nil {
-		s.log.ErrorContext(ctx, "lyricblock: block lookup failed, failing open", "error", err)
+		if ctx.Err() != nil {
+			s.log.WarnContext(ctx, "lyricblock: block lookup canceled, failing open", "error", err)
+		} else {
+			s.log.ErrorContext(ctx, "lyricblock: block lookup failed, failing open", "error", err)
+		}
 		return false
 	}
 	return true

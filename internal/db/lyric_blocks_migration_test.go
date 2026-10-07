@@ -36,14 +36,12 @@ func TestMigration069LyricBlocksUpAndDown(t *testing.T) {
 	if _, err := sqlDB.ExecContext(ctx, ins); err == nil {
 		t.Error("unique (artist_key, title_key, fingerprint) not enforced")
 	}
-	if _, err := p.Down(ctx); err != nil {
-		t.Fatalf("Down: %v", err)
-	}
 	var n int
-	if err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='lyric_blocks'`).Scan(&n); err != nil {
-		t.Fatal(err)
+	_, err = p.Down(ctx)
+	if err == nil {
+		err = sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name='lyric_blocks'`).Scan(&n)
 	}
-	if n != 0 {
-		t.Error("lyric_blocks still present after Down")
+	if err != nil || n != 0 {
+		t.Errorf("Down: err %v, lyric_blocks tables left = %d", err, n)
 	}
 }
