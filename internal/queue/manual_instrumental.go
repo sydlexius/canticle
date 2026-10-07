@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sydlexius/canticle/internal/db"
 )
 
 // ManualLane is the provider_lane a hand-marked instrumental row carries, so
@@ -20,6 +22,52 @@ var (
 	// ErrManualInstrumentalNotFound is returned when no work_queue row has the id.
 	ErrManualInstrumentalNotFound = errors.New("queue: no such work item")
 )
+
+// markManualInstrumentalSQL carries its own status and already-marked
+// predicates so a stale read cannot settle a row a worker now holds. The
+// upgrade_queued = 0 term is defense in depth: trigger 053 also clears it, so
+// no test can tell the two apart.
+const markManualInstrumentalSQL = `UPDATE work_queue
+         SET manual_instrumental_at = ?,
+             status = 'done',
+             outcome_type = 'instrumental',
+             provider_lane = ?,
+             upstream = NULL,
+             instrumental_result = NULL,
+             sync_tier = NULL,
+             word_timing_state = NULL,
+             word_timing_generation = NULL,
+             word_timing_checked_at = NULL,
+             lyric_edited_at = NULL,
+             lyric_offset_ms = NULL,
+             timing_outcome = NULL,
+             overrun_magnitude = NULL,
+             overrun_ratio = NULL,
+             evaluated_at = NULL,
+             refused_waits = 0,
+             upgrade_queued = 0,
+             upgrade_checked_at = NULL,
+             last_error = '',
+             completed_at = ?
+         WHERE id = ? AND status <> 'processing' AND manual_instrumental_at IS NULL`
+
+// manualMarkRefusal re-reads row id after a zero-row mark UPDATE.
+func manualMarkRefusal(ctx context.Context, tx *sql.Tx, id int64) error {
+	var status string
+	var markedAt sql.NullString
+	err := tx.QueryRowContext(ctx,
+		`SELECT status, manual_instrumental_at FROM work_queue WHERE id = ?`, id).Scan(&status, &markedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrManualInstrumentalNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("queue: mark manual instrumental %d re-read: %w", id, err)
+	}
+	if status == StatusProcessing {
+		return ErrManualInstrumentalInFlight
+	}
+	return nil
+}
 
 // MarkManualInstrumentalTx settles row id as a hand-marked instrumental inside
 // the caller's transaction (#1218): done, outcome 'instrumental', lane 'manual'
@@ -47,31 +95,17 @@ func MarkManualInstrumentalTx(ctx context.Context, tx *sql.Tx, id int64, now tim
 		return false, nil
 	}
 	ts := formatTime(now)
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE work_queue
-         SET manual_instrumental_at = ?,
-             status = 'done',
-             outcome_type = 'instrumental',
-             provider_lane = ?,
-             upstream = NULL,
-             instrumental_result = NULL,
-             sync_tier = NULL,
-             word_timing_state = NULL,
-             word_timing_generation = NULL,
-             word_timing_checked_at = NULL,
-             lyric_edited_at = NULL,
-             lyric_offset_ms = NULL,
-             timing_outcome = NULL,
-             overrun_magnitude = NULL,
-             overrun_ratio = NULL,
-             evaluated_at = NULL,
-             refused_waits = 0,
-             upgrade_queued = 0,
-             upgrade_checked_at = NULL,
-             last_error = '',
-             completed_at = ?
-         WHERE id = ?`, ts, ManualLane, ts, id); err != nil {
+	res, err := tx.ExecContext(ctx, markManualInstrumentalSQL, ts, ManualLane, ts, id)
+	if err != nil {
 		return false, fmt.Errorf("queue: mark manual instrumental %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("queue: mark manual instrumental %d rows affected: %w", id, err)
+	}
+	if n == 0 {
+		// The row changed between the read and the write: re-read to say why.
+		return false, manualMarkRefusal(ctx, tx, id)
 	}
 	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {
 		return false, fmt.Errorf("queue: mark manual instrumental %d scan_results writeback: %w", id, err)
@@ -117,18 +151,30 @@ func UnmarkManualInstrumentalTx(ctx context.Context, tx *sql.Tx, id int64, now t
 	return true, nil
 }
 
-// MarkManualInstrumental is MarkManualInstrumentalTx in its own transaction.
-func (q *DBQueue) MarkManualInstrumental(ctx context.Context, id int64) (bool, error) {
-	return q.inTx(ctx, "mark manual instrumental", func(tx *sql.Tx) (bool, error) {
-		return MarkManualInstrumentalTx(ctx, tx, id, q.now())
+// MarkManualInstrumental is MarkManualInstrumentalTx in its own transaction,
+// retried on SQLITE_BUSY.
+func (q *DBQueue) MarkManualInstrumental(ctx context.Context, id int64) (changed bool, err error) {
+	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		var e error
+		changed, e = q.inTx(ctx, "mark manual instrumental", func(tx *sql.Tx) (bool, error) {
+			return MarkManualInstrumentalTx(ctx, tx, id, q.now())
+		})
+		return e
 	})
+	return changed, err
 }
 
-// UnmarkManualInstrumental is UnmarkManualInstrumentalTx in its own transaction.
-func (q *DBQueue) UnmarkManualInstrumental(ctx context.Context, id int64) (bool, error) {
-	return q.inTx(ctx, "unmark manual instrumental", func(tx *sql.Tx) (bool, error) {
-		return UnmarkManualInstrumentalTx(ctx, tx, id, q.now())
+// UnmarkManualInstrumental is UnmarkManualInstrumentalTx in its own transaction,
+// retried on SQLITE_BUSY.
+func (q *DBQueue) UnmarkManualInstrumental(ctx context.Context, id int64) (changed bool, err error) {
+	err = db.RetryOnBusy(ctx, dequeueMaxAttempts, func() error {
+		var e error
+		changed, e = q.inTx(ctx, "unmark manual instrumental", func(tx *sql.Tx) (bool, error) {
+			return UnmarkManualInstrumentalTx(ctx, tx, id, q.now())
+		})
+		return e
 	})
+	return changed, err
 }
 
 func (q *DBQueue) inTx(ctx context.Context, op string, fn func(*sql.Tx) (bool, error)) (bool, error) {

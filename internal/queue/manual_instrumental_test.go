@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"slices"
 	"testing"
@@ -172,5 +173,54 @@ func TestManualMarkIsInvisibleToDetectorPaths(t *testing.T) {
 	if err := dbh.QueryRow(`SELECT status || '|' || outcome_type || '|' || provider_lane || '|' || COALESCE(instrumental_result, '-')
         FROM work_queue WHERE id = ?`, id).Scan(&shape); err != nil || shape != "done|instrumental|manual|-" {
 		t.Errorf("row after detector paths = %q (%v); want unchanged", shape, err)
+	}
+}
+
+func scanResultStatus(t *testing.T, dbh *sql.DB, id int64) string {
+	t.Helper()
+	var s string
+	if err := dbh.QueryRow(`SELECT status FROM scan_results WHERE id = ?`, id).Scan(&s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestManualMarkWritesBackScanResults(t *testing.T) {
+	ctx := context.Background()
+	q, dbh := upgradeQueue(t)
+	id := seedUpgradeRow(t, dbh, "scanlink", "status = 'pending'")
+	mustExec(t, dbh, `INSERT OR IGNORE INTO libraries (id, path, name) VALUES (1, '/m', 'lib')`)
+	mustExec(t, dbh, `INSERT INTO scan_results (id, library_id, file_path, status) VALUES (?, 1, '/m/scanlink.flac', 'pending')`, id)
+	mustExec(t, dbh, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, id)
+
+	if ok, err := q.MarkManualInstrumental(ctx, id); err != nil || !ok {
+		t.Fatalf("mark = (%v, %v)", ok, err)
+	}
+	if got := scanResultStatus(t, dbh, id); got != "done" {
+		t.Errorf("scan_results after mark = %q; want done", got)
+	}
+	if ok, err := q.UnmarkManualInstrumental(ctx, id); err != nil || !ok {
+		t.Fatalf("unmark = (%v, %v)", ok, err)
+	}
+	if got := scanResultStatus(t, dbh, id); got != "pending" {
+		t.Errorf("scan_results after unmark = %q; want pending", got)
+	}
+}
+
+// TestMarkManualInstrumentalSQLRefusesProcessing drives the UPDATE statement
+// directly against a row a worker holds, the state a stale read would miss.
+func TestMarkManualInstrumentalSQLRefusesProcessing(t *testing.T) {
+	_, dbh := upgradeQueue(t)
+	busy := seedUpgradeRow(t, dbh, "stale", "status = 'processing'")
+	res, err := dbh.Exec(markManualInstrumentalSQL, "2026-02-01T00:00:00Z", ManualLane, "2026-02-01T00:00:00Z", busy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := res.RowsAffected(); n != 0 {
+		t.Errorf("UPDATE touched %d rows of a processing row; want 0", n)
+	}
+	var status string
+	if err := dbh.QueryRow(`SELECT status FROM work_queue WHERE id = ?`, busy).Scan(&status); err != nil || status != "processing" {
+		t.Errorf("status = %q err=%v; want processing", status, err)
 	}
 }

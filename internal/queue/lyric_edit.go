@@ -7,11 +7,12 @@ import (
 	"strings"
 )
 
-// notLyricEdited keeps automatic replacement paths away from a file a person
-// adjusted by ear (#481 Stage 2) and away from a row an operator marked
-// instrumental by hand (#1218). Shared by the upgrade sweep, word recheck,
-// categorical reopen and gone-source move predicates. Leading AND.
-const notLyricEdited = ` AND lyric_edited_at IS NULL AND manual_instrumental_at IS NULL`
+// notHandProtected keeps automatic replacement paths away from a row a person
+// has acted on: a file adjusted by ear (lyric_edited_at, #481 Stage 2) or a row
+// an operator marked instrumental by hand (manual_instrumental_at, #1218).
+// Shared by the upgrade sweep, word recheck, categorical reopen and
+// gone-source move predicates. Leading AND.
+const notHandProtected = ` AND lyric_edited_at IS NULL AND manual_instrumental_at IS NULL`
 
 // SetLyricEdit records a hand edit of the row's .lrc: the net offset from the
 // original and the edit time. Non-fatal for the caller only in the sense that
@@ -28,7 +29,7 @@ func (q *DBQueue) SetLyricEdit(ctx context.Context, id int64, offsetMS int) erro
 // SetLyricRetime records an accepted generated retiming of the row's .lrc
 // (#1008): the edit time, with lyric_offset_ms left NULL because the change is
 // per line, not one offset. The mark keeps the automatic sweeps away exactly
-// as a hand edit's does (notLyricEdited).
+// as a hand edit's does (notHandProtected).
 func (q *DBQueue) SetLyricRetime(ctx context.Context, id int64) error {
 	if _, err := q.db.ExecContext(ctx,
 		`UPDATE work_queue SET lyric_offset_ms = NULL, lyric_edited_at = ? WHERE id = ?`,

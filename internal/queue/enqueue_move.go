@@ -172,7 +172,7 @@ const (
              completed_at = NULL, last_error = '',
              outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL,
              ` + ClearWordRecheckQueued + `
-         WHERE id = ? AND source_path = ? AND status = 'done' AND last_error = ?` + notLyricEdited
+         WHERE id = ? AND source_path = ? AND status = 'done' AND last_error = ?` + notHandProtected
 	movePathSQL = `UPDATE work_queue SET source_path = ?, scan_result_id = COALESCE(?, scan_result_id)
          WHERE id = ? AND source_path = ? AND status != 'processing'`
 )

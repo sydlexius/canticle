@@ -20,7 +20,7 @@ const upgradeCandidatePredicate = ` status = 'done'
    AND TRIM(COALESCE(source_path, '')) <> ''
    AND COALESCE(last_error, '') = ''
    AND completed_at < ?
-   AND COALESCE(upgrade_checked_at, '') < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '-' || (? * ((1 << MIN(upgrade_miss_count, ?)) - 1)) || ' seconds')` + notLyricEdited
+   AND COALESCE(upgrade_checked_at, '') < strftime('%Y-%m-%dT%H:%M:%SZ', ?, '-' || (? * ((1 << MIN(upgrade_miss_count, ?)) - 1)) || ' seconds')` + notHandProtected
 
 // UpgradeMaxHoldDoublings caps the hold escalation (#1118): a row that has
 // missed n consecutive trips waits base * 2^MIN(n, cap), so 1, 2, 4, 8 weeks
@@ -56,7 +56,7 @@ const upgradeMissyncedPredicate = ` status = 'done'
    AND (COALESCE(upgrade_checked_at, '') < ? OR upgrade_checked_at < COALESCE(evaluated_at, ''))
    AND COALESCE(word_timing_state, '') <> 'queued'
    AND TRIM(COALESCE(source_path, '')) <> ''
-   AND COALESCE(last_error, '') = ''` + notLyricEdited
+   AND COALESCE(last_error, '') = ''` + notHandProtected
 
 // ListUpgradeCandidates returns up to limit ids from both populations: settled
 // and last admitted before holdBefore (below the line rung), and post-settle
