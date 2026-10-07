@@ -49,3 +49,23 @@ func (w *LRCWriter) WriteManualMarker(song models.Song, filename string, outdir 
 	opt.allowManual = true
 	return opt.WriteLRC(song, filename, outdir)
 }
+
+// at calls the test-only race hook, if any.
+func (w *LRCWriter) at(stage string) {
+	if w.racePoint != nil {
+		w.racePoint(stage)
+	}
+}
+
+// recheckManualMarker repeats the up-front probe just before a destructive
+// step, and also reads the target itself: a marker that appeared after the
+// directory listing was taken is not in it.
+func (w *LRCWriter) recheckManualMarker(fp string, l sidecar.Listing) *KeptError {
+	if k := w.refuseManualMarker(fp, l); k != nil {
+		return k
+	}
+	if !w.allowManual && sidecar.KindOf(fp) != sidecar.KindLineSynced && ManualMarkerOnDisk(fp) {
+		return &KeptError{OnDisk: RungInstrumental, Judged: true, Manual: true}
+	}
+	return nil
+}

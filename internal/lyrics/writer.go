@@ -121,6 +121,10 @@ type LRCWriter struct {
 	// TEST-ONLY, for the same reason: it fails the removal without also making
 	// the directory unwritable for the .lrc.
 	companionRemove func(path string) error
+	// racePoint, when non-nil, is called at named points between the manual
+	// marker probe and each destructive step ("probed", "written"). TEST-ONLY:
+	// it lets a test land a manual marker inside the check-then-act window.
+	racePoint func(stage string)
 	// selfWrites, when non-nil, records every path this writer touches so the
 	// filesystem watcher can drop the events its own writes generate (#685).
 	// Nil (the default, and every non-serve caller) is a no-op.
@@ -507,6 +511,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	if k := w.refuseManualMarker(fp, listing); k != nil {
 		return k
 	}
+	w.at("probed")
 	if !w.force {
 		if have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion); got < have.OnDisk {
 			slog.Debug("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),
@@ -537,13 +542,28 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		}
 	}
 
-	if err := writeAtomic(outdir, fn, tags, writeContent); err != nil {
+	// Re-check right before the remove/rename that replaces fp. This narrows
+	// the probe-to-replace window to the gap before the syscall; it does not
+	// close it (no per-stem lock), so a marker landing in that gap can still lose.
+	recheck := func() error {
+		if k := w.recheckManualMarker(fp, listing); k != nil {
+			return k
+		}
+		return nil
+	}
+	if err := writeAtomicGuarded(outdir, fn, tags, writeContent, recheck); err != nil {
 		return err
 	}
+	w.at("written")
 	// Remove the opposite sidecar so format transitions never leave both files on disk.
 	// Writing .lrc removes a stale .txt (upgrade), writing .txt removes a stale .lrc (downgrade).
 	// Every extension-case variant goes (#989), under the exact names recorded above.
 	for _, old := range stale {
+		// Same narrowed (not closed) window as the re-check above.
+		if !w.allowManual && ManualMarkerOnDisk(old) {
+			slog.Debug("keeping manual instrumental marker", "path", old)
+			return &KeptError{OnDisk: RungInstrumental, Judged: true, Manual: true}
+		}
 		if err := os.Remove(old); err != nil && !os.IsNotExist(err) {
 			slog.Warn("could not remove stale sidecar", "path", old, "error", err)
 		}
@@ -813,7 +833,13 @@ func (w *LRCWriter) resolveOutdir(outdir string) (string, error) {
 // writeAtomic writes tags then writeContent to outdir/fn through a temp file in
 // the same directory, renamed into place only on complete success, so a
 // mid-write failure never leaves a partial file at the final path.
-func writeAtomic(outdir, fn string, tags []string, writeContent func(*bufio.Writer) error) (retErr error) {
+func writeAtomic(outdir, fn string, tags []string, writeContent func(*bufio.Writer) error) error {
+	return writeAtomicGuarded(outdir, fn, tags, writeContent, nil)
+}
+
+// writeAtomicGuarded is writeAtomic with an optional guard run immediately
+// before the existing output is removed; a non-nil error aborts untouched.
+func writeAtomicGuarded(outdir, fn string, tags []string, writeContent func(*bufio.Writer) error, guard func() error) (retErr error) {
 	fp := filepath.Join(outdir, fn)
 	tmp, err := os.CreateTemp(outdir, selfwrite.TempPattern(fn)) //nolint:gosec // path is constructed from sanitized song metadata
 	if err != nil {
@@ -850,6 +876,11 @@ func writeAtomic(outdir, fn string, tags []string, writeContent func(*bufio.Writ
 	// final .lrc has the same permissions as a file created with os.Create.
 	if err := os.Chmod(tmpPath, 0o666); err != nil { //nolint:gosec // mode is a fixed constant, not user input
 		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if guard != nil {
+		if err := guard(); err != nil {
+			return err
+		}
 	}
 	// On Windows, os.Rename fails when the destination already exists.
 	// Remove it first so overwrite semantics are preserved cross-platform.

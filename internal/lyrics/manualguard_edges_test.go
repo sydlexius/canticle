@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sydlexius/canticle/internal/models"
 )
 
 // Parsing edges of the probe: CRLF, a leading BOM and a different-case tag
@@ -50,5 +52,40 @@ func TestWriteLRC_ManualMarkerSameExtensionCaseVariant(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "song.txt")); err == nil {
 		t.Error("a second .txt was written beside the manual marker")
+	}
+}
+
+// A manual marker that lands AFTER the up-front probe (the operator's mark
+// action racing a fetch) must still survive: the replace re-checks first.
+func TestWriteLRC_ManualMarkerLandingAfterProbeSurvives(t *testing.T) {
+	_, unsynced, line := rungSongs()
+	cases := map[string]struct {
+		song   models.Song
+		target string
+		stage  string
+		seeded string // pre-existing ordinary .txt, or ""
+	}{
+		"txt replace":       {unsynced, "song.txt", "probed", ""},
+		"stale txt removal": {line, "song.lrc", "written", "plain words\n"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "song.txt")
+			if c.seeded != "" {
+				seed(t, marker, c.seeded)
+			}
+			w := NewLRCWriter()
+			w.SetForceOverwrite(true)
+			w.racePoint = func(stage string) {
+				if stage == c.stage {
+					seed(t, marker, manualMarkerBody)
+				}
+			}
+			mustKeptManual(t, w.WriteLRC(c.song, c.target, dir))
+			if got := readText(t, marker); got != manualMarkerBody {
+				t.Errorf("marker changed: %q", got)
+			}
+		})
 	}
 }

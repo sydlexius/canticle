@@ -49,3 +49,31 @@ func TestScanLibrary_ManualMarkerNeverReopened(t *testing.T) {
 		}
 	}
 }
+
+// A manual marker under a different extension case (song.TXT) must hold the
+// track settled even when the exact-case song.txt (a provider marker) wins path
+// resolution. Needs a case-sensitive filesystem; skipped elsewhere.
+func TestScanLibrary_ManualMarkerCaseVariantNeverReopened(t *testing.T) {
+	dir := t.TempDir()
+	if !caseSensitiveFS(t, dir) {
+		t.Skip("filesystem is case-insensitive; song.txt and song.TXT would alias")
+	}
+	if err := testutil.WriteFLACFileWithComments(dir, "song.flac", 44100, 441000, map[string]string{}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	marker := func(name, source string) {
+		body := "[by:canticle]\n[source:" + source + "]\n" + lyrics.InstrumentalMarker + "\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker("song.txt", "musixmatch")
+	marker("song.TXT", lyrics.SourceManual)
+	res, err := NewScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 100, Upgrade: true})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res) != 0 {
+		t.Errorf("got %d results, want 0 (manual variant must settle the track)", len(res))
+	}
+}
