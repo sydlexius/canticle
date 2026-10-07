@@ -81,7 +81,11 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # Arrives TRANSITIVELY via ffmpeg, so `apk upgrade` alone leaves 1.6.58-r1 in
 # place while the base digest predates the fix. Raise/drop when the base index
 # ships it by default.
-RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.8-r0" "expat>=2.8.4-r0" "util-linux>=2.42.3-r0" "libpng>=1.6.59-r0" su-exec tzdata && \
+# zlib floor pinned to remediate CVE-2026-85091 (HIGH, CVSS 8.3), present in
+# 1.3.2-r0 and fixed in 1.3.2-r1 per the Alpine 3.24 secdb. Arrives TRANSITIVELY,
+# so `apk upgrade` alone leaves 1.3.2-r0 in place while the base digest predates
+# the fix. Raise/drop when the base index ships it by default.
+RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.8-r0" "expat>=2.8.4-r0" "util-linux>=2.42.3-r0" "libpng>=1.6.59-r0" "zlib>=1.3.2-r1" su-exec tzdata && \
     apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
