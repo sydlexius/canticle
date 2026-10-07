@@ -1941,7 +1941,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
 // the number of rows deleted.
 func (q *DBQueue) ClearDone(ctx context.Context) (int64, error) {
 	res, err := q.db.ExecContext(ctx,
-		`DELETE FROM work_queue WHERE status = 'done'`,
+		`DELETE FROM work_queue WHERE status = 'done' AND manual_instrumental_at IS NULL`,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("queue: clear done: %w", err)
@@ -1959,7 +1959,7 @@ func (q *DBQueue) ClearDone(ctx context.Context) (int64, error) {
 func (q *DBQueue) CountDone(ctx context.Context) (int64, error) {
 	var n int64
 	if err := q.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE status = 'done'`,
+		`SELECT COUNT(*) FROM work_queue WHERE status = 'done' AND manual_instrumental_at IS NULL`,
 	).Scan(&n); err != nil {
 		return 0, fmt.Errorf("queue: count done: %w", err)
 	}
@@ -3920,16 +3920,19 @@ func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
 }
 
 // categoricalFileless is the SELECT expression for "this row records no
-// sidecar and no hand edit" (#972). Only the worker's fetch-time categorical
-// settle and a quarantine/purge remediation leave outcome_type and sync_tier
-// both NULL. A verdict the timing sweep stamps under on_categorical = off, or
+// sidecar and no hand protection (a hand edit or a manual mark)" (#972). Only
+// the worker's fetch-time categorical settle and a quarantine/purge
+// remediation leave outcome_type and sync_tier both NULL. A verdict the timing sweep stamps under on_categorical = off, or
 // on a hand-edited row (#1226: judged, never remediated), keeps the file and
 // its outcome_type; such a row is never reopened for another recording, which
 // would strand that file with no row and carry its edit mark and tier along.
 // It reads the row's record (outcome_type, sync_tier, the hand-edit stamp),
 // not the disk, so a row whose record was cleared while a sidecar remained on
 // disk still reads as fileless; tracked in #1366.
-const categoricalFileless = `(outcome_type IS NULL AND sync_tier IS NULL` + notLyricEdited + `)`
+// The manual-mark term in notHandProtected is defense in depth: a marked row
+// also fails outcome_type IS NULL, and ReopenDoneRowTx has its own guard, so
+// no test isolates this arm.
+const categoricalFileless = `(outcome_type IS NULL AND sync_tier IS NULL` + notHandProtected + `)`
 
 // reopenCategoricalForScan reopens the 'done' + categorical row a scan-origin
 // enqueue collides with when the scan judged the incoming file a different
@@ -4078,7 +4081,8 @@ func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (
              evaluated_at = NULL,
              refused_waits = 0,
              `+ClearWordRecheckQueued+`
-         WHERE id = ? AND (status = 'done' OR (status = 'deferred' AND word_timing_state = 'queued'))`,
+         WHERE id = ? AND (status = 'done' OR (status = 'deferred' AND word_timing_state = 'queued'))
+           AND manual_instrumental_at IS NULL`,
 		PriorityScan, formatTime(now), id,
 	)
 	if err != nil {

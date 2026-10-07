@@ -96,6 +96,7 @@ type WordRecheckOptions struct {
 // examines mis_synced rows: an enabled upgrade sweep may re-fetch an eligible
 // post-settle one (#1120) and a result that lands re-stamps it, while forced
 // alignment of the existing words is only the on-demand #1008 Auto action.
+// A hand-edited or manually marked row is excluded (notHandProtected).
 // source_path is required because the sidecar is derived from it.
 func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	var b strings.Builder
@@ -104,7 +105,7 @@ func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
    AND outcome_type = 'synced'
    AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
    AND TRIM(COALESCE(source_path, '')) <> ''`)
-	b.WriteString(notLyricEdited)
+	b.WriteString(notHandProtected)
 	b.WriteString(`
    AND ((word_timing_state IS NULL`)
 	if !opts.UnexaminedCheckedBefore.IsZero() {
