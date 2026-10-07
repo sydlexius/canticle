@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
+	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/internal/trustnet"
 )
@@ -169,6 +172,55 @@ func TestSourceRowLinksEqualPopulations(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		var linked []string
+		for _, sb := range all {
+			labels, vals := typeCellsFor(sb.Counts, top)
+			for i, l := range labels {
+				href := sourceTypeLink(sb, l, top)
+				if href == "" {
+					continue
+				}
+				linked = append(linked, sb.Lane+"/"+l)
+				if n := listFromHref(t, repo, top, href); int64(n) != vals[i] {
+					t.Errorf("rung %v %s/%s: count %d but %s lists %d", top, sb.Lane, l, vals[i], href, n)
+				}
+			}
+		}
+		slices.Sort(linked)
+		want := map[reports.TopRung][]string{
+			reports.TopRungWord: {"innertube/Line-synced", "innertube/Word-synced", "musixmatch/Line-synced", "musixmatch/Word-synced"},
+			reports.TopRungLine: {"innertube/Line-synced", "musixmatch/Line-synced"},
+		}[top]
+		if !slices.Equal(linked, want) {
+			t.Errorf("rung %v: linked rows %q, want %q", top, linked, want)
+		}
+	}
+}
+
+// TestSourceRowLinksOddShapes: timing verdicts, a retired row and a queued
+// word recheck never skew a linked row's population under either rung.
+func TestSourceRowLinksOddShapes(t *testing.T) {
+	for _, top := range []reports.TopRung{reports.TopRungWord, reports.TopRungLine} {
+		sqlDB := openReportsTestDB(t)
+		for i, r := range []struct{ outcome, tier, timing, word, lastErr string }{
+			{"synced", "word", "", "", ""}, {"synced", "line", "", "", ""},
+			{"synced", "word", "mis_synced", "", ""}, {"synced", "line", "mis_synced", "", ""},
+			{"synced", "", "categorical", "", ""}, {"synced", "line", "degenerate", "", ""},
+			{"synced", "word", "", "", queue.UnresolvableGoneError},
+			{"synced", "line", "", "queued", ""}, {"synced", "word", "", "queued", ""},
+		} {
+			title := "odd" + strconv.Itoa(i)
+			seedLinkRow(t, sqlDB, title, "done", r.outcome, r.tier, r.timing, r.word, r.lastErr, "")
+			if _, err := sqlDB.ExecContext(context.Background(),
+				`UPDATE work_queue SET provider_lane = 'musixmatch' WHERE title = ?`, title); err != nil {
+				t.Fatal(err)
+			}
+		}
+		repo := reports.New(sqlDB, reports.WithLineTopRung(top == reports.TopRungLine))
+		all, err := repo.SourceBreakdown(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
 		linked := 0
 		for _, sb := range all {
 			labels, vals := typeCellsFor(sb.Counts, top)
@@ -178,13 +230,41 @@ func TestSourceRowLinksEqualPopulations(t *testing.T) {
 					continue
 				}
 				linked++
+				if vals[i] == 0 {
+					t.Errorf("rung %v %s: shape fixture leaves this row empty, so it proves nothing", top, l)
+				}
 				if n := listFromHref(t, repo, top, href); int64(n) != vals[i] {
 					t.Errorf("rung %v %s/%s: count %d but %s lists %d", top, sb.Lane, l, vals[i], href, n)
 				}
 			}
 		}
-		if want := map[reports.TopRung]int{reports.TopRungWord: 4, reports.TopRungLine: 2}[top]; linked != want {
+		if want := map[reports.TopRung]int{reports.TopRungWord: 2, reports.TopRungLine: 1}[top]; linked != want {
 			t.Errorf("rung %v: %d linked rows, want %d", top, linked, want)
 		}
+	}
+}
+
+// TestSourceTileAlwaysResolves: a lane with attempts but no done rows (a retired
+// lane) still renders a linked tile whose page is the empty state; a lane that
+// appears nowhere stays 404.
+func TestSourceTileAlwaysResolves(t *testing.T) {
+	sqlDB := openReportsTestDB(t)
+	seedSources(t, sqlDB)
+	seedLinkRow(t, sqlDB, "att1", "pending", "", "", "", "", "", "")
+	if _, err := sqlDB.ExecContext(context.Background(),
+		`INSERT INTO lane_attempts (queue_id, lane, hit, attempted_at)
+         SELECT id, 'retiredlane', 0, '2026-06-18T00:00:00Z' FROM work_queue WHERE title = 'att1'`); err != nil {
+		t.Fatal(err)
+	}
+	mux := newReportsUIServer(t, sqlDB)
+	_, dash := getSource(t, mux, "/dashboard")
+	if !strings.Contains(dash, `href="/sources/retiredlane"`) {
+		t.Fatal("dashboard has no tile link for the attempts-only lane")
+	}
+	if code, body := getSource(t, mux, "/sources/retiredlane"); code != http.StatusOK || !strings.Contains(body, "Data accrues") {
+		t.Errorf("attempts-only lane: status %d, empty state present = %v", code, strings.Contains(body, "Data accrues"))
+	}
+	if code, _ := getSource(t, mux, "/sources/neverseen"); code != http.StatusNotFound {
+		t.Errorf("wholly unknown lane = %d, want 404", code)
 	}
 }

@@ -249,6 +249,14 @@
 .mx-source-link:hover,
 .mx-source-link:focus-visible { text-decoration: underline; }
 
+.mx-source-link:focus-visible {
+  outline: 2px solid var(--mx-sidebar-active-text);
+  outline-offset: 2px;
+}
+
+/* The unattributed link follows the tile grid, which has no bottom margin. */
+.mx-dash-tiles + .mx-dash-section-sub { margin-top: 0.875rem; }
+
 /* -- Up next panel (#572) -------------------------------------------------- */
 /* The panel reuses .mx-table / .mx-table-wrap / .mx-cell-mono from the shared
  * stylesheet; only the tier badge and the narrow numeric columns are panel

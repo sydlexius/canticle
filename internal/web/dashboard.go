@@ -332,7 +332,7 @@ func buildResultsTiles(b reports.ResultsBreakdown) []templates.StatTile {
 		}
 		href := ""
 		if rb.Href != nil {
-			href = rb.Href(b.TopRung)
+			href = rb.Href(b.TopRung, "")
 		}
 		tiles = append(tiles, templates.StatTile{
 			Label:   rb.Label,

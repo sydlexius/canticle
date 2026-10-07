@@ -99,7 +99,9 @@ type resultBucket struct {
 	// rung top, or "" when no bucket + chip combination yields it (#1237). A
 	// near-miss filter is never linked: the list's total must equal the tile's
 	// count, which TestResultTilesLinkToEqualPopulations pins per rung.
-	Href func(top reports.TopRung) string
+	// lane, when non-empty, narrows the view to one source's rows (the source
+	// page rows share these rules, so the two cannot drift).
+	Href func(top reports.TopRung, lane string) string
 }
 
 // resultsHref is the /queue/{bucket} URL carrying the given chip state. It is
@@ -128,8 +130,9 @@ func reviewPreviewHref(q reports.ReviewQueueItem) string {
 // sum to the Finished + Settled (upgradable) pair on the Work Queue row
 // (reports.ResultsBreakdown puts every done row in exactly one bucket). It
 // lives beside queueBuckets because both rows share the label, tooltip and
-// reader shape and are edited together; it is not chart-backed, so no color
-// map key follows these labels.
+// reader shape and are edited together. The source page's by-type doughnut
+// reuses these labels, so chart-init.js keys a color on each
+// (TestResultBucketsHaveChartColors).
 var resultBuckets = []resultBucket{
 	{
 		Label:   "Word-synced",
@@ -138,11 +141,11 @@ var resultBuckets = []resultBucket{
 		// Finished is the word tier only under the word rung (the same
 		// wordTierPredicate). Under the line rung Finished also holds the line
 		// tier and no word chip exists, so the population has no exact view.
-		Href: func(top reports.TopRung) string {
+		Href: func(top reports.TopRung, lane string) string {
 			if top == reports.TopRungLine {
 				return ""
 			}
-			return resultsHref(reports.BucketFinished, queueViewState{})
+			return resultsHref(reports.BucketFinished, queueViewState{Lane: lane})
 		},
 	},
 	{
@@ -152,12 +155,15 @@ var resultBuckets = []resultBucket{
 		Value:       func(b reports.ResultsBreakdown) int64 { return b.LineSynced },
 		// The Line-synced chip lives on Settled under the word rung and moves to
 		// Finished under the line rung (reports.BucketChips).
-		Href: func(top reports.TopRung) string {
+		Href: func(top reports.TopRung, lane string) string {
 			b := reports.BucketSettled
 			if top == reports.TopRungLine {
 				b = reports.BucketFinished
 			}
-			return resultsHref(b, queueViewState{Tier: reports.TierLine})
+			if !reports.HasChip(b, reports.ChipLineSynced, top) {
+				return ""
+			}
+			return resultsHref(b, queueViewState{Lane: lane, Tier: reports.TierLine})
 		},
 	},
 	{

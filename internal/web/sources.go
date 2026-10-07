@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -32,6 +33,18 @@ func knownSourceLane(lane string) bool {
 	return reports.ValidLane(lane) || lane == detectorbackfill.LaneName
 }
 
+// hasAttempts reports whether lane has recorded attempts, which is what gives
+// it a dashboard tile; every tile link must resolve, so such a lane is served
+// (as the empty state when it has no done rows) even when it is retired.
+func (u *UI) hasAttempts(ctx context.Context, lane string) bool {
+	pe, err := u.reports.ProviderEffectiveness(ctx)
+	if err != nil {
+		slog.Error("source page: provider effectiveness failed", "error", err)
+		return false
+	}
+	return slices.ContainsFunc(pe, func(p reports.ProviderEffectiveness) bool { return p.Lane == lane })
+}
+
 func (u *UI) handleSource(w http.ResponseWriter, r *http.Request) {
 	lane := r.PathValue("lane")
 	u.serveSource(w, r, func(all []reports.SourceBreakdown) (reports.SourceBreakdown, bool) {
@@ -40,7 +53,7 @@ func (u *UI) handleSource(w http.ResponseWriter, r *http.Request) {
 				return sb, true
 			}
 		}
-		return reports.SourceBreakdown{Lane: lane}, knownSourceLane(lane)
+		return reports.SourceBreakdown{Lane: lane}, knownSourceLane(lane) || u.hasAttempts(r.Context(), lane)
 	})
 }
 
@@ -97,21 +110,10 @@ func sourceTypeLink(sb reports.SourceBreakdown, label string, top reports.TopRun
 	if sb.Unattributed || !reports.ValidLane(sb.Lane) {
 		return ""
 	}
-	switch label {
-	case "Word-synced":
-		if top == reports.TopRungLine {
-			return ""
+	for _, b := range resultBuckets {
+		if b.Label == label && b.Href != nil {
+			return b.Href(top, sb.Lane)
 		}
-		return resultsHref(reports.BucketFinished, queueViewState{Lane: sb.Lane})
-	case "Line-synced":
-		b := reports.BucketSettled
-		if top == reports.TopRungLine {
-			b = reports.BucketFinished
-		}
-		if !reports.HasChip(b, reports.ChipLineSynced, top) {
-			return ""
-		}
-		return resultsHref(b, queueViewState{Lane: sb.Lane, Tier: reports.TierLine})
 	}
 	return ""
 }

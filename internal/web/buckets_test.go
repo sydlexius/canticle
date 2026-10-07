@@ -144,6 +144,17 @@ func TestQueueBucketsHaveChartColors(t *testing.T) {
 	}
 }
 
+// TestResultBucketsHaveChartColors: the source page's by-type doughnut labels
+// are the Results tile labels, so each needs a color key too.
+func TestResultBucketsHaveChartColors(t *testing.T) {
+	keys := queueColorKeys(t)
+	for _, b := range resultBuckets {
+		if !keys[b.Label] {
+			t.Errorf("result label %q has no QUEUE_COLOR_VARS entry in chart-init.js", b.Label)
+		}
+	}
+}
+
 // TestQueueBucketsOrderAndNoProcessing pins the #599 vocabulary: activity first,
 // the two settled halves, then Given up, and no Processing bucket on any
 // surface (an in-flight row is shown in Up Next instead).
