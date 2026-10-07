@@ -2,6 +2,7 @@ package lyrics
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -134,6 +135,10 @@ type LRCWriter struct {
 	// allowManual lets a write replace a manual instrumental marker; set only by
 	// WriteManualMarker (manualguard.go).
 	allowManual bool
+	// blocks, when non-nil, backstops the orchestrator and cache checks (#1394):
+	// WriteLRC refuses a result the operator blocked. Nil (every non-serve
+	// caller) is a no-op.
+	blocks BlockChecker
 	// bumpAudioMtime opts into the #505 audio mtime bump (see mtimebump.go).
 	bumpAudioMtime bool
 	// chtimes, when non-nil, replaces os.Chtimes. TEST-ONLY, to fail the bump.
@@ -207,6 +212,14 @@ func (w *LRCWriter) SetSelfWriteRegistry(r *selfwrite.Registry) {
 	w.selfWrites = r
 }
 
+// SetBlockChecker installs the backstop that makes WriteLRC return ErrBlocked
+// for a blocked result (#1394). The song must carry the work-queue row
+// identity in IdentityArtistKey/IdentityTitleKey (the serve-mode callers stamp it); an unstamped song is never
+// blocked. Not goroutine-safe; call before sharing the writer.
+func (w *LRCWriter) SetBlockChecker(c BlockChecker) {
+	w.blocks = c
+}
+
 // SetBilingual enables or disables interleaved bilingual output. When enabled
 // AND a Song carries a non-empty TranslationSubtitles track, writeSyncedLRC
 // emits each original line followed by its translation under the original
@@ -276,6 +289,14 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 		// metadata and make the label unbounded (#1164). The caller already
 		// knows which track it was writing.
 		return errors.New("nothing to save")
+	}
+
+	// Block backstop (#1394). ORDER: content-type gate, THIS, then every other
+	// guard (timing, settled-sidecar, no-downgrade), so none is reordered and
+	// nothing is mutated. No context here: Background, one indexed read, fails open.
+	if w.blocks != nil && w.blocks.SongBlocked(context.Background(), song) {
+		slog.Debug("refusing to write lyrics: result is blocked for this track")
+		return ErrBlocked
 	}
 
 	// Accept-time timing guard (#439). A synced result is promoted to .lrc only

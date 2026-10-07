@@ -149,6 +149,11 @@ type Enqueuer struct {
 	// panics and never makes this check accept something it would otherwise
 	// have refused.
 	Durations DurationLookup
+	// Blocks makes a cached entry the operator blocked for the track read as a
+	// miss (#1394), so the scan routes the track to the worker instead of
+	// marking it done from a cache entry the writer would refuse. Optional: nil
+	// means no blocking.
+	Blocks lyrics.BlockChecker
 }
 
 // shouldSuppress reports whether a track's stored timing verdict means this scan
@@ -306,6 +311,13 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		accept := func(raw string) bool {
 			fileDuration, fileDurationKnown := e.resolveFileDuration(ctx, res.FilePath)
 			song := lyrics.DecodeCachedSong(raw, res.Track)
+			// Keyed on the row identity Enqueue will store for this scan result
+			// (queue.IdentityKeys of its Inputs.Track, which is res.Track), never the
+			// cached provider track.
+			song.IdentityArtistKey, song.IdentityTitleKey = queue.IdentityKeys(res.Track)
+			if e.Blocks != nil && e.Blocks.SongBlocked(ctx, song) {
+				return false
+			}
 			if fileDurationKnown {
 				return !lyrics.RefusedByTimingGuard(song, fileDuration)
 			}

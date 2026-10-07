@@ -295,6 +295,13 @@ type Song struct {
 	// not in the cache envelope: a cache hit must not resurrect a verdict about
 	// a lane's per-fetch word answer.
 	WordAnswer WordAnswer `json:"-"`
+	// IdentityArtistKey and IdentityTitleKey are the lyric-block identity: the
+	// WORK QUEUE ROW's own artist_key and title_key (queue.IdentityKeys of the
+	// row's track), never the resolved album-artist track and never the provider's
+	// returned Track. Stamped by the serve-mode callers; both empty means no block
+	// check. Kept as two fields so no separator can ever be confused with content.
+	IdentityArtistKey string `json:"-"`
+	IdentityTitleKey  string `json:"-"`
 }
 
 // WordAnswer is a lane's per-fetch answer to "does this track have word
