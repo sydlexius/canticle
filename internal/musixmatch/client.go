@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sydlexius/canticle/internal/lrcnormalize"
 	"github.com/sydlexius/canticle/internal/models"
@@ -392,6 +391,9 @@ func NewClient(token string) *Client {
 // NewClientWithHTTP is NewClient over the caller's HTTP client, so a test in
 // another package can route the client without touching http.DefaultTransport.
 func NewClientWithHTTP(token string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &Client{
 		Token:      token,
 		httpClient: httpClient,
@@ -687,14 +689,9 @@ func (forbiddenError) Is(target error) bool { return target == ErrForbidden }
 func errorBodyPrefix(body io.Reader) string {
 	const maxPrefix = 120
 	b, _ := io.ReadAll(io.LimitReader(body, maxPrefix))
-	// The byte limit can split a multi-byte rune; drop the partial one.
-	for i := 0; i < utf8.UTFMax-1 && len(b) > 0; i++ {
-		if r, size := utf8.DecodeLastRune(b); r != utf8.RuneError || size != 1 {
-			break
-		}
-		b = b[:len(b)-1]
-	}
-	return strings.Join(strings.Fields(string(b)), " ")
+	// The byte limit can split a multi-byte rune, and a body may carry invalid
+	// bytes; drop both so the stored text is valid UTF-8.
+	return strings.Join(strings.Fields(strings.ToValidUTF8(string(b), "")), " ")
 }
 
 // findLyricsOnce performs a single lookup with the currently installed token.

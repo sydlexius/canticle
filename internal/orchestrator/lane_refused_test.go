@@ -76,6 +76,16 @@ func TestPartialFailureOnlyWhenALyricsLaneAnswered(t *testing.T) {
 		}
 	}
 	provider := func(name string, err error) *Lane { return laneFor(&stubProvider{name: name, err: err}) }
+	// halfOpenProbe is a lane whose breaker tripped and whose window elapsed,
+	// so the dispatch's call is the half-open probe.
+	halfOpenProbe := func(name string, err error) *Lane {
+		l, cb := newTestLane(&stubProvider{name: name, err: err})
+		now := time.Now()
+		cb.SetClock(func() time.Time { return now })
+		cb.Trip()
+		now = now.Add(2 * time.Minute)
+		return l
+	}
 	cases := []struct {
 		name    string
 		lanes   func() []*Lane
@@ -89,9 +99,15 @@ func TestPartialFailureOnlyWhenALyricsLaneAnswered(t *testing.T) {
 		{"failing lane left closed, another lane missed", func() []*Lane {
 			return []*Lane{provider("musixmatch", transport), provider("petitlyrics", petitlyrics.ErrNoMatch)}
 		}, false, transport},
+		// Which lane's error surfaces here is intentionally unspecified (it
+		// differs by mode and arrival order); only the plain form is asserted.
 		{"one lane opened, one left closed, another missed", func() []*Lane {
 			return []*Lane{provider("musixmatch", refusal), provider("innertube", transport), provider("petitlyrics", petitlyrics.ErrNoMatch)}
 		}, false, nil},
+		// A half-open probe that fails without tripping leaves the lane unbounded.
+		{"half-open probe failed without tripping, another lane missed", func() []*Lane {
+			return []*Lane{halfOpenProbe("musixmatch", transport), provider("petitlyrics", petitlyrics.ErrNoMatch)}
+		}, false, transport},
 		{"every lane failed", func() []*Lane {
 			return []*Lane{provider("musixmatch", transport), provider("petitlyrics", transport)}
 		}, false, transport},
@@ -122,5 +138,23 @@ func TestPartialFailureOnlyWhenALyricsLaneAnswered(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A canceled half-open probe (parallel mode, another lane won) is not an
+// answer, so it must not clear a standing refusal (#1372).
+func TestCanceledProbeKeepsRefused(t *testing.T) {
+	p := &stubProvider{name: "musixmatch", err: fmt.Errorf("edge: %w", musixmatch.ErrForbidden)}
+	l, cb := newTestLane(p)
+	now := time.Now()
+	cb.SetClock(func() time.Time { return now })
+	o, _ := New(ModeOrdered, l)
+	_, _ = l.FindLyrics(context.Background(), models.Track{}, "")
+
+	p.err = context.Canceled
+	now = now.Add(2 * time.Minute)
+	_, _ = l.FindLyrics(context.Background(), models.Track{}, "")
+	if h := o.LaneHealth()[0]; !h.Refused {
+		t.Fatalf("health after a canceled probe = %+v; want Refused kept", h)
 	}
 }

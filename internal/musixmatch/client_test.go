@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -534,8 +535,8 @@ func TestFindLyricsInBodyInvalidTokenReturnsErrUnauthorized(t *testing.T) {
 	}
 }
 
-// The body prefix is cut on a rune boundary: a multi-byte rune split by the
-// byte limit is dropped, never emitted as invalid UTF-8.
+// The body prefix is valid UTF-8: a multi-byte rune split by the byte limit is
+// dropped (2- and 4-byte forms), and invalid bytes are removed.
 func TestErrorBodyPrefixCutsOnRuneBoundary(t *testing.T) {
 	got := errorBodyPrefix(strings.NewReader(strings.Repeat("a", 119) + "\u00e9 tail"))
 	if !utf8.ValidString(got) || got != strings.Repeat("a", 119) {
@@ -543,6 +544,27 @@ func TestErrorBodyPrefixCutsOnRuneBoundary(t *testing.T) {
 	}
 	if got := errorBodyPrefix(strings.NewReader("ab\u00e9")); got != "ab\u00e9" {
 		t.Fatalf("short body = %q; want it unchanged", got)
+	}
+	// A 4-byte rune cut after 1, 2 and 3 of its bytes.
+	for cut := 1; cut <= 3; cut++ {
+		body := strings.Repeat("a", 120-cut) + "\U0001F3B5"
+		if got := errorBodyPrefix(strings.NewReader(body)); got != strings.Repeat("a", 120-cut) {
+			t.Fatalf("4-byte rune cut after %d bytes: prefix = %q (%d bytes); want the rune dropped", cut, got, len(got))
+		}
+	}
+	if got := errorBodyPrefix(strings.NewReader("ab\xffcd")); got != "abcd" {
+		t.Fatalf("invalid byte = %q; want it removed", got)
+	}
+}
+
+// The production client carries a bounded HTTP timeout, and a nil client given
+// to NewClientWithHTTP gets the same one.
+func TestClientHTTPTimeoutDefaults(t *testing.T) {
+	if got := NewClient("t").httpClient.Timeout; got != 30*time.Second {
+		t.Fatalf("NewClient timeout = %v; want 30s", got)
+	}
+	if got := NewClientWithHTTP("t", nil).httpClient.Timeout; got != 30*time.Second {
+		t.Fatalf("NewClientWithHTTP(nil) timeout = %v; want 30s", got)
 	}
 }
 

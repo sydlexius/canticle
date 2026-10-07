@@ -215,7 +215,7 @@ Composition across lanes:
   backoff when the failure opened that lane's breaker and another lyrics lane
   answered the same dispatch with a clean miss (#1372): the row is failed and
   retried on its own schedule, with no miss charged, and later rows skip the
-  open lane (the word-recheck path too). Today only a refusal does this. Any
+  open lane (the word-recheck path too). A 403 on any provider and an innertube stale client version (HTTP 400) both do this. Any
   other transport fault (5xx, an unreadable body, a dial, TLS or timeout
   error) leaves its lane closed and feeds the global backoff as before;
   bounding those at the lane is #1375.

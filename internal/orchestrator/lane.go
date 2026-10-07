@@ -53,7 +53,8 @@ type Lane struct {
 	onDrift func(lane, run string)
 	// refused records that the lane's last resolve was refused by its provider
 	// (HTTP 403), so lane health can tell an open or re-probing refused lane
-	// from a throttled one (#1372). It holds until the lane's next resolve. Atomic: parallel dispatch runs lanes on their own goroutines.
+	// from a throttled one (#1372). It holds until the lane's next resolve.
+	// Atomic: parallel dispatch runs lanes on their own goroutines.
 	refused atomic.Bool
 }
 
@@ -96,8 +97,12 @@ func (l *Lane) FindLyrics(ctx context.Context, track models.Track, sourcePath st
 	song, err := l.resolve(ctx, track, sourcePath)
 	// innertube.ErrClientVersion wraps ErrForbidden but is an HTTP 400 for a
 	// stale client version, not a refusal, so it is excluded first.
-	l.refused.Store(!errors.Is(err, innertube.ErrClientVersion) && (errors.Is(err, musixmatch.ErrForbidden) ||
-		errors.Is(err, petitlyrics.ErrForbidden) || errors.Is(err, innertube.ErrForbidden)))
+	// A canceled probe (parallel mode, another lane won) is not an answer, so
+	// it leaves the mark as it was.
+	if !errors.Is(err, context.Canceled) {
+		l.refused.Store(!errors.Is(err, innertube.ErrClientVersion) && (errors.Is(err, musixmatch.ErrForbidden) ||
+			errors.Is(err, petitlyrics.ErrForbidden) || errors.Is(err, innertube.ErrForbidden)))
+	}
 	if err != nil {
 		return models.Song{}, l.classifyErr(l, err)
 	}

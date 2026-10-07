@@ -408,8 +408,9 @@ func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName str
 
 // noteTransport records whether a lane's transport-class failure is bounded by
 // its own breaker. laneOpen is read after the lane reported; the lane was
-// callable when the dispatch began, so open means this dispatch tripped it
-// (today only a provider refusal does, #1372).
+// callable when the dispatch began; what matters is that the lane is open
+// after the dispatch (a 403 or an innertube stale client version, #1372), so
+// later rows skip it.
 func (r *dispatchResult) noteTransport(class OutcomeClass, laneOpen bool) {
 	r.unbounded = r.unbounded || (class == OutcomeTransport && !laneOpen)
 }
