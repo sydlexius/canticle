@@ -493,9 +493,11 @@ func (r *Repo) attachLibraries(ctx context.Context, items []BucketRow) error {
 // One expression yields one key per row, so the categories partition a bucket.
 // A row with no class (an older binary's write, or a writer that could not
 // classify), or one whose stored value is not a category key, is "none" with no
-// message and "other" with one; it is never hidden.
+// message (empty or blank under unicode.IsSpace, as the display's TrimSpace and
+// queue.storedClass read it) and "other" with one; it is never hidden.
 const reasonKeySQL = `CASE WHEN failure_class IN ('none', 'write', 'throttle', 'network', 'miss', 'other') THEN failure_class
-    WHEN last_error = '' THEN 'none' ELSE 'other' END`
+    WHEN TRIM(last_error, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197,
+                               8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288)) = '' THEN 'none' ELSE 'other' END`
 
 // Reason category keys: the reason parameter's values, as failure_class stores them.
 const (

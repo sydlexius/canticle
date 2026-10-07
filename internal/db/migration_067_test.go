@@ -19,6 +19,14 @@ func TestMigration067RoundTrip(t *testing.T) {
 			t.Fatalf("seed %s: %v", status, err)
 		}
 	}
+	// A whitespace-only message is no reason: the backfill stamps none, not other.
+	for key, msg := range map[string]string{"blank spaces": "   ", "blank tab": "\t", "blank newline": "\n"} {
+		if _, err := dbh.ExecContext(ctx, `INSERT INTO work_queue (artist_key, title_key, artist, title, status, last_error)
+            VALUES (?, 'k', 'a', 't', 'failed', ?)`, key, msg); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+		want[key] = "none"
+	}
 	if _, err := provider.UpTo(ctx, 67); err != nil {
 		t.Fatal(err)
 	}

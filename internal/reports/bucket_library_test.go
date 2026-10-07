@@ -397,6 +397,11 @@ func TestReasonCategoriesPartitionTheBucket(t *testing.T) {
 	insertReasonRow(t, d, "failed", "unclassed empty", "")
 	insertReasonRow(t, d, "failed", "unclassed text", "lane a: rate limited")
 	want[ReasonNone] = append(want[ReasonNone], "unclassed empty")
+	// A blank message with no class reads as no reason, like the display.
+	for title, msg := range map[string]string{"unclassed spaces": "   ", "unclassed tab": "\t", "unclassed newline": "\n"} {
+		insertReasonRow(t, d, "failed", title, msg)
+		want[ReasonNone] = append(want[ReasonNone], title)
+	}
 	want[ReasonOther] = append(want[ReasonOther], "unclassed text")
 	// So does a stored value that is not a category key.
 	insertReasonRow(t, d, "failed", "foreign class", "lane a: rate limited")
