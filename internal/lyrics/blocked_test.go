@@ -71,7 +71,7 @@ func TestWriteLRC_BlockBackstop(t *testing.T) {
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("WriteLRC err = %v; want %v", err, tc.wantErr)
 			}
-			data, rerr := os.ReadFile(fp) //nolint:gosec // test path under t.TempDir
+			data, rerr := os.ReadFile(fp) //nolint:gosec // reason: test path under t.TempDir
 			if rerr != nil {
 				t.Fatal(rerr)
 			}

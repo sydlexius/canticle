@@ -12,7 +12,8 @@ import (
 var ErrBlocked = errors.New("lyrics: result is blocked for this track")
 
 // BlockChecker reports whether a fetched result is blocked for the identity in
-// song.IdentityKey. It must fail open and treat an empty key as not blocked.
+// the song's identity pair, song.IdentityArtistKey and song.IdentityTitleKey.
+// An unstamped song (both empty) is not blocked, and the checker must fail open.
 // lyricblock.Store implements it; this package never imports the database. A
 // nil BlockChecker means no blocking: fetch mode has no database, so blocks do
 // not apply there.

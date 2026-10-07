@@ -77,8 +77,6 @@ The `--upgrade` flag re-fetches tracks that previously produced a `.txt` - unsyn
 
 **Cost of `--upgrade`.** In fetch mode every run does at least one lookup per reopened `.txt`, instrumental markers included, and a cache miss costs one or more provider requests (more with fallback lanes or parallel mode); a marker is re-checked on every `--upgrade` run, not once. Requests are paced only by the cooldown (`-c`/`api.cooldown`), so on a library with many markers a routine `--upgrade` is mostly re-asking questions whose answer rarely changes. To narrow a run, scope the directory you pass. `scan --upgrade --unsynced-before <cutoff>` (below) is the scan-side equivalent, but under `scan`/`serve` a sidecar whose queue row is already `done` is not re-queued by the run itself (so it may issue no requests for it); the serve-mode [`[upgrade_sweep]`](CONFIGURATION.md#upgrade_sweep) re-queues such rows, paced and at most once a week.
 
-**Lyric blocks are serve-only.** A lyric result you block for a track is refused only in `serve` mode, which keeps the block list in its database; `fetch` mode opens no database, so it applies no blocks and will write a blocked result again.
-
 A Canticle-written `.elrc` follows its `.lrc`: an `--update` re-fetch that replaces the `.lrc` also replaces the companion, or removes it when the new result has no word timings or `word_sync_mode` is `off`/`replace`, so a rewrite never leaves word timings beside a different `.lrc`. A result that is refused for a timing mismatch leaves both files as they were. A `.elrc` Canticle did not write is never touched.
 
 ### Scoping an upgrade to an older cohort
