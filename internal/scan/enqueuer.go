@@ -181,6 +181,11 @@ func (e *Enqueuer) shouldSuppress(v TimingVerdict) bool {
 	if e.ProvidersVersion == 0 {
 		return false
 	}
+	// A zero verdict stamp means "never recorded" (#825), not "a different
+	// generation": fail open explicitly rather than by the accident of inequality.
+	if v.ProvidersVersion == 0 {
+		return false
+	}
 	return v.ProvidersVersion == e.ProvidersVersion
 }
 

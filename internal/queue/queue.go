@@ -357,6 +357,15 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE excluded.output_paths
              END,
              scan_result_id = COALESCE(work_queue.scan_result_id, excluded.scan_result_id),
+             -- #825: 0 means "never stamped" (providers.Generation is 0 only for an
+             -- empty provider set), e.g. a row first seen by a CLI scan. Adopt the
+             -- incoming generation ONLY from that unknown state: a nonzero stamp is
+             -- the generation the row's verdict was reached under, and refreshing it
+             -- would silently defeat the #679 expiry.
+             providers_version = CASE
+                 WHEN work_queue.providers_version = 0 AND excluded.providers_version <> 0 THEN excluded.providers_version
+                 ELSE work_queue.providers_version
+             END,
              priority = CASE
                  WHEN excluded.priority >= 10 THEN excluded.priority           -- PriorityWebhook always wins
                  WHEN work_queue.status = 'deferred' THEN work_queue.priority  -- preserve miss deprioritization
