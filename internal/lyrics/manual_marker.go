@@ -2,6 +2,7 @@ package lyrics
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 
@@ -36,6 +37,12 @@ func ManualMarkerOnDisk(path string) bool {
 	if err != nil {
 		return false
 	}
+	return isManualMarker(data)
+}
+
+// isManualMarker reports whether data is an instrumental marker carrying
+// [source:manual].
+func isManualMarker(data []byte) bool {
 	tags, lines, err := parseLRCHeaderFrom(bytes.NewReader(data))
 	if err != nil {
 		return false
@@ -57,16 +64,39 @@ func ReadRegularNoFollow(path string, limit int64) ([]byte, error) {
 	return readRegularNoFollow(path, limit)
 }
 
+// ErrMarkerChanged is returned by RemoveManualMarker when the entry at the path
+// is no longer the file that was read and confirmed a manual marker. Nothing was
+// removed; the caller may retry.
+var ErrMarkerChanged = errors.New("lyrics: the manual marker changed while being removed; nothing was removed")
+
 // RemoveManualMarker removes path only if it is, at this moment, an instrumental
-// marker carrying [source:manual], and reports whether it did. The path is
-// recorded with the writer's selfwrite registry only once it is known to be a
-// marker, just before the unlink. A file that is not a
-// manual marker (real lyrics written since, a symlink, a missing file) is left
-// alone and is not an error. os.Remove unlinks a symlink rather than following
-// it, and ManualMarkerOnDisk already reads a symlink as "not a marker".
+// marker carrying [source:manual], and reports whether it did. A file that is
+// not a manual marker (real lyrics written since, a symlink, a missing file) is
+// left alone and is not an error. The marker is read through one no-follow
+// handle, and the entry at path must still be that same file (os.SameFile)
+// immediately before the unlink, else ErrMarkerChanged and nothing is removed.
+// POSIX has no compare-and-unlink, so a file saved over the marker in the few
+// instructions between that last check and os.Remove is still unlinked.
 func (w *LRCWriter) RemoveManualMarker(path string) (bool, error) {
-	if !ManualMarkerOnDisk(path) {
+	data, hfi, err := readRegularNoFollowInfo(path, maxManualMarkerBytes)
+	if err != nil || !isManualMarker(data) {
 		return false, nil
+	}
+	return w.removeCheckedMarker(path, hfi)
+}
+
+// removeCheckedMarker unlinks path if it is still the file checked describes.
+// The self-write record is made only once the unlink will be attempted.
+func (w *LRCWriter) removeCheckedMarker(path string, checked os.FileInfo) (bool, error) {
+	cur, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !os.SameFile(cur, checked) {
+		return false, ErrMarkerChanged
 	}
 	w.selfWrites.Record(path)
 	if err := os.Remove(path); err != nil {

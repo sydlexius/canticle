@@ -12,6 +12,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -390,5 +391,50 @@ func TestMarkAndUnmarkWaitForTheRowLock(t *testing.T) {
 				t.Errorf("%s never reached Report after release", name)
 			}
 		})
+	}
+}
+
+func TestUnmarkWithdrawnMidCallStillReportsTheFilesItHandled(t *testing.T) {
+	f := newFixture(t)
+	f.markFirst(t)
+	rec := &recorder{}
+	// Another process unmarks the row after this call loaded it and while it
+	// is handing files to Report.
+	report := func(r Record) error {
+		if _, err := f.m.unmark(f.ctx, f.id, [][2]string{{"Artist", "Title"}}); err != nil {
+			t.Fatal(err)
+		}
+		return rec.report(r)
+	}
+	res, err := f.m.Unmark(f.ctx, f.id, Options{Report: report})
+	if err != nil || res.Outcome != OutcomeUnmarked || res.FilesBackedUp != 1 {
+		t.Fatalf("Unmark = %+v, %v; want unmarked with 1 file (not not_marked: a file was reported and removed)", res, err)
+	}
+	if f.exists("song.txt") {
+		t.Error("marker still present")
+	}
+}
+
+// afterClear is the seam: it runs right after the clearing transaction commits,
+// standing in for a Mark in another process that wrote a marker in that window.
+func TestUnmarkSweepsAMarkerThatAppearedBeforeTheRowWasCleared(t *testing.T) {
+	f := newFixture(t)
+	f.markFirst(t)
+	rec := &recorder{}
+	f.m.afterClear = func() {
+		song := models.Song{Track: models.Track{ArtistName: "Artist", TrackName: "Title", Instrumental: 1}, WinningLane: lyrics.ManualLaneName}
+		if err := f.m.w.WriteManualMarker(song, "song.flac", f.dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := f.m.Unmark(f.ctx, f.id, Options{Report: rec.report})
+	if err != nil || res.Outcome != OutcomeUnmarked {
+		t.Fatalf("Unmark = %+v, %v", res, err)
+	}
+	if f.exists("song.txt") {
+		t.Error("a marker that appeared after the removal loop survived the unmark")
+	}
+	if len(rec.recs) != 2 {
+		t.Errorf("records = %d; want the original marker and the late one, each backed up before removal", len(rec.recs))
 	}
 }

@@ -1,6 +1,7 @@
 package lyrics
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,5 +46,38 @@ func TestRemoveManualMarker(t *testing.T) {
 	}
 	if reg.Len() != 0 || reg.Suppress(marker) {
 		t.Error("a file that is not a manual marker was recorded with selfwrite; the watcher would miss the operator's edit")
+	}
+}
+
+func TestRemoveCheckedMarkerRefusesAFileChangedUnderneath(t *testing.T) {
+	dir := t.TempDir()
+	w := NewLRCWriter(dir)
+	reg := selfwrite.New(time.Minute)
+	w.SetSelfWriteRegistry(reg)
+	checkedPath := filepath.Join(dir, "checked.txt")
+	path := filepath.Join(dir, "song.txt")
+	for _, p := range []string{checkedPath, path} {
+		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checked, err := os.Lstat(checkedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// path is a different file than the one that was confirmed a marker.
+	removed, err := w.removeCheckedMarker(path, checked)
+	if removed || !errors.Is(err, ErrMarkerChanged) {
+		t.Fatalf("removed=%v err=%v; want ErrMarkerChanged and no removal", removed, err)
+	}
+	if _, serr := os.Lstat(path); serr != nil {
+		t.Error("a file that changed underneath was removed")
+	}
+	if reg.Len() != 0 {
+		t.Error("a refused removal was recorded with selfwrite")
+	}
+	same, _ := os.Lstat(path)
+	if removed, err := w.removeCheckedMarker(path, same); err != nil || !removed {
+		t.Errorf("same file: removed=%v err=%v; want removed", removed, err)
 	}
 }

@@ -46,7 +46,8 @@ type Outcome string
 // Outcomes: marked (files replaced, row settled), already_marked (row and
 // marker both present, nothing written), dry_run (nothing written), unmarked
 // (an Unmark removed the mark and re-queued the row) and not_marked (an Unmark
-// found no mark on the row and changed nothing).
+// found no mark on the row, or found it already withdrawn, and reported or
+// removed no file).
 const (
 	OutcomeMarked        Outcome = "marked"
 	OutcomeAlreadyMarked Outcome = "already_marked"
@@ -82,6 +83,10 @@ type Marker struct {
 	db    *sql.DB
 	w     *lyrics.LRCWriter
 	locks rowLocks
+	// afterClear, when set (tests only), runs in Unmark right after the
+	// transaction that clears the mark commits, to place a marker in the window
+	// the post-commit sweep exists to narrow.
+	afterClear func()
 }
 
 // New returns a Marker over db and writer w. The caller wires the writer's
