@@ -30,6 +30,11 @@ const MaxBackupBytes = 4 << 20
 // neither followed nor backed up, so the cull refuses before changing anything.
 var ErrSymlinkedSidecar = errors.New("lyricblock: a lyric file is a symlink")
 
+// ErrNoBackupSink is returned when records are to be backed up but no Report
+// callback was supplied: proceeding would remove files with no restore record,
+// so the cull fails before anything changes.
+var ErrNoBackupSink = errors.New("lyricblock: lyric files to remove but no Report to back them up")
+
 // ErrOutsideRoots is returned when an output directory is not inside any of the
 // supplied library roots. Nothing is touched.
 var ErrOutsideRoots = errors.New("lyricblock: output is outside the library roots")
@@ -61,6 +66,16 @@ func AppendBackup(f *os.File, b Backup) error {
 	}
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("lyricblock: sync backup record: %w", stripPath(err))
+	}
+	// A file fsync does not persist a newly created directory entry; sync the
+	// containing directory so the backup's name survives a crash too.
+	d, err := os.Open(filepath.Dir(f.Name()))
+	if err != nil {
+		return fmt.Errorf("lyricblock: open backup directory: %w", stripPath(err))
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("lyricblock: sync backup directory: %w", stripPath(err))
 	}
 	return nil
 }
@@ -102,11 +117,19 @@ func Inventory(artist, title string, outs []Output) ([]string, error) {
 			if synced {
 				lrcFp = fp
 			}
+			// Variants lists only regular files for a case variant, so a
+			// symlinked variant is refused here from the same listing.
+			if len(l.SymlinkVariants(fp)) > 0 {
+				return nil, ErrSymlinkedSidecar
+			}
 			for _, v := range l.Variants(fp) {
 				if err := add(v); err != nil {
 					return nil, err
 				}
 			}
+		}
+		if len(l.SymlinkVariants(sidecar.StemOf(lrcFp)+sidecar.ExtWordSynced)) > 0 {
+			return nil, ErrSymlinkedSidecar
 		}
 		for _, c := range lyrics.OwnedCompanions(lrcFp, l) {
 			if err := add(c); err != nil {
@@ -129,16 +152,17 @@ func ReadBackup(op string, workItemID int64, path string) (Backup, error) {
 
 // RemoveFiles unlinks paths, owned word-synced companions first (the writer's
 // rule: a failed companion removal leaves its .lrc too, so a pair is never
-// split). Every path is recorded with sw first (nil is a no-op) so the watcher
-// ignores the deletions. It stops at the first failure, reporting how many were
+// split). Each path is recorded with sw (nil is a no-op) immediately before its
+// own unlink, so the watcher ignores the deletions without a path that is never
+// attempted being marked. It stops at the first failure, reporting how many were
 // removed; a file already gone counts as removed.
 func RemoveFiles(paths []string, sw *selfwrite.Registry) (int, error) {
 	ordered := append([]string(nil), paths...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return sidecar.KindOf(ordered[i]) == sidecar.KindWordSynced && sidecar.KindOf(ordered[j]) != sidecar.KindWordSynced
 	})
-	sw.Record(ordered...)
 	for i, p := range ordered {
+		sw.Record(p)
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return i, stripPath(err)
 		}
@@ -186,10 +210,11 @@ func report(fn func(Backup) error, rec Backup, reported reportedSet) error {
 	if prev, ok := reported[rec.Path]; ok && prev == sum {
 		return nil
 	}
-	if fn != nil {
-		if err := fn(rec); err != nil {
-			return stripPath(err)
-		}
+	if fn == nil {
+		return ErrNoBackupSink
+	}
+	if err := fn(rec); err != nil {
+		return stripPath(err)
 	}
 	reported[rec.Path] = sum
 	return nil

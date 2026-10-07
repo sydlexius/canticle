@@ -134,11 +134,15 @@ func TestRemoveFilesCompanionFirstRecordsSelfwriteAndToleratesMissing(t *testing
 		}
 	}
 	// A failed companion removal leaves the .lrc too: the pair is never split.
-	dir2 := cullDir(t, map[string]string{"song.lrc": lrcBody, "song.elrc": elrcBody})
-	if err := os.Chmod(dir2, 0o500); err != nil {
+	// song.elrc is a non-empty directory so its removal fails whatever the
+	// process privilege.
+	dir2 := cullDir(t, map[string]string{"song.lrc": lrcBody})
+	if err := os.MkdirAll(filepath.Join(dir2, "song.elrc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir2, 0o755) })
+	if err := os.WriteFile(filepath.Join(dir2, "song.elrc", "x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	n, err = RemoveFiles([]string{filepath.Join(dir2, "song.lrc"), filepath.Join(dir2, "song.elrc")}, nil)
 	if err == nil || n != 0 {
 		t.Fatalf("RemoveFiles = %d, %v; want 0 removed and an error", n, err)
@@ -190,5 +194,76 @@ func TestReportErrorCarriesNoPath(t *testing.T) {
 	}, []Backup{{Path: "/private/lib/song.lrc"}}, reportedSet{})
 	if err == nil || !strings.Contains(err.Error(), "disk full") || strings.Contains(err.Error(), "/private") {
 		t.Fatalf("err = %v, want the cause without the path", err)
+	}
+}
+
+func TestReportAllRefusesANilSinkAndMarksNothing(t *testing.T) {
+	seen := reportedSet{}
+	rec := Backup{Path: "p", Content: []byte("x")}
+	if err := ReportAll(nil, []Backup{rec}, seen); !errors.Is(err, ErrNoBackupSink) {
+		t.Fatalf("err = %v, want ErrNoBackupSink", err)
+	}
+	var sent int
+	if err := ReportAll(func(Backup) error { sent++; return nil }, []Backup{rec}, seen); err != nil || sent != 1 {
+		t.Fatalf("later real sink: sent=%d err=%v; want the record still sent", sent, err)
+	}
+	if err := ReportAll(nil, nil, seen); err != nil {
+		t.Fatalf("no records and no sink = %v, want nil", err)
+	}
+}
+
+func TestInventoryRefusesACaseVariantSymlink(t *testing.T) {
+	for _, link := range []string{"song.LRC", "song.TXT", "song.ELRC"} {
+		dir := cullDir(t, map[string]string{"song.lrc": lrcBody})
+		if _, err := os.Lstat(filepath.Join(dir, "SONG.LRC")); err == nil {
+			t.Skip("case-insensitive filesystem: case variants cannot coexist")
+		}
+		outside := filepath.Join(t.TempDir(), "secret")
+		if err := os.WriteFile(outside, []byte(lrcBody), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(dir, link)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Inventory("a", "b", []Output{{Dir: dir, Filename: "song.flac"}}); !errors.Is(err, ErrSymlinkedSidecar) {
+			t.Errorf("%s: err = %v, want ErrSymlinkedSidecar", link, err)
+		}
+	}
+}
+
+func TestRemoveFilesRecordsOnlyAttemptedPaths(t *testing.T) {
+	dir := cullDir(t, map[string]string{"song.lrc": lrcBody})
+	bad := filepath.Join(dir, "song.elrc")
+	if err := os.MkdirAll(filepath.Join(bad, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, "d", "x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sw := selfwrite.New(time.Minute)
+	lrc := filepath.Join(dir, "song.lrc")
+	if n, err := RemoveFiles([]string{lrc, bad}, sw); err == nil || n != 0 {
+		t.Fatalf("RemoveFiles = %d, %v; want 0 and an error", n, err)
+	}
+	if sw.Suppress(lrc) {
+		t.Error("the never-attempted .lrc was recorded with selfwrite")
+	}
+}
+
+func TestAppendBackupSyncsTheContainingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.Create(filepath.Join(dir, "b.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := os.Rename(dir, dir+"-moved"); err != nil {
+		t.Skipf("cannot move a directory holding an open file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir + "-moved") })
+	// f.Name() now names a missing directory, so the directory sync must fail.
+	err = AppendBackup(f, Backup{Op: "op", Path: "p"})
+	if err == nil || !strings.Contains(err.Error(), "backup directory") {
+		t.Fatalf("err = %v, want a backup-directory error", err)
 	}
 }
