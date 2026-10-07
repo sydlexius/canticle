@@ -1,0 +1,65 @@
+package templates
+
+// SourcePage is the per-source drill-down (#1300), reached from a Lyrics Sources tile.
+templ SourcePage(version string, view SourceView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout("Source: "+view.Name, "/dashboard", version, reports, "/static/css/dashboard.css", musixmatchInactive, musixmatchServing) {
+		<div class="mx-dash-page" hx-history="false">
+			<div class="mx-dash-header">
+				<h1 class="mx-dash-title">@laneCell(view.Name, view.Mark)</h1>
+				<p class="mx-dash-sub">{ view.Blurb }</p>
+				<p class="mx-dash-sub"><a class="mx-source-link" href="/dashboard">Back to dashboard</a></p>
+			</div>
+			if view.Empty {
+				<p class="mx-dash-empty">No completed tracks from this source yet. Data accrues as tracks are processed.</p>
+			} else {
+				@sourceBlock(view.Types)
+				if view.Upstream != nil {
+					@sourceBlock(*view.Upstream)
+				}
+			}
+		</div>
+		<script src="/static/js/chart.umd.min.js" defer></script>
+		<script src="/static/js/chart-init.js" defer></script>
+	}
+}
+
+// sourceBlock: a doughnut beside the table of the same numbers (the table works without JavaScript).
+templ sourceBlock(t SourceTable) {
+	<section class="mx-dash-section" aria-labelledby={ t.ChartID + "-heading" }>
+		<h2 class="mx-dash-section-title" id={ t.ChartID + "-heading" }>{ t.Heading }</h2>
+		<p class="mx-dash-section-sub">{ t.Blurb }</p>
+		<div class="mx-source-block">
+			if t.Chart.HasData() {
+				@dashChart(t.ChartID, "doughnut", t.Heading, "", t.Chart)
+			}
+			<div class="mx-table-wrap mx-source-table">
+				<table class="mx-table" aria-label={ t.Heading }>
+					<thead>
+						<tr>
+							<th>{ t.FirstCol }</th>
+							for _, c := range t.Cols {
+								<th class="mx-source-num">{ c }</th>
+							}
+						</tr>
+					</thead>
+					<tbody>
+						for _, r := range t.Rows {
+							<tr>
+								<td>
+									if r.Href != "" {
+										<a class="mx-source-link" href={ templ.SafeURL(r.Href) }>{ r.Label }</a>
+									} else {
+										{ r.Label }
+									}
+								</td>
+								for _, c := range r.Cells {
+									<td class="mx-source-num">{ c }</td>
+								}
+							</tr>
+						}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	</section>
+}

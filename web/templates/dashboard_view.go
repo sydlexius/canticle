@@ -16,6 +16,8 @@ type DashboardView struct {
 	QueueTiles []StatTile
 	// ProviderTiles holds one tile per provider lane showing hit count + hit rate.
 	ProviderTiles []StatTile
+	// UnattributedHref links the page for results with no recorded source (#1300).
+	UnattributedHref string
 	// ResultsTiles holds the Results row (#599): completed tracks split by
 	// result type. Always every bucket, so the tiles sum to Done.
 	ResultsTiles []StatTile

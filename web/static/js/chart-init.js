@@ -36,8 +36,9 @@
     return;
   }
 
-  // Status label -> design-token custom property for the queue doughnut. Labels
-  // that are not in this map (none today) fall back to the accent color.
+  // Label -> design-token custom property: the queue doughnut statuses and the
+  // source page's result types. Labels not in this map (upstream names) take a
+  // stable hashed fallback color instead.
   var QUEUE_COLOR_VARS = {
     Retrying: '--mx-chart-deferred',
     Errored: '--mx-chart-failed',
@@ -45,7 +46,27 @@
     Finished: '--mx-chart-finished',
     'Settled (upgradable)': '--mx-chart-settled',
     'Given up': '--mx-chart-unavailable',
+    // Source page by-type doughnut (#1300): the Results tile labels.
+    'Word-synced': '--mx-chart-finished',
+    'Line-synced': '--mx-chart-settled',
+    Unsynced: '--mx-chart-deferred',
+    Instrumental: '--mx-chart-unavailable',
+    'Tier unknown': '--mx-chart-pending',
+    Other: '--mx-chart-processing',
+    'Not recorded': '--mx-chart-pending',
   };
+
+  // Unmapped labels (upstream names, #1300) hash onto these, so a label keeps its
+  // color when counts reorder; colors may repeat past the palette size.
+  var FALLBACK_COLOR_VARS = ['--mx-chart-processing', '--mx-chart-finished', '--mx-chart-settled',
+    '--mx-chart-deferred', '--mx-chart-unavailable', '--mx-chart-failed'];
+
+  // hashLabel is a small stable string hash (djb2) for fallback color choice.
+  function hashLabel(s) {
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) h = ((h * 33) + s.charCodeAt(i)) >>> 0;
+    return h;
+  }
 
   // resolveVar reads a CSS custom property off an element, trimmed. Returns the
   // fallback (and logs) when the property is unset, so a missing token surfaces
@@ -82,8 +103,8 @@
 
   function renderDoughnut(canvas, labels, values) {
     var colors = labels.map(function (label) {
-      var varName = QUEUE_COLOR_VARS[label];
-      return varName ? resolveVar(canvas, varName, accentColor) : accentColor;
+      var varName = QUEUE_COLOR_VARS[label] || FALLBACK_COLOR_VARS[hashLabel(String(label)) % FALLBACK_COLOR_VARS.length];
+      return resolveVar(canvas, varName, accentColor);
     });
     return new Chart(canvas, {
       type: 'doughnut',
