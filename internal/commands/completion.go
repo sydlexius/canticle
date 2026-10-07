@@ -35,7 +35,7 @@ var completionCandidates = map[string][]string{
 	"secrets":    {"import", "set", "list"},
 	"admin":      {"set-password", "--user", "--config"},
 	"config":     {"get", "set", "list"},
-	"queue":      {"list", "failed", "deferred", "retry", "clear", "recheck"},
+	"queue":      {"list", "failed", "deferred", "retry", "clear", "recheck", "mark-instrumental", "unmark-instrumental"},
 	"provenance": {"backfill"},
 	"realign":    {"--library", "--yes", "--backup", "--config"},
 	"revalidate": {"--library", "--apply", "--on-fail", "--purge", "--quarantine-dir", "--tail", "--backup", "--config"},

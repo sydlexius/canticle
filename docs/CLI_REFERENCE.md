@@ -186,7 +186,7 @@ canticle config list               # print every known key as key=value
 
 ## Queue and scan inspection
 
-The `queue` and `scan` subcommands expose the durable work queue and persisted scan results. See [Inspection commands](USER_GUIDE.md#inspection-commands) in the User Guide for the full command set (`queue list`/`failed`/`deferred`/`retry`/`clear`/`recheck`, and `scan results`/`clear`/`reconcile`).
+The `queue` and `scan` subcommands expose the durable work queue and persisted scan results. See [Inspection commands](USER_GUIDE.md#inspection-commands) in the User Guide for the full command set (`queue list`/`failed`/`deferred`/`retry`/`clear`/`recheck`/`mark-instrumental`/`unmark-instrumental`, and `scan results`/`clear`/`reconcile`).
 
 ## Provenance
 
