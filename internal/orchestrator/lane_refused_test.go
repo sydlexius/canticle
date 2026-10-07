@@ -114,6 +114,10 @@ func TestPartialFailureOnlyWhenALyricsLaneAnswered(t *testing.T) {
 		{"only the detector answered", func() []*Lane {
 			return []*Lane{provider("musixmatch", transport), detectorMiss()}
 		}, false, transport},
+		// A hollow body is a benign miss but not a catalog answer.
+		{"refused lane opened, another lane hollow", func() []*Lane {
+			return []*Lane{provider("musixmatch", refusal), provider("petitlyrics", musixmatch.ErrTruncatedResponse)}
+		}, false, nil},
 		{"throttle outranks the miss", func() []*Lane {
 			return []*Lane{provider("musixmatch", musixmatch.ErrRateLimited), provider("petitlyrics", petitlyrics.ErrNoMatch)}
 		}, false, musixmatch.ErrRateLimited},

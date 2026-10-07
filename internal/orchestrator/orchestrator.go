@@ -391,12 +391,13 @@ func (r *dispatchResult) gate(song models.Song, laneName string, q Quality) {
 // cannot turn a refused lyric into words, and an open detector breaker is
 // reported before the lane even checks whether detection is enabled for the
 // item, so counting it would park rows that can never run it (#950 review I2).
-// It also notes a lyrics lane's clean miss as an answer (answered, #1372).
+// It also notes a lyrics lane's clean miss as an answer (answered, #1372); a
+// hollow (truncated) response stays a benign miss but is not an answer.
 func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName string, instrumentalOnly bool) {
 	if instrumentalOnly {
 		return
 	}
-	r.answered = r.answered || class == OutcomeBenignMiss
+	r.answered = r.answered || (class == OutcomeBenignMiss && !errors.Is(err, musixmatch.ErrTruncatedResponse))
 	switch class {
 	case OutcomeUnavailable, OutcomeAuthRateLimit, OutcomeLaneNotReady:
 		if r.untriedErr == nil {

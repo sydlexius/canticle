@@ -53,7 +53,12 @@ func stubbedMusixmatch(t *testing.T, initial int64) (client *musixmatch.Client, 
 	t.Helper()
 	hits, status = &atomic.Int64{}, &atomic.Int64{}
 	status.Store(initial)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token.get") {
+			// The token mint is not a lookup: it is not counted in hits.
+			_, _ = io.WriteString(w, `{"message":{"header":{"status_code":200},"body":{"user_token":"`+refusedToken+`"}}}`)
+			return
+		}
 		hits.Add(1)
 		code := int(status.Load())
 		w.WriteHeader(code)
@@ -67,7 +72,11 @@ func stubbedMusixmatch(t *testing.T, initial int64) (client *musixmatch.Client, 
 		t.Fatalf("parse server URL: %v", err)
 	}
 	hc := &http.Client{Timeout: 10 * time.Second, Transport: rewriteTransport{target: target}}
-	return musixmatch.NewClientWithHTTP(refusedToken, hc), hits, status
+	token, err := musixmatch.NewTokenMinter(hc).Mint(context.Background())
+	if err != nil {
+		t.Fatalf("mint token through the stub: %v", err)
+	}
+	return musixmatch.NewClientWithHTTP(token, hc), hits, status
 }
 
 // titleFetcher is the healthy second lane: it has lyrics for "Held ..." titles
