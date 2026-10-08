@@ -81,7 +81,7 @@ func assertArtistAlbumTitle(t *testing.T, heads, cells []string, album string) {
 
 // Header labels of the three track tables, in column order.
 var (
-	recentLabels = []string{"Artist", "Album", "Title", "Result", "Detail", "Source", "Completed"}
+	recentLabels = []string{"Artist", "Album", "Title", "Result", "Detail", "Source", "Completed", "Actions"}
 	instrLabels  = []string{"Artist", "Album", "Title", "ID", "File", "Detect requested"}
 	reviewLabels = []string{"Artist", "Album", "Title", "Outcome", "Overrun (s)", "Ratio", "Evaluated", "Lyrics"}
 	groupLabels  = []string{"Artist", "Album", "Title", "Next attempt", "Misses", "Attempts", "Updated"}

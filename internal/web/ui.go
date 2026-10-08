@@ -532,6 +532,10 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef, q url.Values) (
 				CompletedAt:     formatReportTime(o.CompletedAt, serverLoc),
 			})
 		}
+		// The icons return to this report with its own validated sort, which is
+		// exactly the Refresh target (no mark/files, no other table's params).
+		stampRecentActions(v.RecentRows, rows, u.markReturnTo(v.RefreshHref))
+		v.Status = templates.MarkStatusFromQuery(q)
 	case "needs-attention":
 		items, err := u.reports.NeedsAttention(ctx, needsAttentionLimit)
 		if err != nil {

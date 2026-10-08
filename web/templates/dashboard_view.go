@@ -11,6 +11,9 @@ import (
 
 // DashboardView is the view model for the read-only observability dashboard.
 type DashboardView struct {
+	// Status is the one-line result of a mark action (#1433), shown at the top;
+	// empty renders nothing.
+	Status string
 	// QueueTiles holds one tile per work-queue status
 	// (pending, processing, done, failed, deferred); statuses only (#599).
 	QueueTiles []StatTile

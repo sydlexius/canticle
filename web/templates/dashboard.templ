@@ -19,6 +19,7 @@ templ DashboardPage(version string, reports []RailItem, view DashboardView, musi
 // dashboardContent is the main content column for the dashboard.
 templ dashboardContent(view DashboardView) {
 	<div class="mx-dash-page" hx-history="false">
+		@MarkStatusLine(view.Status)
 		<div class="mx-dash-header">
 			<h1 class="mx-dash-title">Dashboard</h1>
 			<p class="mx-dash-sub">
@@ -247,6 +248,7 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 							<th>Result</th>
 							<th>Source</th>
 							<th>Completed</th>
+							<th>Actions</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -272,6 +274,11 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 										}
 									} else {
 										{ row.CompletedAt }
+									}
+								</td>
+								<td class="mx-row-hit-td">
+									@RowActionsCellWrap() {
+										@RowActionsCell(row.Actions)
 									}
 								</td>
 							</tr>
