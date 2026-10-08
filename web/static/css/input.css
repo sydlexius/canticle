@@ -1545,9 +1545,9 @@ body {
   position: relative;
   width: var(--mx-row-icon-size);
   height: var(--mx-row-icon-size);
-  /* Only one line of height counts toward the row: the target hangs over the cell
-     padding, so an icon row is as tall as a text-only row. Inside .mx-row-cell the
-     flex gap keeps neighbors apart, so the hang never overlaps them. */
+  /* Desktop: only one line of height counts toward the row (the 28px chip fits in
+     the cell padding), so an icon row is as tall as a text-only row. The phone
+     block below drops this and uses a 44px cell instead. */
   margin-block: calc((1lh - var(--mx-row-icon-size)) / 2);
   border-radius: var(--mx-radius-sm);
   color: var(--mx-content-text-secondary);
@@ -1609,7 +1609,24 @@ body {
   color: var(--mx-content-text-secondary);
 }
 @media (max-width: 767.98px) {
+  /* The painted chip stays 28px; only the hit area grows to 44px, through an
+     invisible pseudo-element, so nothing paints outside its row. 28px chips with a
+     16px gap make the two 44px hit areas just touch. The cell itself is 44px tall
+     (content centered) so the hit area never reaches into another row. */
+  .mx-row-actions,
+  .mx-row-cell {
+    min-height: 44px;
+    align-items: center;
+  }
   .mx-row-actions {
-    --mx-row-icon-size: 44px;
+    gap: 16px;
+  }
+  .mx-row-icon {
+    margin-block: 0;
+  }
+  .mx-row-icon::after {
+    content: "";
+    position: absolute;
+    inset: calc((28px - 44px) / 2);
   }
 }
