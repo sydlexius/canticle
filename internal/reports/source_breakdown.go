@@ -73,6 +73,25 @@ type SourceBreakdown struct {
 	Upstreams []UpstreamBreakdown
 }
 
+// unattributedPredicate is the ONE rule for a done row with no recorded
+// source: a NULL provider_lane (a cache hit, a blocked track, a pre-attribution
+// row). SourceBreakdown groups on it and UnattributedDoneCount filters on it,
+// so the tile count and the unattributed page total cannot drift apart.
+const unattributedPredicate = `provider_lane IS NULL`
+
+// UnattributedDoneCount returns the number of done rows with no recorded
+// source: exactly SourceBreakdown's Unattributed group Counts.Total(), without
+// grouping every source. The dashboard tile uses it so a page load does not pay
+// for the full per-source, per-upstream, per-type grouping.
+func (r *Repo) UnattributedDoneCount(ctx context.Context) (int64, error) {
+	var n int64
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM work_queue WHERE status = 'done' AND `+unattributedPredicate).Scan(&n); err != nil {
+		return 0, fmt.Errorf("reports: unattributed done count: %w", err)
+	}
+	return n, nil
+}
+
 // SourceBreakdown returns, per lyrics source, the done rows by delivered type
 // (#1299). Sources are ordered by total descending (then lane), with the
 // unattributed group last; upstreams likewise, "not recorded" last.
@@ -86,10 +105,10 @@ type SourceBreakdown struct {
 // One scan over done rows (no index covers it); intended for an on-demand page.
 func (r *Repo) SourceBreakdown(ctx context.Context) ([]SourceBreakdown, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT provider_lane, upstream, `+resultBucketCaseSQL+` AS bucket, COUNT(*)
+		`SELECT provider_lane, upstream, (`+unattributedPredicate+`) AS unattributed, `+resultBucketCaseSQL+` AS bucket, COUNT(*)
          FROM work_queue
          WHERE status = 'done'
-         GROUP BY provider_lane, upstream, bucket`)
+         GROUP BY provider_lane, upstream, unattributed, bucket`)
 	if err != nil {
 		return nil, fmt.Errorf("reports: source breakdown: %w", err)
 	}
@@ -101,23 +120,24 @@ func (r *Repo) SourceBreakdown(ctx context.Context) ([]SourceBreakdown, error) {
 	var order []string
 	for rows.Next() {
 		var lane, upstream *string
+		var unattributed bool
 		var bucket string
 		var n int64
-		if err := rows.Scan(&lane, &upstream, &bucket, &n); err != nil {
+		if err := rows.Scan(&lane, &upstream, &unattributed, &bucket, &n); err != nil {
 			return nil, fmt.Errorf("reports: scan source breakdown: %w", err)
 		}
 		key, name := "", ""
-		if lane != nil {
+		if !unattributed && lane != nil {
 			key, name = "L:"+*lane, *lane
 		}
 		sb, ok := bySource[key]
 		if !ok {
-			sb = &SourceBreakdown{Lane: name, Unattributed: lane == nil}
+			sb = &SourceBreakdown{Lane: name, Unattributed: unattributed}
 			bySource[key] = sb
 			order = append(order, key)
 		}
 		sb.Counts.add(bucket, n)
-		if lane == nil || !slices.Contains(multiplexing, name) {
+		if unattributed || !slices.Contains(multiplexing, name) {
 			continue
 		}
 		uk, un := "", ""
