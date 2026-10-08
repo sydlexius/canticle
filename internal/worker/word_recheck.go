@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -271,11 +272,12 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	// 1), so check disk truth instead of assuming success.
 	tier := queue.SyncTierLine
 	if lw, ok := w.writer.(wordLandingWriter); ok {
-		landed := true
-		for _, p := range outputPaths(item.Inputs) {
-			landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
-		}
-		if landed {
+		// Only the entries written this pass: a skipped (missing) directory
+		// never holds words, and judging it would stamp 'line' over a row whose
+		// words landed everywhere that exists (#1430). Zero written entries is
+		// guarded twice: the skipped branch above fails a pass that wrote
+		// nothing, and wordsLandedOver is false for none, never vacuously 'word'.
+		if wordsLandedOver(lw, song, withoutPaths(paths, skipped)) {
 			tier = queue.SyncTierWord
 		}
 	}
@@ -422,16 +424,12 @@ type wordLandingWriter interface {
 //   - absent: the dispatch's aggregate answer is absent, i.e. every
 //     word-capable lane answered with no words (orchestrator
 //     ungatedWordAnswer). A lane never asked leaves it unknown: "".
-func (w *Worker) ordinaryWordVerdict(item queue.WorkItem, song models.Song) string {
+func (w *Worker) ordinaryWordVerdict(paths []models.OutputPath, song models.Song) string {
 	lw, ok := w.writer.(wordLandingWriter)
 	if !ok || !lw.WordSyncEnabled() || outcomeTypeFromSong(song) != outcomeTypeSynced || !providers.WordCapable(song.WinningLane) {
 		return ""
 	}
-	landed := true
-	for _, p := range outputPaths(item.Inputs) {
-		landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
-	}
-	if landed {
+	if wordsLandedOver(lw, song, paths) {
 		return queue.WordTimingServed
 	}
 	if song.WordAnswer == models.WordAnswerAbsent {
@@ -447,8 +445,8 @@ func (w *Worker) ordinaryWordVerdict(item queue.WorkItem, song models.Song) stri
 // or reopened row); the detector-instrumental and guard-reject settles, which
 // return before this, clear it via clearWordTiming, so no served/absent
 // outlives an ordinary completion that did not re-derive it.
-func (w *Worker) stampWordTiming(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
-	state := w.ordinaryWordVerdict(item, song)
+func (w *Worker) stampWordTiming(ctxNoCancel context.Context, item queue.WorkItem, paths []models.OutputPath, song models.Song) {
+	state := w.ordinaryWordVerdict(paths, song)
 	if state == "" {
 		w.clearWordTiming(ctxNoCancel, item)
 		return
@@ -488,21 +486,44 @@ func (w *Worker) clearWordTiming(ctxNoCancel context.Context, item queue.WorkIte
 // loop (a second Lstat+header-parse per path, no shared state). Left as-is:
 // deduping needs a shared, memoized landed func() threaded through 4 call
 // sites, risking this slice's size cap for one bounded, non-hot-path read.
-func (w *Worker) ordinarySyncTier(item queue.WorkItem, song models.Song) string {
+func (w *Worker) ordinarySyncTier(paths []models.OutputPath, song models.Song) string {
 	if outcomeTypeFromSong(song) != outcomeTypeSynced {
 		return ""
 	}
 	lw, ok := w.writer.(wordLandingWriter)
-	if ok {
-		landed := true
-		for _, p := range outputPaths(item.Inputs) {
-			landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
-		}
-		if landed {
-			return queue.SyncTierWord
-		}
+	if ok && wordsLandedOver(lw, song, paths) {
+		return queue.SyncTierWord
 	}
 	return queue.SyncTierLine
+}
+
+// wordsLandedOver reports whether the words landed at EVERY entry of paths, and
+// is false for none: "all of zero landed" must never read as a word verdict
+// (#1430).
+func wordsLandedOver(lw wordLandingWriter, song models.Song, paths []models.OutputPath) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !lw.WordsLanded(song, p.Filename, p.Outdir) {
+			return false
+		}
+	}
+	return true
+}
+
+// withoutPaths is paths minus the skipped entries (missing output directory).
+func withoutPaths(paths, skipped []models.OutputPath) []models.OutputPath {
+	if len(skipped) == 0 {
+		return paths
+	}
+	out := make([]models.OutputPath, 0, len(paths))
+	for _, p := range paths {
+		if !slices.Contains(skipped, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // stampOrClearSyncTier records tier, best-effort; on failure it attempts to

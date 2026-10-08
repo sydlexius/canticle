@@ -1975,12 +1975,14 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// MisSynced result landed as .txt and a categorical one was not written --
 	// so this is the durable record of a decision, not an ignored observation.
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song), w.verdictGeneration(cacheHit))
-	w.stampWordTiming(ctxNoCancel, item, song)
+	// Judged over the entries that were not skipped as missing (#1430).
+	written := withoutPaths(paths, skipped)
+	w.stampWordTiming(ctxNoCancel, item, written, song)
 	// A sync-tier stamp+clear double failure (CodeRabbit thread 4098910896,
 	// #1085) must not reach Complete: the row would settle describing a file
 	// this same completion may have just changed. Fail it via the same path
 	// a failed Complete already takes, below.
-	tier := w.ordinarySyncTier(item, song)
+	tier := w.ordinarySyncTier(written, song)
 	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
 		return w.failStuckItem(ctxNoCancel, item, capNever, err)
 	}

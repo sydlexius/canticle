@@ -414,3 +414,55 @@ func TestRunOnce_KeptEntryPlusStaleSkippedTakesTheKeptPath(t *testing.T) {
 		t.Errorf("cache stores = %d: the kept path must not cache a result that was not written", len(c.stores))
 	}
 }
+
+// stampRigWithMissingEntry is newStampRig (an ORDINARY pass, companion words on)
+// with the row flipped to two entries, the first in a directory that does not
+// exist under a configured, online library root with the source linked, so the
+// entry is provably stale.
+func stampRigWithMissingEntry(t *testing.T) (*recheckRig, *Worker) {
+	t.Helper()
+	rig, w := newStampRig(t, &fakeFetcher{song: recheckSong("word line", true, models.WordAnswerServed)}, nil, "sidecar", "")
+	w.SetFallbackProviders()
+	lib := filepath.Dir(rig.lrc)
+	libRow, err := library.New(rig.db).Add(context.Background(), lib, "ordinary", models.LibrarySettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetOutputHealer(prune.New(rig.db))
+	linkScan(t, rig.db, libRow.ID, rig.id, filepath.Join(lib, "track.flac"))
+	two, _ := json.Marshal([]models.OutputPath{
+		{Outdir: filepath.Join(lib, "Gone"), Filename: "track.lrc"},
+		{Outdir: lib, Filename: "track.lrc"},
+	})
+	if _, err := rig.db.Exec(`UPDATE work_queue SET output_paths = ? WHERE id = ?`, string(two), rig.id); err != nil {
+		t.Fatal(err)
+	}
+	return rig, w
+}
+
+// The tier is judged over the entries that were written: a skipped, provably
+// stale directory never holds words, so it must not drag a row whose words
+// landed everywhere that exists down to 'line' (#1430).
+func TestWordRecheck_TierIgnoresASkippedStaleEntry(t *testing.T) {
+	rig, w, _ := recheckWithMissingEntry(t, true)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := readSyncTier(t, rig.db, rig.id); got != queue.SyncTierWord {
+		t.Errorf("sync_tier = %q, want %q: words landed in the only directory that exists", got, queue.SyncTierWord)
+	}
+}
+
+// Same defect class on the ORDINARY write path: the tier and the word verdict.
+func TestOrdinary_TierAndVerdictIgnoreASkippedStaleEntry(t *testing.T) {
+	rig, w := stampRigWithMissingEntry(t)
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := readSyncTier(t, rig.db, rig.id); got != queue.SyncTierWord {
+		t.Errorf("sync_tier = %q, want %q: words landed in the only directory that exists", got, queue.SyncTierWord)
+	}
+	if state, _ := wordRecheckState(t, rig); state != queue.WordTimingServed {
+		t.Errorf("word_timing_state = %q, want %q", state, queue.WordTimingServed)
+	}
+}
