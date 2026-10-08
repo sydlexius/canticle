@@ -138,12 +138,15 @@ templ QueueRows(view QueueView) {
 			<td class="mx-cell-mono">{ row.Attempts }</td>
 			<td class="mx-cell-mono">{ row.UpdatedAt }</td>
 			<td>{ row.Libraries }</td>
-			<td>
-				if row.PreviewHref != "" {
-					<a class="mx-queue-link mx-queue-preview" href={ templ.SafeURL(row.PreviewHref) }>{ row.PreviewLabel }</a>
-				}
-				if row.Edited {
-					<span class="mx-result-tier mx-result-tier-unknown mx-queue-edited" title={ row.EditedTitle }>Edited { row.EditedTitle }</span>
+			<td class="mx-row-hit-td">
+				@RowActionsCellWrap() {
+					if row.PreviewHref != "" {
+						<a class="mx-queue-link mx-queue-preview" href={ templ.SafeURL(row.PreviewHref) }>{ row.PreviewLabel }</a>
+					}
+					if row.Edited {
+						<span class="mx-result-tier mx-result-tier-unknown mx-queue-edited" title={ row.EditedTitle }>Edited { row.EditedTitle }</span>
+					}
+					@RowActionsCell(row.Actions)
 				}
 			</td>
 		</tr>

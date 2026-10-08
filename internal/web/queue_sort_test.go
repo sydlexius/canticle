@@ -217,7 +217,7 @@ func TestQueueHeadersSortableAndAria(t *testing.T) {
 		!strings.Contains(body, `href="/queue/pending?dir=asc&amp;q=pend&amp;sort=artist"`) {
 		t.Error("inactive headers lack their natural-direction links")
 	}
-	for _, plain := range []string{"Status", "Reason", "Libraries", "Lyrics"} {
+	for _, plain := range []string{"Status", "Reason", "Libraries", "Actions"} {
 		if !strings.Contains(body, `<th scope="col">`+plain+"</th>") {
 			t.Errorf("%s header should be plain and not sortable", plain)
 		}

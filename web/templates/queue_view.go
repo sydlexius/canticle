@@ -137,4 +137,6 @@ type QueueRow struct {
 	// saved offset ("+0.60 s").
 	Edited      bool
 	EditedTitle string
+	// Actions is the row's mark icons (#1432); the zero value (ID 0) renders none.
+	Actions RowActions
 }

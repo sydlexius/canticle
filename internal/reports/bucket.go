@@ -46,6 +46,14 @@ const (
 const blockedExistsSQL = `EXISTS (SELECT 1 FROM lyric_blocks lb
         WHERE lb.artist_key = work_queue.artist_key AND lb.title_key = work_queue.title_key)`
 
+// hasLyricSQL is the HasLyric column (#1432): the row's outcome_type says a lyric
+// file was written, on a row lyricblock.Mark would accept (not failed, retired or
+// in flight). The same rule as lyricblock's recordsFile ('synced' or 'unsynced'),
+// read from the recorded state alone, never from a missing reason or the disk.
+// Constant text.
+const hasLyricSQL = `COALESCE(outcome_type IN ('synced', 'unsynced')
+                 AND status NOT IN ('failed', 'unavailable', 'processing'), 0)`
+
 // bucketPredicates is the ONE place a bucket becomes SQL. Each value is a
 // constant fragment (never built from caller input) with no leading AND/WHERE.
 // finished reuses finishedPredicate and settled is its exact complement within
@@ -141,8 +149,12 @@ type BucketRow struct {
 	// ManualInstrumental is the manual mark (manual_instrumental_at, #1218).
 	ManualInstrumental bool
 	// Blocked is true when the track has at least one lyric_blocks row for its
-	// identity (#1396). Row data only; it drives no control yet (#1249).
+	// identity (#1396). It drives the flag's "on" state (#1249).
 	Blocked bool
+	// HasLyric is true when the row's own record says a .lrc/.txt lyric was
+	// written (hasLyricSQL, #1432); it gates "Lyrics are wrong". An instrumental
+	// marker, a block and a miss are not a lyric.
+	HasLyric bool
 	// SortVal is the row's value under the listing's sort, encoded for a
 	// tablesort.Cursor ("n" when NULL or unsorted); the next page's cursor reads it.
 	SortVal string
@@ -428,6 +440,7 @@ func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, 
                 COALESCE(` + lineEditableSQL + `, 0), ` + editedPredicate + `, COALESCE(lyric_offset_ms, 0),
                 ` + manualMarkPredicate + `,
                 ` + blockedExistsSQL + `,
+                ` + hasLyricSQL + `,
                 ` + spec.SelectExpr(o) + `
          FROM work_queue
          WHERE (` + pred + `)` + keyset + search + `
@@ -463,7 +476,7 @@ func (r *Repo) ListBucketFiltered(ctx context.Context, bucket Bucket, f BucketFi
 		)
 		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
 			&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.Previewable,
-			&it.LineEditable, &it.Edited, &it.OffsetMS, &it.ManualInstrumental, &it.Blocked, &sv); err != nil {
+			&it.LineEditable, &it.Edited, &it.OffsetMS, &it.ManualInstrumental, &it.Blocked, &it.HasLyric, &sv); err != nil {
 			return nil, fmt.Errorf("reports: scan bucket row: %w", err)
 		}
 		it.SortVal = tablesort.EncodeValue(sv)

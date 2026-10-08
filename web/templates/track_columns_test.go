@@ -189,7 +189,7 @@ func TestAlbumText(t *testing.T) {
 // tcQueueColumns is the queue table's header row as the handler builds it.
 func tcQueueColumns() []SortHeaderView {
 	var out []SortHeaderView
-	for _, l := range []string{"Artist", "Album", "Title", "Status", "Reason", "Next attempt", "Misses", "Attempts", "Updated", "Libraries", "Lyrics"} {
+	for _, l := range []string{"Artist", "Album", "Title", "Status", "Reason", "Next attempt", "Misses", "Attempts", "Updated", "Libraries", "Actions"} {
 		out = append(out, SortHeaderView{Label: l})
 	}
 	return out
