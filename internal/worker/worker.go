@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -296,7 +297,8 @@ type Worker struct {
 	// fallback lane is appended by SetFallbackProviders.
 	lanes  []*orchestrator.Lane
 	writer lyrics.Writer
-	// healer answers the library-root check (#1430). Nil disables it.
+	// healer answers the library-root and missing-output-directory checks
+	// (#1430). Nil disables both.
 	healer                OutputHealer
 	rootCache             map[string]rootAnswer
 	rootList              []string // cached library roots; nil until loaded
@@ -1481,7 +1483,6 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		}
 		return fmt.Errorf("worker: dequeue: %w", err)
 	}
-
 	// An absent library root is a mount outage, not this row's failure: set the
 	// row aside before any fetch, no attempt charged, and carry on with the next
 	// row (#1430). It is parked into the future, so it is not re-dequeued at once.
@@ -1514,6 +1515,15 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// ordinary path below: its unsynced or instrumental result would
 		// replace the .lrc, and a miss would spend the row's miss budget.
 		return w.runWordRecheck(ctx, item, resolvedTrack)
+	}
+	// Decide the missing-directory outcome BEFORE paying for a fetch (#1430): with
+	// no output directory left and no provable single-entry heal, fail the row
+	// into the ordinary backoff, a cheap hourly check rather than an hourly fetch.
+	var preOK bool
+	if item, preOK = w.preflightOutputs(ctx, item); !preOK {
+		err := fmt.Errorf("worker: item %d output: %w", item.ID, lyrics.ErrOutputDirMissing)
+		slog.Warn("worker: no output directory exists; failing without a fetch", "id", item.ID, "entries", len(outputPaths(item.Inputs)))
+		return w.fail(ctx, item, err)
 	}
 
 	// A configured providers generation that no longer matches the stamp the item
@@ -1846,6 +1856,8 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// a failure must never settle an upgrade trip back onto the OLD file
 	// record (R2-M1), so it takes the ordinary fail/retry instead.
 	landed := false
+	var skipped []models.OutputPath // entries whose output directory is missing (#1430)
+	var missingErr error
 	for i, p := range paths {
 		err := write(song, p.Filename, p.Outdir)
 		if errors.Is(err, lyrics.ErrBlocked) && !landed && len(kept) == 0 && !heldByLaterPath(song, paths[i+1:]) {
@@ -1862,6 +1874,16 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			kept = append(kept, keptErrorOf(err))
 			continue
 		}
+		if errors.Is(err, lyrics.ErrOutputDirMissing) {
+			// Write the rest (#1430): one missing directory must not stop a valid
+			// entry. The entry stays in the row, untouched; whether the row may
+			// settle without it is decided after the loop.
+			skipped = append(skipped, p)
+			if missingErr == nil {
+				missingErr = err
+			}
+			continue
+		}
 		if err != nil {
 			err = fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err))
 			slog.Warn("worker write failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "outdir", p.Outdir, "filename", p.Filename, "error", err)
@@ -1869,7 +1891,18 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		}
 		landed = true
 	}
-	if len(kept) == len(paths) {
+	if len(skipped) > 0 {
+		// Settle past a missing directory ONLY when every skipped entry is
+		// provably stale; a possible real second copy fails the row so it retries
+		// and writes that copy when its directory returns (#1430).
+		if (!landed && len(kept) == 0) || !w.skippedAllStale(ctx, item, skipped) {
+			err := fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(missingErr))
+			slog.Warn("worker write failed", "id", item.ID, "skipped_entries", len(skipped), "error", err)
+			return w.failPass(ctx, item, err, landed)
+		}
+		slog.Info("worker: settling with provably stale output directories missing; entries left in the row", "id", item.ID, "skipped_entries", len(skipped))
+	}
+	if len(kept) == len(paths)-len(skipped) {
 		// Every output already holds a better lyric (#553): nothing landed, so
 		// the content stamps below would describe a file that is not there, the
 		// lane is left naming whatever wrote the kept file, and the result is not
@@ -1942,12 +1975,14 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// MisSynced result landed as .txt and a categorical one was not written --
 	// so this is the durable record of a decision, not an ignored observation.
 	w.stampTimingOutcome(ctxNoCancel, item, song, lyrics.GuardDurationSeconds(song), w.verdictGeneration(cacheHit))
-	w.stampWordTiming(ctxNoCancel, item, song)
+	// Judged over the entries that were not skipped as missing (#1430).
+	written := withoutPaths(paths, skipped)
+	w.stampWordTiming(ctxNoCancel, item, written, song)
 	// A sync-tier stamp+clear double failure (CodeRabbit thread 4098910896,
 	// #1085) must not reach Complete: the row would settle describing a file
 	// this same completion may have just changed. Fail it via the same path
 	// a failed Complete already takes, below.
-	tier := w.ordinarySyncTier(item, song)
+	tier := w.ordinarySyncTier(written, song)
 	if err := w.stampOrClearSyncTier(ctxNoCancel, item.ID, tier); err != nil {
 		return w.failStuckItem(ctxNoCancel, item, capNever, err)
 	}
@@ -2410,20 +2445,42 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	paths := outputPaths(item.Inputs)
 	var kept []*lyrics.KeptError
 	write := w.writeFor(item)
+	var skipped []models.OutputPath // entries whose output directory is missing (#1430)
+	var missingErr error
+	wrote := false
+	// failWrite keeps the old behavior: a write failure is treated as a miss.
+	failWrite := func(writeErr error) error {
+		writeErr = fmt.Errorf("worker: write instrumental item %d output: %w", item.ID, scrubWritePaths(writeErr))
+		slog.Warn("worker instrumental detection: write failed; treating as miss", "id", item.ID, "error", writeErr)
+		if derr := w.requeueDeferred(ctx, item, writeErr); derr != nil {
+			return derr
+		}
+		w.consecutiveFailures = 0
+		return nil
+	}
 	for _, p := range paths {
-		if writeErr := write(song, p.Filename, p.Outdir); errors.Is(writeErr, lyrics.ErrKeptBetter) {
+		writeErr := write(song, p.Filename, p.Outdir)
+		switch {
+		case errors.Is(writeErr, lyrics.ErrKeptBetter):
 			kept = append(kept, keptErrorOf(writeErr))
-		} else if writeErr != nil {
-			writeErr = fmt.Errorf("worker: write instrumental item %d output: %w", item.ID, scrubWritePaths(writeErr))
-			slog.Warn("worker instrumental detection: write failed; treating as miss", "id", item.ID, "error", writeErr)
-			if derr := w.requeueDeferred(ctx, item, writeErr); derr != nil {
-				return derr
+		case errors.Is(writeErr, lyrics.ErrOutputDirMissing):
+			skipped = append(skipped, p)
+			if missingErr == nil {
+				missingErr = writeErr
 			}
-			w.consecutiveFailures = 0
-			return nil
+		case writeErr != nil:
+			return failWrite(writeErr)
+		default:
+			wrote = true
 		}
 	}
-	if len(kept) == len(paths) {
+	if len(skipped) > 0 {
+		if (!wrote && len(kept) == 0) || !w.skippedAllStale(ctx, item, skipped) {
+			return failWrite(missingErr)
+		}
+		slog.Info("worker instrumental detection: settling with provably stale output directories missing; entries left in the row", "id", item.ID, "skipped_entries", len(skipped))
+	}
+	if len(kept) == len(paths)-len(skipped) {
 		// Real lyrics are already on disk everywhere (#553): no marker landed,
 		// so recording an instrumental verdict would contradict the files.
 		return w.completeKept(ctx, item, kept)
@@ -2742,17 +2799,26 @@ func (w *Worker) failPass(ctx context.Context, item queue.WorkItem, cause error,
 	return nil
 }
 
-// OutputHealer is the worker's seam to the library-root check (#1430),
-// implemented by prune.Pruner. A nil healer disables the mount guard.
+// OutputHealer is the worker's seam to the library-root and stale-output_paths
+// checks (#1430), implemented by prune.Pruner. A nil healer disables the mount
+// guard, the missing-directory preflight, and settling past a missing entry.
 type OutputHealer interface {
+	// HealOutputPaths rewrites a SINGLE-entry output_paths whose directory is
+	// gone to the row's own path when that is provable. It never removes an
+	// entry: healed=false leaves the row as it was.
+	HealOutputPaths(ctx context.Context, id int64, sourcePath, outdir, filename string, paths []models.OutputPath) (_ []models.OutputPath, healed bool, _ error)
 	// LibraryRoots lists the configured library roots. It reads the database
 	// only; the worker caches the answer.
 	LibraryRoots(ctx context.Context) ([]string, error)
 	// RootOnline reports whether that one root is present and populated.
 	RootOnline(root string) bool
+	// EntryProvablyStale reports whether a missing-directory entry is provably a
+	// stale path rather than a real second copy; rootOnline answers per root.
+	EntryProvablyStale(ctx context.Context, id int64, sourcePath string, e models.OutputPath, rootOnline func(root string) bool) (bool, error)
 }
 
-// SetOutputHealer installs the healer; nil disables the offline-library guard.
+// SetOutputHealer installs the healer; nil disables the offline-library guard,
+// the missing-directory preflight and heal, and settling past a stale entry.
 func (w *Worker) SetOutputHealer(h OutputHealer) { w.healer = h }
 
 const (
@@ -2888,6 +2954,54 @@ func (w *Worker) parkIfLibraryOffline(ctx context.Context, item queue.WorkItem) 
 	}
 	w.noteOffline(root)
 	return true, nil
+}
+
+// skippedAllStale reports whether every missing-directory entry skipped this
+// pass is provably stale (prune.EntryProvablyStale). Without a healer, or on any
+// error, it is false: the caller then fails the row as main always did (#1430).
+func (w *Worker) skippedAllStale(ctx context.Context, item queue.WorkItem, skipped []models.OutputPath) bool {
+	if w.healer == nil {
+		return false
+	}
+	for _, e := range skipped {
+		stale, err := w.healer.EntryProvablyStale(context.WithoutCancel(ctx), item.ID, item.Inputs.SourcePath, e, w.rootIsOnline)
+		if err != nil {
+			slog.Warn("worker: stale-entry check failed; failing the row", "id", item.ID, "error", err)
+			return false
+		}
+		if !stale {
+			return false
+		}
+	}
+	return true
+}
+
+// preflightOutputs decides the missing-directory outcome BEFORE the fetch. If
+// no output directory exists it first tries the single-entry heal (#921 shape);
+// when that does not apply, ok=false and the caller fails the row without a
+// provider request. It returns item with a healed output_paths. It never removes
+// an entry. Without a healer it is a no-op.
+func (w *Worker) preflightOutputs(ctx context.Context, item queue.WorkItem) (_ queue.WorkItem, ok bool) {
+	if w.healer == nil {
+		return item, true
+	}
+	paths := outputPaths(item.Inputs)
+	for _, p := range paths {
+		if _, err := os.Stat(p.Outdir); !errors.Is(err, fs.ErrNotExist) {
+			return item, true // present, or unreadable: let the write decide
+		}
+	}
+	healed, did, err := w.healer.HealOutputPaths(context.WithoutCancel(ctx), item.ID, item.Inputs.SourcePath, item.Inputs.Outdir, item.Inputs.Filename, paths)
+	if err != nil {
+		slog.Warn("worker: heal output_paths failed", "id", item.ID, "error", err)
+		return item, false
+	}
+	if !did {
+		return item, false
+	}
+	slog.Info("worker: output_paths healed", "id", item.ID, "entries", len(healed))
+	item.Inputs.OutputPaths = healed
+	return item, true
 }
 
 // upgradeMaxAttempts caps an upgrade trip's failed attempts (#553): the third

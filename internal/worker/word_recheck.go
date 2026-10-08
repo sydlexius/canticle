@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -213,17 +214,46 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	song.AudioPath = item.Inputs.SourcePath // opt-in mtime bump (#505)
 	// The writer's block backstop keys on the row identity (#1394).
 	song.IdentityArtistKey, song.IdentityTitleKey = queue.IdentityKeys(item.Inputs.Track)
-	for _, p := range outputPaths(item.Inputs) {
-		if err := w.writer.WriteLRC(song, p.Filename, p.Outdir); err != nil {
-			if errors.Is(err, lyrics.ErrBlocked) {
-				// The backstop caught a block marked mid-pass: classify as the
-				// all-blocked dispatch (a benign miss), not a transport failure,
-				// as the ordinary write path does (#1394).
-				slog.Info("worker: word recheck write refused, result is blocked", "id", item.ID)
-				return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d: %w", item.ID, orchestrator.ErrAllResultsBlocked))
-			}
-			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err)))
+	paths := outputPaths(item.Inputs)
+	var skipped []models.OutputPath // entries whose output directory is missing (#1430)
+	var missingErr error
+	wrote := false
+	writeOne := func(p models.OutputPath) error {
+		err := w.writer.WriteLRC(song, p.Filename, p.Outdir)
+		if err == nil {
+			wrote = true
 		}
+		return err
+	}
+	// fail maps a write error to the deferral the loop has always used.
+	fail := func(err error) error {
+		if errors.Is(err, lyrics.ErrBlocked) {
+			// The backstop caught a block marked mid-pass: classify as the
+			// all-blocked dispatch (a benign miss), not a transport failure,
+			// as the ordinary write path does (#1394).
+			slog.Info("worker: word recheck write refused, result is blocked", "id", item.ID)
+			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d: %w", item.ID, orchestrator.ErrAllResultsBlocked))
+		}
+		return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err)))
+	}
+	for _, p := range paths {
+		err := writeOne(p)
+		if errors.Is(err, lyrics.ErrOutputDirMissing) {
+			skipped = append(skipped, p)
+			if missingErr == nil {
+				missingErr = err
+			}
+			continue
+		}
+		if err != nil {
+			return fail(err)
+		}
+	}
+	if len(skipped) > 0 {
+		if !wrote || !w.skippedAllStale(ctx, item, skipped) {
+			return fail(missingErr)
+		}
+		slog.Info("worker word recheck: settling with provably stale output directories missing; entries left in the row", "id", item.ID, "skipped_entries", len(skipped))
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)
 	// provider_lane follows the [source:] now on disk, so it moves only after
@@ -242,11 +272,12 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	// 1), so check disk truth instead of assuming success.
 	tier := queue.SyncTierLine
 	if lw, ok := w.writer.(wordLandingWriter); ok {
-		landed := true
-		for _, p := range outputPaths(item.Inputs) {
-			landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
-		}
-		if landed {
+		// Only the entries written this pass: a skipped (missing) directory
+		// never holds words, and judging it would stamp 'line' over a row whose
+		// words landed everywhere that exists (#1430). Zero written entries is
+		// guarded twice: the skipped branch above fails a pass that wrote
+		// nothing, and wordsLandedOver is false for none, never vacuously 'word'.
+		if wordsLandedOver(lw, song, withoutPaths(paths, skipped)) {
 			tier = queue.SyncTierWord
 		}
 	}
@@ -393,16 +424,12 @@ type wordLandingWriter interface {
 //   - absent: the dispatch's aggregate answer is absent, i.e. every
 //     word-capable lane answered with no words (orchestrator
 //     ungatedWordAnswer). A lane never asked leaves it unknown: "".
-func (w *Worker) ordinaryWordVerdict(item queue.WorkItem, song models.Song) string {
+func (w *Worker) ordinaryWordVerdict(paths []models.OutputPath, song models.Song) string {
 	lw, ok := w.writer.(wordLandingWriter)
 	if !ok || !lw.WordSyncEnabled() || outcomeTypeFromSong(song) != outcomeTypeSynced || !providers.WordCapable(song.WinningLane) {
 		return ""
 	}
-	landed := true
-	for _, p := range outputPaths(item.Inputs) {
-		landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
-	}
-	if landed {
+	if wordsLandedOver(lw, song, paths) {
 		return queue.WordTimingServed
 	}
 	if song.WordAnswer == models.WordAnswerAbsent {
@@ -418,8 +445,8 @@ func (w *Worker) ordinaryWordVerdict(item queue.WorkItem, song models.Song) stri
 // or reopened row); the detector-instrumental and guard-reject settles, which
 // return before this, clear it via clearWordTiming, so no served/absent
 // outlives an ordinary completion that did not re-derive it.
-func (w *Worker) stampWordTiming(ctxNoCancel context.Context, item queue.WorkItem, song models.Song) {
-	state := w.ordinaryWordVerdict(item, song)
+func (w *Worker) stampWordTiming(ctxNoCancel context.Context, item queue.WorkItem, paths []models.OutputPath, song models.Song) {
+	state := w.ordinaryWordVerdict(paths, song)
 	if state == "" {
 		w.clearWordTiming(ctxNoCancel, item)
 		return
@@ -459,21 +486,44 @@ func (w *Worker) clearWordTiming(ctxNoCancel context.Context, item queue.WorkIte
 // loop (a second Lstat+header-parse per path, no shared state). Left as-is:
 // deduping needs a shared, memoized landed func() threaded through 4 call
 // sites, risking this slice's size cap for one bounded, non-hot-path read.
-func (w *Worker) ordinarySyncTier(item queue.WorkItem, song models.Song) string {
+func (w *Worker) ordinarySyncTier(paths []models.OutputPath, song models.Song) string {
 	if outcomeTypeFromSong(song) != outcomeTypeSynced {
 		return ""
 	}
 	lw, ok := w.writer.(wordLandingWriter)
-	if ok {
-		landed := true
-		for _, p := range outputPaths(item.Inputs) {
-			landed = landed && lw.WordsLanded(song, p.Filename, p.Outdir)
-		}
-		if landed {
-			return queue.SyncTierWord
-		}
+	if ok && wordsLandedOver(lw, song, paths) {
+		return queue.SyncTierWord
 	}
 	return queue.SyncTierLine
+}
+
+// wordsLandedOver reports whether the words landed at EVERY entry of paths, and
+// is false for none: "all of zero landed" must never read as a word verdict
+// (#1430).
+func wordsLandedOver(lw wordLandingWriter, song models.Song, paths []models.OutputPath) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !lw.WordsLanded(song, p.Filename, p.Outdir) {
+			return false
+		}
+	}
+	return true
+}
+
+// withoutPaths is paths minus the skipped entries (missing output directory).
+func withoutPaths(paths, skipped []models.OutputPath) []models.OutputPath {
+	if len(skipped) == 0 {
+		return paths
+	}
+	out := make([]models.OutputPath, 0, len(paths))
+	for _, p := range paths {
+		if !slices.Contains(skipped, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // stampOrClearSyncTier records tier, best-effort; on failure it attempts to
