@@ -15,11 +15,6 @@ import (
 // of a block or a work item.
 var ErrUnblockTarget = errors.New("lyricblock: set exactly one of BlockID and WorkItemID")
 
-// settledBlocked is the work_queue.outcome_type a row carries once every result
-// for it was blocked. The worker arm that writes it is #1395; until it lands no
-// row has the value and Unblock reopens nothing.
-const settledBlocked = "blocked"
-
 // UnblockRequest names what to unblock: one block, or every block on a work
 // item's track identity.
 type UnblockRequest struct {
@@ -90,34 +85,13 @@ func (s *Service) unblockTx(ctx context.Context, req UnblockRequest, res *Unbloc
 		}
 		res.Removed = n
 	}
-	rows, err := tx.QueryContext(ctx,
-		`SELECT id FROM work_queue WHERE artist_key = ? AND title_key = ? AND status = 'done' AND outcome_type = ?`,
-		artistKey, titleKey, settledBlocked)
+	// work_queue is unique on (artist_key, title_key), so at most one row matches.
+	ok, err := queue.ReopenBlockedTx(ctx, tx, artistKey, titleKey, time.Now())
 	if err != nil {
-		return fmt.Errorf("lyricblock: find blocked rows: %w", err)
+		return err
 	}
-	var wq []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("lyricblock: scan blocked row: %w", err)
-		}
-		wq = append(wq, id)
-	}
-	err = rows.Err()
-	_ = rows.Close()
-	if err != nil {
-		return fmt.Errorf("lyricblock: blocked rows: %w", err)
-	}
-	for _, id := range wq {
-		ok, rerr := queue.ReopenDoneRowTx(ctx, tx, id, time.Now())
-		if rerr != nil {
-			return rerr
-		}
-		if ok {
-			res.Reopened++
-		}
+	if ok {
+		res.Reopened++
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("lyricblock: commit unblock: %w", err)

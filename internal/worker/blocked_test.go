@@ -417,6 +417,14 @@ func TestBlocked_WordRecheck_WriterBlockDoesNotFeedFailureCounter(t *testing.T) 
 	if w.consecutiveFailures != 0 {
 		t.Fatalf("consecutiveFailures = %d; a writer-backstop block in a recheck is not a transport failure", w.consecutiveFailures)
 	}
+	// The row holds a settled .lrc: the backstop block must defer the recheck and
+	// never relabel the row blocked (#1395; settleBlocked is not reachable here).
+	if got := rowOutcome(t, rig.db, rig.id); got == queue.OutcomeBlocked {
+		t.Fatalf("outcome_type = %q; a recheck row holding a file must not settle blocked", got)
+	}
+	if status := rowStatus(t, rig.db, rig.id); status != queue.StatusDeferred {
+		t.Fatalf("status = %q; want the recheck deferred", status)
+	}
 	rig.assertUntouched(t)
 	if row := rig.recheckRow(t); row.state != "queued" {
 		t.Fatalf("word_timing_state = %q; want queued", row.state)

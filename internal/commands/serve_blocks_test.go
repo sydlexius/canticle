@@ -42,7 +42,8 @@ func (f blockedSongFetcher) FindLyrics(context.Context, models.Track) (models.So
 // TestRunServe_InstallsLyricBlockCheckers proves the serve graph wires the
 // block store into BOTH the LRC writer backstop and the worker (#1394): a body
 // blocked in the database is refused by the writer, and the wired worker defers
-// a queued row whose only answer is blocked instead of writing it. Fetch mode
+// a queued row whose only answer is blocked, settling it as blocked (#1395)
+// instead of writing it. Fetch mode
 // builds neither.
 func TestRunServe_InstallsLyricBlockCheckers(t *testing.T) {
 	prev := slog.Default()
@@ -115,8 +116,11 @@ func TestRunServe_InstallsLyricBlockCheckers(t *testing.T) {
 	if !errors.Is(writeErr, lyrics.ErrBlocked) {
 		t.Fatalf("serve writer WriteLRC = %v; want ErrBlocked (writer backstop not wired)", writeErr)
 	}
-	if rowWritten || rowStatus != queue.StatusDeferred {
-		t.Fatalf("worker row: written = %v, status = %q; want unwritten and %q (worker.SetBlockChecker not wired)", rowWritten, rowStatus, queue.StatusDeferred)
+	// The row holds no file and its only lane answered blocked, so #1395 settles
+	// it as its own outcome instead of deferring it (#1394 deferred it).
+	wantRow := queue.StatusDone + "/" + queue.OutcomeBlocked
+	if rowWritten || rowStatus != wantRow {
+		t.Fatalf("worker row: written = %v, status/outcome = %q; want unwritten and %q (worker.SetBlockChecker not wired)", rowWritten, rowStatus, wantRow)
 	}
 }
 
@@ -163,7 +167,7 @@ func TestScheduler_BlockedCacheEntryReadsAsMiss(t *testing.T) {
 	}
 }
 
-// probeRowStatus reads a work_queue row's status through a second handle, since
+// probeRowStatus reads a work_queue row's "status/outcome_type" through a second handle, since
 // the serve graph owns the main one while the probe runs.
 func probeRowStatus(t *testing.T, dbPath string, id int64) string {
 	t.Helper()
@@ -174,7 +178,7 @@ func probeRowStatus(t *testing.T, dbPath string, id int64) string {
 	}
 	defer func() { _ = d.Close() }()
 	var status string
-	if err := d.QueryRow(`SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
+	if err := d.QueryRow(`SELECT status || '/' || COALESCE(outcome_type, '') FROM work_queue WHERE id = ?`, id).Scan(&status); err != nil {
 		t.Errorf("read row status: %v", err)
 	}
 	return status
