@@ -542,6 +542,10 @@ func (u *UI) buildReportView(ctx context.Context, def reportDef, q url.Values) (
 			return templates.ReportView{}, err
 		}
 		v.AttentionRows = buildAttentionRows(items, serverLoc)
+		// The report has no sort or other parameters, so its own path is the
+		// whole return target (never the one-shot mark/files status).
+		stampAttentionActions(v.AttentionRows, items, u.markReturnTo(reportPath(def.key)))
+		v.Status = templates.MarkStatusFromQuery(q)
 	case "provider-effectiveness":
 		rows, err := u.reports.ProviderEffectiveness(ctx)
 		if err != nil {

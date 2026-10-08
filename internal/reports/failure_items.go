@@ -32,6 +32,11 @@ type FailureItem struct {
 	MissCount     int64
 	Attempts      int64
 	UpdatedAt     string
+	// ManualInstrumental is true for a row an operator marked instrumental by
+	// hand (manual_instrumental_at, #1218). A mark settles the row, so a listed
+	// row is normally unmarked; the flag is read so the icon shows the recorded
+	// state rather than assuming it (#1434).
+	ManualInstrumental bool
 }
 
 // FailureGroupItems returns up to limit rows of the failure group
@@ -90,7 +95,8 @@ func clampFailureLimit(limit int) int {
 // it binds one argument, the no-reason sentinel. Shared with NeedsAttention.
 const failureItemSelect = `SELECT id, artist, title, album, status,
                 COALESCE(NULLIF(last_error, ''), ?),
-                COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, '')
+                COALESCE(next_attempt_at, ''), miss_count, attempts, COALESCE(updated_at, ''),
+                manual_instrumental_at IS NOT NULL
          FROM work_queue
          WHERE `
 
@@ -99,7 +105,7 @@ const failureItemSelect = `SELECT id, artist, title, album, status,
 func scanFailureItem(rows *sql.Rows) (FailureItem, error) {
 	var it FailureItem
 	if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Status, &it.Reason,
-		&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt); err != nil {
+		&it.NextAttemptAt, &it.MissCount, &it.Attempts, &it.UpdatedAt, &it.ManualInstrumental); err != nil {
 		return FailureItem{}, fmt.Errorf("reports: scan failure item: %w", err)
 	}
 	it.Reason = normalizedReason(it.Reason)

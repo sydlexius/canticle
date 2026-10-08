@@ -1145,11 +1145,18 @@ func normalizedReason(reason string) string {
 // order it will be claimed. Priority is the raw tier value; the caller maps it
 // to a display label ("miss"/"fresh"). CreatedAt drives the "waited" column.
 type UpNextItem struct {
+	// ID is the work_queue row id (#1434): the handle the mark action addresses.
+	ID     int64
 	Artist string
 	Title  string
 	// Album is the row's album, empty when not recorded.
 	Album    string
 	Priority int
+	// ManualInstrumental is true for a row an operator marked instrumental by
+	// hand (manual_instrumental_at, #1218). A mark settles the row, so a listed
+	// row is normally unmarked; the flag is read so the icon shows the recorded
+	// state rather than assuming it.
+	ManualInstrumental bool
 	// CreatedAt is when the row entered the queue (work_queue.created_at). Zero
 	// only if the stored value is unparsable, which the schema default prevents.
 	CreatedAt time.Time
@@ -1177,7 +1184,7 @@ func (r *Repo) UpNext(ctx context.Context, limit int) ([]UpNextItem, error) {
 	}
 	now := time.Now().UTC().Format(timeFormat)
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT artist, title, album, priority, created_at
+		`SELECT id, artist, title, album, priority, created_at, manual_instrumental_at IS NOT NULL
          FROM work_queue
          WHERE batch_seq IS NOT NULL
            AND status IN ('pending', 'failed', 'deferred')
@@ -1197,7 +1204,7 @@ func (r *Repo) UpNext(ctx context.Context, limit int) ([]UpNextItem, error) {
 			it        UpNextItem
 			createdAt sql.NullString
 		)
-		if err := rows.Scan(&it.Artist, &it.Title, &it.Album, &it.Priority, &createdAt); err != nil {
+		if err := rows.Scan(&it.ID, &it.Artist, &it.Title, &it.Album, &it.Priority, &createdAt, &it.ManualInstrumental); err != nil {
 			return nil, fmt.Errorf("reports: scan up next: %w", err)
 		}
 		if createdAt.Valid && createdAt.String != "" {
