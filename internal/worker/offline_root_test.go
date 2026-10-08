@@ -17,6 +17,7 @@ type fakeHealer struct {
 	online    map[string]bool
 	probes    map[string]int
 	rootCalls int
+	stale     bool // the answer EntryProvablyStale gives every entry
 }
 
 func newFakeHealer(online map[string]bool, roots ...string) *fakeHealer {
@@ -31,6 +32,16 @@ func (f *fakeHealer) LibraryRoots(context.Context) ([]string, error) {
 func (f *fakeHealer) RootOnline(root string) bool {
 	f.probes[root]++
 	return f.online[root]
+}
+
+// HealOutputPaths declines: this fake never heals.
+func (f *fakeHealer) HealOutputPaths(_ context.Context, _ int64, _, _, _ string, paths []models.OutputPath) ([]models.OutputPath, bool, error) {
+	return paths, false, nil
+}
+
+// EntryProvablyStale answers f.stale for every entry.
+func (f *fakeHealer) EntryProvablyStale(context.Context, int64, string, models.OutputPath, func(string) bool) (bool, error) {
+	return f.stale, nil
 }
 
 // clockedWorker is a fakeQueue worker whose clock the test moves by hand.
@@ -62,14 +73,14 @@ func TestRun_OfflineRootParksRowAndContinues(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatal("Run did not finish: the offline row was re-dequeued instead of being parked into the future")
 	}
-	status, attempts, next := rig.rowOf(t, rig.id)
+	status, attempts, _, next := rig.rowOf(t, rig.id)
 	if status != "pending" || attempts != 0 {
 		t.Errorf("offline row status=%s attempts=%d, want pending/0", status, attempts)
 	}
 	if ts, err := time.Parse(time.RFC3339, next); err != nil || !ts.After(time.Now().Add(time.Minute)) {
 		t.Errorf("next_attempt_at = %q (%v), want it parked into the future", next, err)
 	}
-	if st, _, _ := rig.rowOf(t, nextID); st != "done" {
+	if st, _, _, _ := rig.rowOf(t, nextID); st != "done" {
 		t.Errorf("next row status = %s, want done in the same pass", st)
 	}
 	if rig.fetcher.calls != 1 {
@@ -126,7 +137,7 @@ func TestRun_OfflineLibraryCostsOneLookupAndOneLogLine(t *testing.T) {
 		t.Fatalf("fetches = %d, want 0: every row is in the offline library", rig.fetcher.calls)
 	}
 	for _, id := range []int64{rig.id, rig.id + 1, rig.id + 2} {
-		if st, a, _ := rig.rowOf(t, id); st != "pending" || a != 0 {
+		if st, a, _, _ := rig.rowOf(t, id); st != "pending" || a != 0 {
 			t.Errorf("row %d status=%s attempts=%d, want pending/0", id, st, a)
 		}
 	}

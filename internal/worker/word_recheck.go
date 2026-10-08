@@ -213,17 +213,46 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	song.AudioPath = item.Inputs.SourcePath // opt-in mtime bump (#505)
 	// The writer's block backstop keys on the row identity (#1394).
 	song.IdentityArtistKey, song.IdentityTitleKey = queue.IdentityKeys(item.Inputs.Track)
-	for _, p := range outputPaths(item.Inputs) {
-		if err := w.writer.WriteLRC(song, p.Filename, p.Outdir); err != nil {
-			if errors.Is(err, lyrics.ErrBlocked) {
-				// The backstop caught a block marked mid-pass: classify as the
-				// all-blocked dispatch (a benign miss), not a transport failure,
-				// as the ordinary write path does (#1394).
-				slog.Info("worker: word recheck write refused, result is blocked", "id", item.ID)
-				return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d: %w", item.ID, orchestrator.ErrAllResultsBlocked))
-			}
-			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err)))
+	paths := outputPaths(item.Inputs)
+	var skipped []models.OutputPath // entries whose output directory is missing (#1430)
+	var missingErr error
+	wrote := false
+	writeOne := func(p models.OutputPath) error {
+		err := w.writer.WriteLRC(song, p.Filename, p.Outdir)
+		if err == nil {
+			wrote = true
 		}
+		return err
+	}
+	// fail maps a write error to the deferral the loop has always used.
+	fail := func(err error) error {
+		if errors.Is(err, lyrics.ErrBlocked) {
+			// The backstop caught a block marked mid-pass: classify as the
+			// all-blocked dispatch (a benign miss), not a transport failure,
+			// as the ordinary write path does (#1394).
+			slog.Info("worker: word recheck write refused, result is blocked", "id", item.ID)
+			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d: %w", item.ID, orchestrator.ErrAllResultsBlocked))
+		}
+		return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err)))
+	}
+	for _, p := range paths {
+		err := writeOne(p)
+		if errors.Is(err, lyrics.ErrOutputDirMissing) {
+			skipped = append(skipped, p)
+			if missingErr == nil {
+				missingErr = err
+			}
+			continue
+		}
+		if err != nil {
+			return fail(err)
+		}
+	}
+	if len(skipped) > 0 {
+		if !wrote || !w.skippedAllStale(ctx, item, skipped) {
+			return fail(missingErr)
+		}
+		slog.Info("worker word recheck: settling with provably stale output directories missing; entries left in the row", "id", item.ID, "skipped_entries", len(skipped))
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)
 	// provider_lane follows the [source:] now on disk, so it moves only after

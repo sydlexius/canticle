@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,13 +114,25 @@ func (r *healRig) enqueue(t *testing.T, title, dir, src string, paths []models.O
 	return item.ID
 }
 
-func (r *healRig) rowOf(t *testing.T, id int64) (status string, attempts int, next string) {
+func (r *healRig) rowOf(t *testing.T, id int64) (status string, attempts int, paths []models.OutputPath, next string) {
 	t.Helper()
-	if err := r.db.QueryRow(`SELECT status, attempts, next_attempt_at FROM work_queue WHERE id = ?`, id).Scan(&status, &attempts, &next); err != nil {
+	var raw string
+	if err := r.db.QueryRow(`SELECT status, attempts, output_paths, next_attempt_at FROM work_queue WHERE id = ?`, id).Scan(&status, &attempts, &raw, &next); err != nil {
 		t.Fatal(err)
 	}
-	return status, attempts, next
+	if err := json.Unmarshal([]byte(raw), &paths); err != nil {
+		t.Fatal(err)
+	}
+	return status, attempts, paths, next
 }
+
+func (r *healRig) row(t *testing.T) (string, int, []models.OutputPath) {
+	t.Helper()
+	s, a, p, _ := r.rowOf(t, r.id)
+	return s, a, p
+}
+
+func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // takeOffline leaves root as an unmounted share does: present but empty.
 func takeOffline(t *testing.T, root string) {
