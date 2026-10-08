@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/identityrepair"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
 
@@ -31,6 +32,10 @@ import (
 // (a merge re-points every link to the surviving row; unlink and delete reset
 // each unlinked member to pending). The pre-existing merge in
 // identityrepair.apply had the same limit before #963.
+//
+// The record also does not capture the lyric block move (#1399): blocks follow
+// the corrected identity, and a hand-restore of the identity does not move them
+// back.
 //
 // Op names which table Old*/New* describe -- see identityrepair.Op's doc
 // comment for the full list. For Op == "scan_correction" (Run's tag re-read
@@ -125,7 +130,7 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 		return appendReconcileIdentityBackup(backupFile, ch)
 	}
 
-	repairer := identityrepair.New(sqlDB, scanner.ReadArtistIdentity)
+	repairer := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).WithBlocks(lyricblock.NewStore(sqlDB, nil))
 
 	// The divergence pass runs FIRST and is DB-only (no file re-read): it finds
 	// scan_results/work_queue pairs that already disagree because a PRIOR scan
@@ -210,7 +215,7 @@ func runIdentityBackfill(ctx context.Context, sqlDB *sql.DB) {
 	}
 
 	slog.Info("identity backfill: correcting run-together multi-value artist rows (#466); this re-reads file tags and runs once")
-	res, err := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).Run(ctx, identityrepair.Options{
+	res, err := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).WithBlocks(lyricblock.NewStore(sqlDB, nil)).Run(ctx, identityrepair.Options{
 		Progress: func(scanned int) {
 			slog.Debug("identity backfill: progress", "scanned", scanned)
 		},

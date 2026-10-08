@@ -35,7 +35,7 @@ func TestRun_RekeyReopensWordRecheckRow(t *testing.T) {
 				t.Fatalf("stamp state: %v", err)
 			}
 			reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-			if _, err := New(db, reader.read).Run(context.Background(), Options{}); err != nil {
+			if _, err := newRepairer(db, reader.read).Run(context.Background(), Options{}); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 			if st, ws := wordState(t, db, wq); st != tc.wantStatus || ws != tc.wantState {
@@ -58,7 +58,7 @@ func TestRun_MergeReopensWordRecheckSurvivor(t *testing.T) {
 		t.Fatalf("stamp state: %v", err)
 	}
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestRepairDivergence_RekeyReopensWordRecheckRow(t *testing.T) {
 		t.Fatalf("stamp state: %v", err)
 	}
 	setScanIdentity(t, db, sr, "Alpha; Bravo")
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil || res.Rekeyed != 1 {
 		t.Fatalf("RepairDivergence = (%+v, %v); want Rekeyed=1", res, err)
 	}

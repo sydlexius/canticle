@@ -45,7 +45,7 @@ func TestPreviewSourceSidecars(t *testing.T) {
 		t.Fatalf("PreviewSource: %v", err)
 	}
 	want := reports.PreviewTarget{
-		ID: id, Artist: "Ar", Title: "Ti", Album: "Al", Status: "done", SyncTier: "word",
+		ID: id, Artist: "Ar", Title: "Ti", Album: "Al", Status: "done", SyncTier: "word", ArtistKey: "Ar", TitleKey: "Ti",
 		AudioPath:     audio,
 		LRCPath:       filepath.Join(dir, "song.lrc"),
 		ELRCCandidate: filepath.Join(dir, "song.elrc"),

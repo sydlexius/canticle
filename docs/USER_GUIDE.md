@@ -782,7 +782,14 @@ canticle scan list-blocks
 # Lift one block by block id, or every block on a track by work item id.
 canticle scan unblock --id 7 --yes
 canticle scan unblock --work-item 42 --yes
+
+# Clear the blocks of tracks that are no longer in the queue.
+canticle scan unblock --orphans --yes
 ```
+
+`--orphans` removes only blocks whose track has no work item any more (for example after the file was deleted and pruned); a block on a track that is still queued is kept. It is a dry run without `--yes`, prints counts only, and cannot be combined with `--id` or `--work-item`. Add `--tail` to see each block's identity.
+
+A track whose file was pruned (for example while a share was unmounted) and comes back on a later scan loses its block if `--orphans` was applied in between, so the blocked lyrics can return. Look at the dry run first.
 
 Tracks are chosen by id only. The output is counts and outcome words; it never prints a library path, artist, title or lyric text. `--tail` is where detail appears: `mark-wrong --tail` prints each file backed up, and `list-blocks --tail` prints each block with its identity. The exit status is 1 if the track or block is not found, is being processed right now, has no lyric file on disk, is marked instrumental by hand, or is failed or unavailable (revive it first); nothing is changed in those cases.
 

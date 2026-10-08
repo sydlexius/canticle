@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/testutil"
 )
@@ -121,6 +122,54 @@ func TestRunReconcileIdentity_ApplyAndBackup(t *testing.T) {
 	}
 	if !strings.Contains(buf2.String(), "corrected 0") {
 		t.Errorf("second run want 'corrected 0'; got: %s", buf2.String())
+	}
+}
+
+// `scan reconcile-identity --yes` carries the lyric blocks of a re-keyed queue
+// row to the corrected identity; none stay under the old one (#1399).
+func TestRunReconcileIdentity_ApplyMovesBlocks(t *testing.T) {
+	ctx, cfgPath, dbPath, _ := setupReconcileIdentity(t)
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	oldKey, newKey, titleKey := normalize.NormalizeKey("AlphaBravo"), normalize.NormalizeKey("Alpha; Bravo"), normalize.NormalizeKey("Song")
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO work_queue (artist, title, artist_key, title_key, status)
+		 VALUES ('AlphaBravo', 'Song', ?, ?, 'pending')`, oldKey, titleKey); err != nil {
+		t.Fatalf("seed work_queue: %v", err)
+	}
+	store := lyricblock.NewStore(sqlDB, nil)
+	if _, err := store.Add(ctx, sqlDB, lyricblock.Block{ArtistKey: oldKey, TitleKey: titleKey, Fingerprint: "fp1"}); err != nil {
+		t.Fatalf("seed block: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close seed db: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if code := runReconcileIdentity(ctx, &buf, ScanReconcileIdentityCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("exit=%d out=%s", code, buf.String())
+	}
+
+	sqlDB, err = db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	store = lyricblock.NewStore(sqlDB, nil)
+	count := func(artistKey string) int {
+		got, err := store.List(ctx, lyricblock.ListFilter{ArtistKey: artistKey, TitleKey: titleKey})
+		if err != nil {
+			t.Fatalf("list blocks: %v", err)
+		}
+		return len(got)
+	}
+	if n := count(newKey); n != 1 {
+		t.Errorf("blocks under the new identity = %d, want 1", n)
+	}
+	if n := count(oldKey); n != 0 {
+		t.Errorf("blocks left under the old identity = %d, want 0", n)
 	}
 }
 

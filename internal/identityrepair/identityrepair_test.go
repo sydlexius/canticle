@@ -178,7 +178,7 @@ func TestRun_RekeyInPlace(t *testing.T) {
 	wq := seedQueue(t, db, "AlphaBravo", "", "pending", sr)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestRun_DryRun(t *testing.T) {
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
 	var reported []Change
-	res, err := New(db, reader.read).Run(context.Background(), Options{
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{
 		DryRun: true,
 		Report: func(c Change) error { reported = append(reported, c); return nil },
 	})
@@ -240,7 +240,7 @@ func TestRun_MergeReopensDoneSurvivor(t *testing.T) {
 		"/m/1.mp3": {"Alpha; Bravo", ""},
 		"/m/2.mp3": {"Alpha; Bravo", ""}, // already correct -> unchanged
 	}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestRun_MergeKeepsUnavailableSurvivorRetired(t *testing.T) {
 		"/m/1.mp3": {"Alpha; Bravo", ""},
 		"/m/2.mp3": {"Alpha; Bravo", ""}, // already correct -> unchanged
 	}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestRun_ReadFailureSkips(t *testing.T) {
 	lib := seedLibrary(t, db)
 	sr := seedScan(t, db, lib, "/m/gone.mp3", "AlphaBravo", "", "Song")
 
-	res, err := New(db, fakeReader{}.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestRun_UnchangedRow(t *testing.T) {
 	seedScan(t, db, lib, "/m/1.mp3", "Solo Artist", "", "Song")
 
 	reader := fakeReader{"/m/1.mp3": {"Solo Artist", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestRun_AlbumArtistOnly(t *testing.T) {
 	wq := seedQueue(t, db, "Alpha", "OldAA", "pending", sr)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha", "New; AA"}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestRun_ProcessingSkipped(t *testing.T) {
 	seedQueue(t, db, "AlphaBravo", "", "processing", sr)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestRun_NoQueueRow(t *testing.T) {
 	sr := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song") // no seedQueue
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestRun_MergeKeepsPendingSurvivor(t *testing.T) {
 	wqGood := seedQueue(t, db, "Alpha; Bravo", "", "pending", srGood) // survivor: pending
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestRun_ConflictProcessingSkipped(t *testing.T) {
 	seedQueue(t, db, "Alpha; Bravo", "", "processing", srGood) // corrected key in-flight
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestRun_MergeReconstructsLostOutputPaths(t *testing.T) {
 	}
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -541,7 +541,7 @@ func TestRun_DivergentSharedRow(t *testing.T) {
 
 	// The two files correct to DIFFERENT identities.
 	reader := fakeReader{"/m/1.mp3": {"A; BC", ""}, "/m/2.mp3": {"AB; C", ""}}
-	if _, err := New(db, reader.read).Run(context.Background(), Options{}); err != nil {
+	if _, err := newRepairer(db, reader.read).Run(context.Background(), Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -571,7 +571,7 @@ func TestRun_ReportFailureRollsBack(t *testing.T) {
 	wq := seedQueue(t, db, "AlphaBravo", "", "pending", sr)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	_, err := New(db, reader.read).Run(context.Background(), Options{
+	_, err := newRepairer(db, reader.read).Run(context.Background(), Options{
 		Report: func(Change) error { return errReport },
 	})
 	if !errors.Is(err, errReport) {
@@ -595,7 +595,7 @@ func TestRun_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	if _, err := New(db, reader.read).Run(ctx, Options{}); err == nil {
+	if _, err := newRepairer(db, reader.read).Run(ctx, Options{}); err == nil {
 		t.Fatal("Run err = nil; want context.Canceled")
 	}
 	if a, _, _ := scanIdentity(t, db, sr); a != "AlphaBravo" {
@@ -615,7 +615,7 @@ func TestRun_LibraryScope(t *testing.T) {
 		"/m/1.mp3": {"Alpha; Bravo", ""},
 		"/m/2.mp3": {"Charlie; Delta", ""},
 	}
-	res, err := New(db, reader.read).Run(context.Background(), Options{LibraryID: &lib1})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{LibraryID: &lib1})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -644,7 +644,7 @@ func TestRun_RekeyReopensDoneRowAndClearsSettleState(t *testing.T) {
 	stampSettleState(t, db, wq)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -702,7 +702,7 @@ func TestRun_RekeyLeavesUnavailableRowRetired(t *testing.T) {
 	}
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestRun_RekeyDeferredRowKeepsStatus(t *testing.T) {
 	wq := seedQueue(t, db, "AlphaBravo", "", "deferred", sr)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	if _, err := New(db, reader.read).Run(context.Background(), Options{}); err != nil {
+	if _, err := newRepairer(db, reader.read).Run(context.Background(), Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if _, _, status := queueIdentity(t, db, wq); status != "deferred" {
@@ -758,7 +758,7 @@ func TestRun_AlbumArtistOnlyDoesNotResetSettleState(t *testing.T) {
 	stampSettleState(t, db, wq)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha", "New; AA"}}
-	if _, err := New(db, reader.read).Run(context.Background(), Options{}); err != nil {
+	if _, err := newRepairer(db, reader.read).Run(context.Background(), Options{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -792,7 +792,7 @@ func TestRun_MergeClearsSettleStateOnReopenedSurvivor(t *testing.T) {
 		"/m/1.mp3": {"Alpha; Bravo", ""},
 		"/m/2.mp3": {"Alpha; Bravo", ""},
 	}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

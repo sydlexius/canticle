@@ -68,7 +68,7 @@ func TestRun_DoesNotSeeAlreadyCorrectedScanResults(t *testing.T) {
 	// The tag re-read pass: the file itself already reads "Alpha; Bravo", which
 	// now MATCHES scan_results, so Run reports no change (pinning the bug).
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestRun_DoesNotSeeAlreadyCorrectedScanResults(t *testing.T) {
 	}
 
 	// RepairDivergence (#963) finds and fixes it from the database alone.
-	divRes, err := New(db, reader.read).RepairDivergence(context.Background(), Options{})
+	divRes, err := newRepairer(db, reader.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRepairDivergence_RekeyReopensDoneRow(t *testing.T) {
 	stampSettleState(t, db, wq)
 	setScanIdentity(t, db, sr, "Alpha; Bravo")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestRepairDivergence_UnavailableRowStaysRetired(t *testing.T) {
 	}
 	setScanIdentity(t, db, sr, "Alpha; Bravo")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestRepairDivergence_ProcessingRowSkipped(t *testing.T) {
 	wq := seedQueue(t, db, "AlphaBravo", "", "processing", sr)
 	setScanIdentity(t, db, sr, "Alpha; Bravo")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestRepairDivergence_ConflictMerges(t *testing.T) {
 	wqGood := seedQueue(t, db, "Alpha; Bravo", "", "done", srGood)
 	setScanIdentity(t, db, srBad, "Alpha; Bravo")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRepairDivergence_SharedRowDisagreementUnlinksOnlyDivergent(t *testing.T
 		t.Fatalf("correct srA: %v", err)
 	}
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestRepairDivergence_DisagreementOrphansQueueRowDeletesIt(t *testing.T) {
 		t.Fatalf("correct srB: %v", err)
 	}
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestRepairDivergence_DisagreementOrphansQueueRowDryRun(t *testing.T) {
 		t.Fatalf("correct srB: %v", err)
 	}
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: true})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: true})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestRepairDivergence_DryRunDeleteMatchesApplyWithMismatchedTitleLink(t *tes
 		t.Fatalf("correct srB: %v", err)
 	}
 
-	r := New(db, fakeReader{}.read)
+	r := newRepairer(db, fakeReader{}.read)
 	dry, err := r.RepairDivergence(context.Background(), Options{DryRun: true})
 	if err != nil {
 		t.Fatalf("dry-run RepairDivergence: %v", err)
@@ -406,7 +406,7 @@ func TestRepairDivergence_DryRunWritesNothing(t *testing.T) {
 	setScanIdentity(t, db, sr, "Alpha; Bravo")
 
 	var reported []Change
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
 		DryRun: true,
 		Report: func(c Change) error { reported = append(reported, c); return nil },
 	})
@@ -437,7 +437,7 @@ func TestRepairDivergence_PathPrefixScope(t *testing.T) {
 	setScanIdentity(t, db, srIn, "Alpha; Bravo")
 	setScanIdentity(t, db, srOut, "Charlie; Delta")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
 		PathPrefix: "/music/artistA",
 	})
 	if err != nil {
@@ -463,7 +463,7 @@ func TestRepairDivergence_PathPrefixScopeDoesNotMatchSiblingPrefix(t *testing.T)
 	wqSibling := seedQueue(t, db, "CharlieDelta", "", "pending", srSibling)
 	setScanIdentity(t, db, srSibling, "Charlie; Delta")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
 		PathPrefix: "/a/b",
 	})
 	if err != nil {
@@ -504,7 +504,7 @@ func TestRepairDivergence_SharedRowAlbumArtistOnlyIsNoOp(t *testing.T) {
 		t.Fatalf("link srB: %v", err)
 	}
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestRepairDivergence_SharedRowAlbumArtistOnlyIsNoOp(t *testing.T) {
 	}
 
 	// Dry run agrees.
-	dry, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: true})
+	dry, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: true})
 	if err != nil {
 		t.Fatalf("dry-run RepairDivergence: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestRepairDivergence_SharedRowAlbumArtistOnlyIsNoOp(t *testing.T) {
 
 	// A second pass is still a no-op -- the pre-#967 bug re-selected such a row
 	// on every run.
-	res2, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res2, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("second RepairDivergence: %v", err)
 	}
@@ -548,7 +548,7 @@ func TestRepairDivergence_ArtistDisplayCaseOnlyIsNoOp(t *testing.T) {
 	sr := seedScan(t, db, lib, "/m/1.mp3", "alpha", "", "Song")
 	wq := seedQueue(t, db, "Alpha", "", "pending", sr)
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestRepairDivergence_LibraryScope(t *testing.T) {
 	setScanIdentity(t, db, sr1, "Alpha; Bravo")
 	setScanIdentity(t, db, sr2, "Charlie; Delta")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{LibraryID: &lib1})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{LibraryID: &lib1})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -623,7 +623,7 @@ func TestRepairDivergence_LibraryScopeSkipsRowWithOutOfScopeDivergentMember(t *t
 		t.Fatalf("correct srB: %v", err)
 	}
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{LibraryID: &lib1})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{LibraryID: &lib1})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestRepairDivergence_LibraryScopeSkipsRowWithOutOfScopeDivergentMember(t *t
 
 	// An unscoped pass over the same fixture repairs it normally: disagreement,
 	// both unlinked, row deleted once nothing correct remains linked.
-	all, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	all, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("unscoped RepairDivergence: %v", err)
 	}
@@ -682,7 +682,7 @@ func TestRepairDivergence_PathPrefixScopeSkipsRowWithOutOfScopeDivergentMember(t
 		t.Fatalf("correct srB: %v", err)
 	}
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
 		PathPrefix: "/music/artistA",
 	})
 	if err != nil {
@@ -710,7 +710,7 @@ func TestRepairDivergence_PathPrefixRootIncludesDescendants(t *testing.T) {
 	wq := seedQueue(t, db, "AlphaBravo", "", "pending", sr)
 	setScanIdentity(t, db, sr, "Alpha; Bravo")
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{
 		PathPrefix: "/",
 	})
 	if err != nil {

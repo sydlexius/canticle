@@ -22,7 +22,7 @@ func TestRun_MergeSkipsWhenARowIsManuallyMarked(t *testing.T) {
 			}
 		}
 		reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
-		res, err := New(db, reader.read).Run(context.Background(), Options{})
+		res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestRepairDivergence_DisagreementSkipsManuallyMarkedRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}

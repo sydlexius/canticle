@@ -109,7 +109,7 @@ func TestRun_ConcurrentWriterRetriedRowAppliesOnceWithOneRecord(t *testing.T) {
 
 	var records []Change
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(repairDB, reader.read).Run(ctx, Options{
+	res, err := newRepairer(repairDB, reader.read).Run(ctx, Options{
 		Report: func(ch Change) error { records = append(records, ch); return nil },
 	})
 	if cerr := <-released; cerr != nil {
