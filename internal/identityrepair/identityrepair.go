@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	dbpkg "github.com/sydlexius/canticle/internal/db"
@@ -188,6 +189,79 @@ func moveBlocks(ctx context.Context, tx *sql.Tx, m BlockMover, ch Change, titleK
 	return nil
 }
 
+// blocksLeft records a repair that left a queue identity's lyric blocks where
+// they were because the row has no single destination for them: its linked
+// members correct to different keys, or a member's correction is unknown. It
+// carries ids and counts only; the blocks are cleared with `scan unblock
+// --orphans`. A nil *blocksLeft is a no-op, so callers log unconditionally.
+type blocksLeft struct {
+	action      string // "delete" or "rekey": what happens to the row itself
+	workQueueID int64
+	members     int
+	keys        int
+}
+
+// log reports b. Callers invoke it only once the transaction that produced it
+// has committed (apply) or, on a dry run, as a plan, so the message never claims
+// an action a rollback undid or a dry run never took.
+func (b *blocksLeft) log(dryRun bool) {
+	if b == nil {
+		return
+	}
+	msg := "identityrepair: lyric blocks left under the old key as orphans (no single destination for the row)"
+	if dryRun {
+		msg = "identityrepair: lyric blocks would be left under the old key as orphans (no single destination for the row)"
+	}
+	slog.Info(msg, "row_action", b.action, "work_queue_id", b.workQueueID, "members", b.members, "distinct_keys", b.keys)
+}
+
+// membersAgree reports whether every scan_result linked to queue row wqID with
+// ch's title key corrects to ch.NewArtistKey, so the row's blocks have exactly
+// one destination. A member already at that key agrees; one still at the old key
+// is re-read from disk (Run corrects one scan at a time, so its siblings have not
+// been corrected yet); a member that is unreadable or corrects elsewhere does not
+// agree. It also returns the member and distinct-key counts for the log.
+func (r *Repairer) membersAgree(ctx context.Context, tx *sql.Tx, wqID int64, ch Change, titleKey string) (agree bool, members, distinct int, err error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT s.file_path, s.artist_key FROM work_queue_scan_results j
+		 JOIN scan_results s ON s.id = j.scan_result_id
+		 WHERE j.work_queue_id = ? AND s.title_key = ? AND s.id != ?`, wqID, titleKey, ch.ScanResultID)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("identityrepair: list members of work_queue %d: %w", wqID, err)
+	}
+	type member struct{ path, key string }
+	var siblings []member
+	for rows.Next() {
+		var m member
+		if err := rows.Scan(&m.path, &m.key); err != nil {
+			_ = rows.Close()
+			return false, 0, 0, fmt.Errorf("identityrepair: scan member of work_queue %d: %w", wqID, err)
+		}
+		siblings = append(siblings, m)
+	}
+	if err := rows.Close(); err != nil {
+		return false, 0, 0, fmt.Errorf("identityrepair: close members of work_queue %d: %w", wqID, err)
+	}
+	keys := map[string]bool{ch.NewArtistKey: true}
+	agree = true
+	for _, m := range siblings {
+		key := m.key
+		if key == ch.OldArtistKey && m.path != "" {
+			artist, _, rerr := r.read(m.path)
+			if rerr != nil {
+				agree = false
+				continue
+			}
+			key = normalize.NormalizeKey(artist)
+		}
+		keys[key] = true
+		if key != ch.NewArtistKey {
+			agree = false
+		}
+	}
+	return agree, len(siblings) + 1, len(keys), nil
+}
+
 // New builds a Repairer over db using read to re-derive identity from disk.
 func New(db *sql.DB, read IdentityReader) *Repairer {
 	return &Repairer{db: db, read: read}
@@ -288,6 +362,7 @@ func (r *Repairer) Run(ctx context.Context, opts Options) (Result, error) {
 			continue
 		}
 		res.Changed++
+		outcome.blocksLeft.log(false)
 		res.EditHeld += outcome.editHeld
 		res.QueueUpdated += outcome.queueUpdated
 		res.QueueMerged += outcome.queueMerged
@@ -329,9 +404,12 @@ func (r *Repairer) load(ctx context.Context, libraryID *int64) ([]row, error) {
 
 // applyOutcome reports what a single apply did to the coupled work_queue row.
 type applyOutcome struct {
-	queueUpdated   int
-	queueMerged    int
-	editHeld       int
+	queueUpdated int
+	queueMerged  int
+	editHeld     int
+	// blocksLeft is set when a re-key left the old identity's blocks in place;
+	// Run logs it after the commit.
+	blocksLeft     *blocksLeft
 	processingSkip bool
 	editSkip       bool
 }
@@ -384,10 +462,27 @@ func (r *Repairer) applyOnce(ctx context.Context, ch Change, titleKey string, re
 		return applyOutcome{}, fmt.Errorf("identityrepair: update scan_results %d: %w", ch.ScanResultID, err)
 	}
 
-	out, err := reconcileQueue(ctx, tx, r.blocks, ch, titleKey, lookup)
+	// Blocks follow a re-key or merge only when every linked member corrects to
+	// the same key; a split row leaves them at the old identity (as the
+	// divergence path does when it deletes a row).
+	moveOK := true
+	var held *blocksLeft
+	if lookup.oldID != 0 && ch.NewArtistKey != ch.OldArtistKey {
+		agree, members, distinct, err := r.membersAgree(ctx, tx, lookup.oldID, ch, titleKey)
+		if err != nil {
+			return applyOutcome{}, err
+		}
+		if !agree {
+			moveOK = false
+			held = &blocksLeft{action: "rekey", workQueueID: lookup.oldID, members: members, keys: distinct}
+		}
+	}
+
+	out, err := reconcileQueue(ctx, tx, r.blocks, moveOK, ch, titleKey, lookup)
 	if err != nil {
 		return applyOutcome{}, err
 	}
+	out.blocksLeft = held
 
 	// Write the restorable backup record (report) before committing, so a report
 	// failure aborts via the deferred rollback -- the correction is never applied
@@ -508,7 +603,7 @@ func probeQueueConflict(ctx context.Context, tx *sql.Tx, ch Change, titleKey str
 // repairOneDivergentRow, #963) owns the transaction lifecycle so a
 // scan_results write (when present) and the queue reconciliation commit or
 // roll back together.
-func reconcileQueue(ctx context.Context, tx *sql.Tx, blocks BlockMover, ch Change, titleKey string, lookup queueLookup) (applyOutcome, error) {
+func reconcileQueue(ctx context.Context, tx *sql.Tx, blocks BlockMover, moveOK bool, ch Change, titleKey string, lookup queueLookup) (applyOutcome, error) {
 	keyChanged := ch.NewArtistKey != ch.OldArtistKey
 	oldID, oldStatus := lookup.oldID, lookup.oldStatus
 	conflictID, conflictStatus := lookup.conflictID, lookup.conflictStatus
@@ -556,8 +651,10 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, blocks BlockMover, ch Chang
 			return applyOutcome{}, fmt.Errorf("identityrepair: re-key work_queue %d: %w", oldID, err)
 		}
 		out.queueUpdated = 1
-		if err := moveBlocks(ctx, tx, blocks, ch, titleKey); err != nil {
-			return applyOutcome{}, err
+		if moveOK {
+			if err := moveBlocks(ctx, tx, blocks, ch, titleKey); err != nil {
+				return applyOutcome{}, err
+			}
 		}
 		// Reopen a 'done' row so the worker re-fetches under the corrected
 		// identity (#960). queue.ReopenDoneRowTx is a no-op (and correctly so)
@@ -584,8 +681,10 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, blocks BlockMover, ch Chang
 		}
 		out.queueMerged = 1
 		// The dropped row's blocks follow it to the surviving identity.
-		if err := moveBlocks(ctx, tx, blocks, ch, titleKey); err != nil {
-			return applyOutcome{}, err
+		if moveOK {
+			if err := moveBlocks(ctx, tx, blocks, ch, titleKey); err != nil {
+				return applyOutcome{}, err
+			}
 		}
 	}
 	return out, nil

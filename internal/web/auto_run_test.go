@@ -687,3 +687,29 @@ func TestAutoRunRefusesBlockedBody(t *testing.T) {
 		t.Fatalf("start with a failing lookup = %d (lookups %d), want 202 after consulting it", rec.Code, failing.calls.Load())
 	}
 }
+
+// A block that lands after the run started still stops the accept: the accept
+// re-checks the on-disk body against the row's current identity, so the .lrc is
+// byte-for-byte unchanged and no .orig is made (#1399).
+func TestAutoAcceptRefusesBodyBlockedAfterStart(t *testing.T) {
+	fake := &runFake{}
+	e := newAutoEnv(t, fake)
+	store := lyricblock.NewStore(e.db, nil)
+	e.ui.AttachAutoBlocks(store)
+	if rec := e.start(t); rec.Code != http.StatusAccepted {
+		t.Fatalf("start on an unblocked body = %d %s, want 202", rec.Code, rec.Body)
+	}
+	e.waitState(t, autoDone)
+
+	e.blockRow(t, store, editLRC)
+	before := e.lrc(t)
+	if rec := e.accept("[1200,5400,9100]", e.mtime(t)); rec.Code != http.StatusNotFound {
+		t.Fatalf("accept of a body blocked after the start = %d %s, want 404", rec.Code, rec.Body)
+	}
+	if e.lrc(t) != before || e.hasOrig() {
+		t.Error("a refused accept changed the .lrc or made a .orig")
+	}
+	if got := e.mark(t); got != "null/0" {
+		t.Errorf("mark = %s after a refused accept, want the prior null/0", got)
+	}
+}

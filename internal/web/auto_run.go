@@ -354,8 +354,7 @@ func (u *UI) handleAutoStart(w http.ResponseWriter, r *http.Request) {
 	// A body an operator marked wrong is never re-timed: the refusal is the same
 	// bare 404 as the other refused files, which the player words as "no longer
 	// offered". The lookup fails open (the store logs it).
-	if u.autoBlocks != nil && u.autoBlocks.AnyBlocked(r.Context(), t.ArtistKey, t.TitleKey, []string{lyricblock.Fingerprint(body)}) {
-		slog.Warn("auto alignment refused: the on-disk lyrics are blocked", "id", id)
+	if u.autoBodyBlocked(r.Context(), id, t.ArtistKey, t.TitleKey, body) {
 		http.NotFound(w, r)
 		return
 	}
@@ -550,4 +549,17 @@ func autoSuggestionJSON(body map[string]any, s *aligner.Suggestion) {
 		MeanConfidence: q.MeanConfidence, Coverage: q.Coverage, Tokens: q.Tokens,
 		AlignedTokens: q.AlignedTokens, Merged: q.Merged}
 	body["warnings"] = q.Warnings()
+}
+
+// autoBodyBlocked reports whether body is a lyric an operator marked wrong for
+// the track identity (artistKey, titleKey), and logs the refusal by row id. The
+// run start and the accept both call it, so the two cannot drift; the accept
+// calls it again because a block can land after the start. The lookup fails open
+// (the store logs a failure) and a UI with no checker blocks nothing.
+func (u *UI) autoBodyBlocked(ctx context.Context, id int64, artistKey, titleKey, body string) bool {
+	if u.autoBlocks == nil || !u.autoBlocks.AnyBlocked(ctx, artistKey, titleKey, []string{lyricblock.Fingerprint(body)}) {
+		return false
+	}
+	slog.Warn("auto alignment refused: the on-disk lyrics are blocked", "id", id)
+	return true
 }

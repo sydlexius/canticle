@@ -1,10 +1,12 @@
 package identityrepair
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/lyricblock"
@@ -193,5 +195,73 @@ func TestRepairDivergence_DisagreementLeavesBlocksAsOrphans(t *testing.T) {
 	}
 	if blockCount(t, store, "AlphaBravo") != 1 {
 		t.Error("blocks of the deleted row were moved or lost; want them left as orphans")
+	}
+}
+
+// captureLogs routes slog.Default to a buffer for the test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// A shared row whose members correct to DIFFERENT keys has no single
+// destination: Run re-keys the row but leaves the old identity's blocks put,
+// and logs that once the commit landed.
+func TestRun_DivergentSharedRowKeepsBlocksAtOldIdentity(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	srA := seedScan(t, db, lib, "/m/1.mp3", "AB C", "", "Song")
+	srB := seedScan(t, db, lib, "/m/2.mp3", "AB C", "", "Song")
+	if _, err := db.Exec(`UPDATE scan_results SET artist_key = 'abc' WHERE id IN (?, ?)`, srA, srB); err != nil {
+		t.Fatalf("force shared key: %v", err)
+	}
+	wq := seedQueue(t, db, "AB C", "", "pending", srA)
+	if _, err := db.Exec(`UPDATE work_queue SET artist_key = 'abc' WHERE id = ?`, wq); err != nil {
+		t.Fatalf("force queue key: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wq, srB); err != nil {
+		t.Fatalf("link srB: %v", err)
+	}
+	store := lyricblock.NewStore(db, slog.Default())
+	addBlock(t, store, db, "abc", "fp1")
+	logs := captureLogs(t)
+
+	reader := fakeReader{"/m/1.mp3": {"A; BC", ""}, "/m/2.mp3": {"AB; C", ""}}
+	if _, err := New(db, reader.read).WithBlocks(store).Run(context.Background(), Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if blockCount(t, store, "A; BC") != 0 || blockCount(t, store, "AB; C") != 0 {
+		t.Error("blocks landed on a member's new key although the members split")
+	}
+	if blockCount(t, store, "abc") != 1 {
+		t.Error("blocks left the old identity")
+	}
+	if !strings.Contains(logs.String(), "left under the old key") {
+		t.Errorf("no left-in-place log after commit: %s", logs.String())
+	}
+}
+
+// A dry run deletes nothing, so it must not say it did.
+func TestRepairDivergence_DryRunLogsAPlanNotADeletion(t *testing.T) {
+	db := openDB(t)
+	lib := seedLibrary(t, db)
+	srA := seedScan(t, db, lib, "/m/1.mp3", "AlphaBravo", "", "Song")
+	srB := seedScan(t, db, lib, "/m/2.mp3", "AlphaBravo", "", "Song")
+	wq := seedQueue(t, db, "AlphaBravo", "", "pending", srA)
+	if _, err := db.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, wq, srB); err != nil {
+		t.Fatalf("link srB: %v", err)
+	}
+	setScanIdentity(t, db, srA, "Alpha; Bravo")
+	setScanIdentity(t, db, srB, "Charlie; Delta")
+	logs := captureLogs(t)
+	if _, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: true}); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if out := logs.String(); !strings.Contains(out, "would be left") || strings.Contains(out, "blocks left under") {
+		t.Errorf("dry-run log = %q; want a planned-action message only", out)
 	}
 }

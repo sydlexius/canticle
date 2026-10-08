@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -74,6 +73,9 @@ type divergenceOutcome struct {
 	processingSkip                     bool
 	scopeSkip                          bool
 	editSkip                           bool
+	// blocksLeft is set when the row's lyric blocks were left under the old
+	// identity; the caller logs it, after the commit (or as a plan on a dry run).
+	blocksLeft *blocksLeft
 }
 
 // RepairDivergence finds work_queue rows whose stored artist identity has
@@ -150,6 +152,7 @@ func (r *Repairer) RepairDivergence(ctx context.Context, opts Options) (Divergen
 		res.Unlinked += outcome.unlinked
 		res.Deleted += outcome.deleted
 		res.EditHeld += outcome.editHeld
+		outcome.blocksLeft.log(opts.DryRun)
 		if outcome.editSkip {
 			res.EditSkips++
 		}
@@ -448,7 +451,7 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 				}
 			}
 		} else {
-			qOut, err := reconcileQueue(ctx, tx, r.blocks, ch, wq.titleKey, lookup)
+			qOut, err := reconcileQueue(ctx, tx, r.blocks, true, ch, wq.titleKey, lookup)
 			if err != nil {
 				return divergenceOutcome{}, err
 			}
@@ -526,15 +529,9 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 					return divergenceOutcome{}, fmt.Errorf("identityrepair: delete orphaned divergent work_queue %d: %w", wq.id, err)
 				}
 				outcome.deleted = 1
-				// The dead row's lyric blocks (#1122) are NOT moved. Reaching this
-				// point means no member matched wq.artistKey and len(byKey) > 1, so
-				// the unlinked members carry at least two distinct corrected keys
-				// and there is no single destination (a single-key group takes the
-				// re-key path above). The blocks stay under the old key as orphans:
-				// `scan list-blocks` shows them and `scan unblock --orphans` clears
-				// them. The members re-enqueue under their own keys without them.
-				slog.Info("identityrepair: deleted divergent work_queue row; its lyric blocks stay under the old key as orphans",
-					"work_queue_id", wq.id, "unlinked_members", len(members), "distinct_keys", len(byKey))
+				// The dead row's lyric blocks (#1122) are NOT moved: no single
+				// destination exists (see blocksLeft). The caller logs it.
+				outcome.blocksLeft = &blocksLeft{action: "delete", workQueueID: wq.id, members: len(members), keys: len(byKey)}
 				changes = append(changes, Change{
 					Op:             OpQueueDelete,
 					WorkQueueID:    wq.id,
@@ -570,15 +567,9 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 			}
 			if !survives {
 				outcome.deleted = 1
-				// The dead row's lyric blocks (#1122) are NOT moved. Reaching this
-				// point means no member matched wq.artistKey and len(byKey) > 1, so
-				// the unlinked members carry at least two distinct corrected keys
-				// and there is no single destination (a single-key group takes the
-				// re-key path above). The blocks stay under the old key as orphans:
-				// `scan list-blocks` shows them and `scan unblock --orphans` clears
-				// them. The members re-enqueue under their own keys without them.
-				slog.Info("identityrepair: deleted divergent work_queue row; its lyric blocks stay under the old key as orphans",
-					"work_queue_id", wq.id, "unlinked_members", len(members), "distinct_keys", len(byKey))
+				// The dead row's lyric blocks (#1122) are NOT moved: no single
+				// destination exists (see blocksLeft). The caller logs it.
+				outcome.blocksLeft = &blocksLeft{action: "delete", workQueueID: wq.id, members: len(members), keys: len(byKey)}
 				changes = append(changes, Change{
 					Op:             OpQueueDelete,
 					WorkQueueID:    wq.id,

@@ -303,6 +303,18 @@ func (u *UI) handlePreviewEdit(w http.ResponseWriter, r *http.Request, revert, a
 		return
 	}
 
+	// A block can land after the Auto run started (a merge moved one onto this
+	// row, or one was added by hand), so the accept re-checks the file it is
+	// about to rewrite against the row's CURRENT identity, as the start did.
+	if accept {
+		if _, body, berr := lyrics.CurrentLRC(t.LRCPath, roots, time.Unix(0, mtime)); berr == nil &&
+			u.autoBodyBlocked(r.Context(), id, t2.ArtistKey, t2.TitleKey, body) {
+			restore()
+			http.NotFound(w, r)
+			return
+		}
+	}
+
 	var res lyrics.EditResult
 	var gen *lyrics.GeneratedEdit
 	badField := "words" // which accept field an ErrEditInvalid is about
