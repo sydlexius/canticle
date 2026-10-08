@@ -767,6 +767,32 @@ jq -r 'select(.op=="mark") | [.path, .content] | @tsv' backup.jsonl
 # for one record: printf '%s' "$CONTENT" | base64 -d > "$PATH_FROM_RECORD"
 ```
 
+### Mark a track's lyrics as wrong
+
+`scan mark-wrong` is for a track whose fetched lyrics are another song's words. It backs up the track's `.lrc` and `.txt` files, removes them, remembers those exact words as blocked so they are never accepted for this track again, and queues the track to be fetched again. `scan list-blocks` shows what is blocked. `scan unblock` lifts a block.
+
+```sh
+# Pick the track by work item id. Without --yes this only prints what would change.
+canticle scan mark-wrong --id 42
+canticle scan mark-wrong --id 42 --yes
+
+# Counts of blocks, by lane and by upstream. Add --tail for one line per block.
+canticle scan list-blocks
+
+# Lift one block by block id, or every block on a track by work item id.
+canticle scan unblock --id 7 --yes
+canticle scan unblock --work-item 42 --yes
+```
+
+Tracks are chosen by id only. The output is counts and outcome words; it never prints a library path, artist, title or lyric text. `--tail` is where detail appears: `mark-wrong --tail` prints each file backed up, and `list-blocks --tail` prints each block with its identity. The exit status is 1 if the track or block is not found, is being processed right now, has no lyric file on disk, is marked instrumental by hand, or is failed or unavailable (revive it first); nothing is changed in those cases.
+
+Before a real `mark-wrong` removes a file, it appends the file to a JSONL backup. The default is `<db-dir>/mark-wrong-backup-<timestamp>.jsonl`, or the file named by `--backup`, which has the same limits as `queue mark-instrumental --backup`. Each line has `op` (`mark-wrong`), `work_item_id`, `path`, `content` (the bytes, base64 encoded) and `meta`. `scan unblock` does not restore a lyric file; the next fetch decides what the track gets. To put a file back by hand:
+
+```sh
+jq -r 'select(.op=="mark-wrong") | [.path, .content] | @tsv' backup.jsonl
+# for one record: printf '%s' "$CONTENT" | base64 -d > "$PATH_FROM_RECORD"
+```
+
 ### Realign orphaned sidecars
 
 When an audio file is renamed but its `.lrc` / `.txt` lyric sidecar is not, the

@@ -129,29 +129,14 @@ func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args 
 		backupPath = filepath.Join(filepath.Dir(cfg.DB.Path),
 			fmt.Sprintf("instrumental-%s-backup-%s.jsonl", verb, time.Now().UTC().Format("20060102-150405")))
 	}
-	var backupFile *os.File
-	defer func() {
-		if backupFile != nil {
-			if cerr := backupFile.Close(); cerr != nil {
-				slog.Warn("failed to close instrumental backup file", "error", cerr)
-			}
-		}
-	}()
+	bk := &lazyBackupFile{path: backupPath, what: "instrumental backup"}
+	defer bk.close()
 	report := func(rec instrumentalmark.Record) error {
-		if backupFile == nil {
-			f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: G304 -- backupPath is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
-			if ferr != nil {
-				return fmt.Errorf("open instrumental backup: %w", ferr)
-			}
-			// O_CREATE's mode only applies to a new file; tighten an existing one before any write.
-			if cerr := f.Chmod(0o600); cerr != nil {
-				_ = f.Close()
-				return fmt.Errorf("tighten instrumental backup mode: %w", cerr)
-			}
-			backupFile = f
-			lyrics.FsyncDir(filepath.Dir(backupPath))
+		f, ferr := bk.file()
+		if ferr != nil {
+			return ferr
 		}
-		return instrumentalmark.AppendRecord(backupFile, rec)
+		return instrumentalmark.AppendRecord(f, rec)
 	}
 	opts := instrumentalmark.Options{DryRun: !args.Yes, Report: report}
 
@@ -187,7 +172,7 @@ func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args 
 
 	printInstrumentalSummary(out, unmark, args.Yes, c)
 	if args.Yes {
-		if backupFile != nil {
+		if bk.f != nil {
 			_, _ = fmt.Fprintf(out, "backup: %s\n", backupPath)
 		} else if c.failed > 0 {
 			_, _ = fmt.Fprintln(out, "backup: not written (see the errors above)")
@@ -201,6 +186,69 @@ func runQueueInstrumental(ctx context.Context, out io.Writer, unmark bool, args 
 		return 1
 	}
 	return 0
+}
+
+// lazyBackupFile opens a JSONL backup file (0600, append) on first use, so a run
+// that replaces nothing leaves no empty file behind.
+type lazyBackupFile struct {
+	path, what string
+	f          *os.File
+}
+
+func (b *lazyBackupFile) file() (*os.File, error) {
+	if b.f != nil {
+		return b.f, nil
+	}
+	f, err := openBackup(b.path)
+	if err != nil {
+		// The PathError text carries the path; surface only the cause.
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return nil, fmt.Errorf("open %s: %w", b.what, err)
+	}
+	if err := checkBackupHandle(f, b.path); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("open %s: %w", b.what, err)
+	}
+	// O_CREATE's mode only applies to a new file; tighten an existing one before any write.
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("tighten %s mode: %w", b.what, err)
+	}
+	b.f = f
+	lyrics.FsyncDir(filepath.Dir(b.path))
+	return f, nil
+}
+
+// openBackup is the open seam; tests swap in a follow-capable open to prove the
+// shared check below does not depend on O_NOFOLLOW.
+var openBackup = openBackupAppend
+
+var errBackupNotRegular = errors.New("not a regular file")
+
+// checkBackupHandle runs on every platform after the open: the path must Lstat
+// as a regular file (not a symlink) and be the very file the handle refers to.
+// The error carries no path.
+func checkBackupHandle(f *os.File, path string) error {
+	hfi, err := f.Stat()
+	if err != nil || !hfi.Mode().IsRegular() {
+		return errBackupNotRegular
+	}
+	lfi, err := os.Lstat(path)
+	if err != nil || !lfi.Mode().IsRegular() || !os.SameFile(hfi, lfi) {
+		return errBackupNotRegular
+	}
+	return nil
+}
+
+func (b *lazyBackupFile) close() {
+	if b.f != nil {
+		if err := b.f.Close(); err != nil {
+			slog.Warn("failed to close backup file", "what", b.what, "error", err)
+		}
+	}
 }
 
 // backupPathUnsafe reports whether a --backup path would be destroyed by the

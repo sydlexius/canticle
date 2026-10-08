@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -115,6 +116,11 @@ func TestScanSubcommandSelected(t *testing.T) {
 		{"reconcile-word-sync", ScanCmd{ReconcileWordSync: &ScanReconcileWordSyncCmd{}}},
 		{"reconcile-sync-tier", ScanCmd{ReconcileSyncTier: &ScanReconcileSyncTierCmd{}}},
 		{"reconcile-editor-tag", ScanCmd{ReconcileEditorTag: &ScanReconcileEditorTagCmd{}}},
+		{"reconcile-upstream", ScanCmd{ReconcileUpstream: &ScanReconcileUpstreamCmd{}}},
+		{"reconcile-remediated", ScanCmd{ReconcileRemediated: &ScanReconcileRemediatedCmd{}}},
+		{"mark-wrong", ScanCmd{MarkWrong: &ScanMarkWrongCmd{}}},
+		{"list-blocks", ScanCmd{ListBlocks: &ScanListBlocksCmd{}}},
+		{"unblock", ScanCmd{Unblock: &ScanUnblockCmd{}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,6 +128,23 @@ func TestScanSubcommandSelected(t *testing.T) {
 				t.Errorf("%s not detected as a subcommand; --unsynced-before would be silently ignored", tc.name)
 			}
 		})
+	}
+}
+
+// TestScanSubcommandSelectedCoversEveryField fails when a ScanCmd subcommand
+// field is missing from scanSubcommandSelected, so the next one cannot slip by.
+func TestScanSubcommandSelectedCoversEveryField(t *testing.T) {
+	st := reflect.TypeOf(ScanCmd{})
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		if subcommandName(f.Tag.Get("arg")) == "" {
+			continue
+		}
+		var args ScanCmd
+		reflect.ValueOf(&args).Elem().Field(i).Set(reflect.New(f.Type.Elem()))
+		if !scanSubcommandSelected(args) {
+			t.Errorf("ScanCmd.%s is missing from scanSubcommandSelected", f.Name)
+		}
 	}
 }
 
