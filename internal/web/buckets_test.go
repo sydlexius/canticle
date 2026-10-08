@@ -113,6 +113,16 @@ func templAttr(s string) string {
 // chart-init.js: bare identifiers or single/double-quoted strings.
 func queueColorKeys(t *testing.T) map[string]bool {
 	t.Helper()
+	keys := map[string]bool{}
+	for label := range queueColorVars(t) {
+		keys[label] = true
+	}
+	return keys
+}
+
+// queueColorVars maps each CAT_VARS label to its CSS token.
+func queueColorVars(t *testing.T) map[string]string {
+	t.Helper()
 	src, err := fs.ReadFile(static.FS, "js/chart-init.js")
 	if err != nil {
 		t.Fatalf("read chart-init.js: %v", err)
@@ -121,10 +131,10 @@ func queueColorKeys(t *testing.T) map[string]bool {
 	if block == nil {
 		t.Fatal("chart-init.js: CAT_VARS object literal not found")
 	}
-	entry := regexp.MustCompile(`(?m)^\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_$][\w$]*))\s*:\s*'--[\w-]+'`)
-	keys := map[string]bool{}
+	entry := regexp.MustCompile(`(?m)^\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_$][\w$]*))\s*:\s*'(--[\w-]+)'`)
+	keys := map[string]string{}
 	for _, m := range entry.FindAllSubmatch(block[1], -1) {
-		keys[string(m[1])+string(m[2])+string(m[3])] = true
+		keys[string(m[1])+string(m[2])+string(m[3])] = string(m[4])
 	}
 	if len(keys) == 0 {
 		t.Fatal("chart-init.js: CAT_VARS parsed to no entries")
@@ -152,6 +162,15 @@ func TestResultBucketsHaveChartColors(t *testing.T) {
 		if !keys[b.Label] {
 			t.Errorf("result label %q has no CAT_VARS entry in chart-init.js", b.Label)
 		}
+	}
+	// The labels share one doughnut, so two slices on one token read as one.
+	vars, seen := queueColorVars(t), map[string]string{}
+	for _, b := range resultBuckets {
+		tok := vars[b.Label]
+		if other, dup := seen[tok]; dup {
+			t.Errorf("result labels %q and %q share chart token %s", other, b.Label, tok)
+		}
+		seen[tok] = b.Label
 	}
 }
 

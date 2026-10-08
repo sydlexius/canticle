@@ -71,8 +71,8 @@ func TestSourcePages(t *testing.T) {
 		for _, want := range []string{
 			`href="/queue/finished?lane=musixmatch&amp;word=1"`,
 			`href="/queue/settled?lane=musixmatch&amp;tier=line"`,
-			`data-chart-labels="[&#34;Word-synced&#34;,&#34;Line-synced&#34;,&#34;Unsynced&#34;,&#34;Instrumental&#34;,&#34;Tier unknown&#34;,&#34;Other&#34;]"`,
-			`data-chart-values="[2,1,1,0,0,0]"`,
+			`data-chart-labels="[&#34;Word-synced&#34;,&#34;Line-synced&#34;,&#34;Unsynced&#34;,&#34;Instrumental&#34;,&#34;Blocked&#34;,&#34;Tier unknown&#34;,&#34;Other&#34;]"`,
+			`data-chart-values="[2,1,1,0,0,0,0]"`,
 			`<div class="mx-dash-tiles" role="list">`,
 			`<span class="mx-dash-tile-label">Word-synced</span>`,
 			`<span class="mx-dash-tile-value">2</span>`,
@@ -81,6 +81,9 @@ func TestSourcePages(t *testing.T) {
 			if !strings.Contains(body, want) {
 				t.Errorf("missing %q", want)
 			}
+		}
+		if strings.Contains(body, "/queue/blocked") {
+			t.Error("the Blocked tile must not link on a per-source page: a blocked row keeps no lane")
 		}
 		if strings.Contains(body, "<table") {
 			t.Error("the result-type block has tiles, not a table")

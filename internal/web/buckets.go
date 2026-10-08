@@ -71,8 +71,8 @@ var queueBuckets = []queueBucket{
 	{
 		Key:         reports.BucketSettled,
 		Label:       "Settled (upgradable)",
-		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, detected or provider-flagged instrumental, or tier not yet recorded). Not finished: a later run may still improve them. Hand-marked instrumentals are not here.",
-		LineTooltip: "Completed tracks below line sync (unsynced, detected or provider-flagged instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync. Hand-marked instrumentals are not here.",
+		Tooltip:     "Completed tracks at their current best result (line-synced, unsynced, detected or provider-flagged instrumental, or tier not yet recorded). Not finished: a later run may still improve them. Hand-marked instrumentals are not here. Also holds tracks whose every result you blocked: nothing is on disk, and they wait until you unblock them.",
+		LineTooltip: "Completed tracks below line sync (unsynced, detected or provider-flagged instrumental, or tier not yet recorded). No word-synced tier is available here, so they could still be upgraded to line sync. Hand-marked instrumentals are not here. Also holds tracks whose every result you blocked: nothing is on disk, and they wait until you unblock them.",
 		Value:       func(s reports.QueueSummary) int64 { return s.SettledUpgradable },
 	},
 	{
@@ -180,6 +180,18 @@ var resultBuckets = []resultBucket{
 		Label:   "Instrumental",
 		Tooltip: "Tracks marked instrumental (no lyrics expected): by audio detection, a provider's own flag, or by hand.",
 		Value:   func(b reports.ResultsBreakdown) int64 { return b.Instrumental },
+	},
+	{
+		Label:   "Blocked",
+		Tooltip: "Tracks where every lyric result found was one you marked wrong, so nothing is on disk. Not a miss: the lookup found lyrics, they were refused.",
+		Value:   func(b reports.ResultsBreakdown) int64 { return b.Blocked },
+		// A blocked row keeps no lane, so a per-source link would list nothing.
+		Href: func(_ reports.TopRung, lane string) string {
+			if lane != "" {
+				return ""
+			}
+			return resultsHref(reports.BucketBlocked, queueViewState{})
+		},
 	},
 	{
 		Label:   "Tier unknown",

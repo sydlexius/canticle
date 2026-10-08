@@ -201,7 +201,7 @@ func fillTrend(v *templates.TrendView, tr reports.SourceTrend) {
 // typeCellsFor lists counts in resultBuckets order (the Results tiles' labels).
 func typeCellsFor(c reports.TypeCounts, top reports.TopRung) (labels []string, vals []int64) {
 	rb := reports.ResultsBreakdown{WordSynced: c.WordSynced, LineSynced: c.LineSynced, Unsynced: c.Unsynced,
-		Instrumental: c.Instrumental, SyncedTierUnknown: c.TierUnknown, Other: c.Other, TopRung: top}
+		Instrumental: c.Instrumental, SyncedTierUnknown: c.TierUnknown, Blocked: c.Blocked, Other: c.Other, TopRung: top}
 	for _, b := range resultBuckets {
 		labels = append(labels, b.Label)
 		vals = append(vals, b.Value(rb))
