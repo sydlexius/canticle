@@ -96,7 +96,7 @@ func TestDBQueue_ReleaseUntil_EachPriorStatus(t *testing.T) {
 		prev      string
 		lastError string
 	}{
-		{name: "pending", prev: StatusPending, lastError: ""},
+		{name: "pending", prev: StatusPending, lastError: "earlier failure"},
 		{name: "deferred", prev: StatusDeferred, lastError: "no lyrics found"},
 		{name: "failed", prev: StatusFailed, lastError: "boom"},
 	}

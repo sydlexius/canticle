@@ -234,3 +234,16 @@ func TestContainingRoot(t *testing.T) {
 		}
 	}
 }
+
+// The innermost root is judged on the cleaned spelling: redundant separators on
+// an outer root must not make it look longer than a nested root (#1430).
+func TestContainingRoot_RedundantSeparators(t *testing.T) {
+	roots := []string{"/music////////", "/music/sub"}
+	got, ok := ContainingRoot(roots, "/music/sub/song.flac")
+	if !ok || got != "/music/sub" {
+		t.Errorf("ContainingRoot = %q,%v; want the nested /music/sub", got, ok)
+	}
+	if got, ok := ContainingRoot(roots, "/music/other.flac"); !ok || got != "/music////////" {
+		t.Errorf("outer-only path = %q,%v; want the outer root as spelled", got, ok)
+	}
+}

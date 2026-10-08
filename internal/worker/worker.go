@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -300,6 +301,9 @@ type Worker struct {
 	rootCache             map[string]rootAnswer
 	rootList              []string // cached library roots; nil until loaded
 	rootListAt            time.Time
+	rootAlias             map[string]string // configured root -> last successfully resolved spelling
+	rootSpellings         []string          // configured roots plus their aliases, for matching
+	spellingOwner         map[string]string // alias -> the configured root it stands for
 	offlineNotes          map[string]*offlineNote
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
@@ -2788,7 +2792,36 @@ func (w *Worker) libraryRoots(ctx context.Context) ([]string, error) {
 		roots = []string{} // cache an empty list too: non-nil marks it loaded
 	}
 	w.rootList, w.rootListAt = roots, now
+	w.refreshRootAliases(roots)
 	return roots, nil
+}
+
+// refreshRootAliases remembers, per configured root, the symlink-resolved
+// spelling from the last time it resolved. Webhook rows carry the resolved path
+// (pathutil.ResolveWithinRoot via server.confinedPayloadPath) while the roots
+// are the configured spelling, so a row must match under either. A resolve that
+// fails keeps the previous alias, since the target is missing exactly when the
+// mount is offline. A root that has never resolved has no alias, so a row with
+// the resolved spelling goes unguarded until one resolve succeeds (the symlink
+// is local, so that happens whenever the mountpoint directory exists). Only the
+// root's own symlink is followed: no walk, no log line.
+func (w *Worker) refreshRootAliases(roots []string) {
+	if w.rootAlias == nil {
+		w.rootAlias = map[string]string{}
+	}
+	spellings := make([]string, 0, 2*len(roots))
+	owner := map[string]string{}
+	for _, r := range roots {
+		spellings = append(spellings, r)
+		if resolved, err := filepath.EvalSymlinks(filepath.Clean(r)); err == nil {
+			w.rootAlias[r] = resolved
+		}
+		if alias := w.rootAlias[r]; alias != "" && alias != filepath.Clean(r) {
+			spellings = append(spellings, alias)
+			owner[alias] = r
+		}
+	}
+	w.rootSpellings, w.spellingOwner = spellings, owner
 }
 
 // rootIsOnline answers for ONE library root, caching the answer for rootOnlineTTL.
@@ -2835,14 +2868,16 @@ func (w *Worker) parkIfLibraryOffline(ctx context.Context, item queue.WorkItem) 
 	if w.healer == nil || item.Inputs.SourcePath == "" {
 		return false, nil
 	}
-	roots, err := w.libraryRoots(ctx)
-	if err != nil {
+	if _, err := w.libraryRoots(ctx); err != nil {
 		slog.Warn("worker: library root lookup failed; proceeding", "id", item.ID, "error", err)
 		return false, nil
 	}
-	root, ok := pathutil.ContainingRoot(roots, item.Inputs.SourcePath)
+	root, ok := pathutil.ContainingRoot(w.rootSpellings, item.Inputs.SourcePath)
 	if !ok {
 		return false, nil
+	}
+	if configured, isAlias := w.spellingOwner[root]; isAlias {
+		root = configured // the probe, its cache and the log note use the configured root
 	}
 	if w.rootIsOnline(root) {
 		delete(w.offlineNotes, root) // back online: the next outage logs at once

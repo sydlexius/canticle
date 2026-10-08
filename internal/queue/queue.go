@@ -1216,9 +1216,10 @@ func (q *DBQueue) Release(ctx context.Context, id int64) error {
 }
 
 // ReleaseUntil is Release plus a wait: the processing row returns to its prior
-// status exactly as Release does, but with next_attempt_at set retryAfter from
-// now, so it leaves the ready set until then instead of being re-claimed at
-// once. No attempt, miss or refused-wait is charged and priority is untouched
+// status (an empty prev_status falls back to 'pending'), with next_attempt_at
+// set retryAfter from now, so it leaves the ready set until then instead of
+// being re-claimed at once. Unlike Release it leaves last_error alone: parking
+// clears no cause, the row was never attempted. No attempt, miss or refused-wait is charged and priority is untouched
 // (#1430: a row whose library root is unmounted is not the row's failure, and
 // no existing parking method is free of a charge). A row not in 'processing'
 // is an error, as with Release.
@@ -1229,15 +1230,9 @@ func (q *DBQueue) ReleaseUntil(ctx context.Context, id int64, retryAfter time.Du
                  WHEN prev_status = '' THEN 'pending'
                  ELSE prev_status
              END,
-             last_error = CASE
-                 WHEN prev_status IN ('', 'pending') AND last_error <> '' THEN ?
-                 WHEN prev_status IN ('', 'pending') THEN ''
-                 ELSE last_error
-             END,
              next_attempt_at = ?
          WHERE id = ?
            AND status = 'processing'`,
-		releaseCauseClearedError,
 		formatTime(q.now().Add(retryAfter)),
 		id,
 	)
