@@ -1,4 +1,4 @@
-package commands
+package lyrics
 
 import (
 	"os"
@@ -26,10 +26,10 @@ func TestLazyBackupFileRefusesSymlinkWithFollowingOpen(t *testing.T) {
 	}
 	t.Cleanup(func() { openBackup = orig })
 
-	b := &lazyBackupFile{path: link, what: "backup"}
-	f, err := b.file()
+	b := &LazyBackupFile{Path: link, What: "backup"}
+	f, err := b.File()
 	if err == nil {
-		b.close()
+		b.Close()
 		t.Fatal("file() accepted a symlinked backup path")
 	}
 	if f != nil || b.f != nil {

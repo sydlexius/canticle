@@ -169,10 +169,10 @@ func TestScanMarkWrongRefusals(t *testing.T) {
 // when it wraps a refusal sentinel (the reopen step can wrap ErrBusy).
 func TestScanMarkWrongRefusalMappingNeedsAZeroResult(t *testing.T) {
 	err := fmt.Errorf("files removed but row not reopened: %w", lyricblock.ErrBusy)
-	if w := markWrongRefusal(err, lyricblock.MarkResult{}); w != "in flight" {
+	if w := lyricblock.Refusal(err, lyricblock.MarkResult{}); w != "in flight" {
 		t.Errorf("zero result = %q, want in flight", w)
 	}
-	if w := markWrongRefusal(err, lyricblock.MarkResult{Files: 1, Removed: 1}); w != "" {
+	if w := lyricblock.Refusal(err, lyricblock.MarkResult{Files: 1, Removed: 1}); w != "" {
 		t.Errorf("non-zero result = %q, want no refusal", w)
 	}
 }
