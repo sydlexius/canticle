@@ -213,3 +213,37 @@ func TestCanonicalPathDegradesOnNonexistent(t *testing.T) {
 		t.Errorf("CanonicalPath for a nonexistent path = %q; want the absolute-but-unresolved fallback %q", got, want)
 	}
 }
+
+func TestContainingRoot(t *testing.T) {
+	roots := []string{"/music", "/music/sub", "/other"}
+	cases := []struct {
+		p    string
+		want string
+		ok   bool
+	}{
+		{"/music/a/b.flac", "/music", true},
+		{"/music/sub/a.flac", "/music/sub", true}, // the longest (innermost) wins
+		{"/music/sub", "/music/sub", true},        // a path equal to a root
+		{"/musicother/x", "", false},              // prefix text, not containment
+		{"/elsewhere/x", "", false},
+	}
+	for _, c := range cases {
+		got, ok := ContainingRoot(roots, c.p)
+		if got != c.want || ok != c.ok {
+			t.Errorf("ContainingRoot(%q) = %q,%v; want %q,%v", c.p, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// The innermost root is judged on the cleaned spelling: redundant separators on
+// an outer root must not make it look longer than a nested root (#1430).
+func TestContainingRoot_RedundantSeparators(t *testing.T) {
+	roots := []string{"/music////////", "/music/sub"}
+	got, ok := ContainingRoot(roots, "/music/sub/song.flac")
+	if !ok || got != "/music/sub" {
+		t.Errorf("ContainingRoot = %q,%v; want the nested /music/sub", got, ok)
+	}
+	if got, ok := ContainingRoot(roots, "/music/other.flac"); !ok || got != "/music////////" {
+		t.Errorf("outer-only path = %q,%v; want the outer root as spelled", got, ok)
+	}
+}

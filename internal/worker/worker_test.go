@@ -277,6 +277,10 @@ func (q *fakeQueue) Release(_ context.Context, id int64) error {
 	return nil
 }
 
+func (q *fakeQueue) ReleaseUntil(ctx context.Context, id int64, _ time.Duration) error {
+	return q.Release(ctx, id)
+}
+
 func (q *fakeQueue) RetireMiss(_ context.Context, id int64) (queue.WorkItem, error) {
 	if q.retireErr != nil {
 		return queue.WorkItem{}, q.retireErr
@@ -522,6 +526,8 @@ type fakeFetcher struct {
 	song  models.Song
 	err   error
 	calls int
+	// onCall, when set, runs at the start of every FindLyrics.
+	onCall func()
 	// tracks records each track handed to the provider, so a test can assert the
 	// recording disambiguators actually reached the query (#584).
 	tracks []models.Track
@@ -529,6 +535,9 @@ type fakeFetcher struct {
 
 func (f *fakeFetcher) FindLyrics(_ context.Context, t models.Track) (models.Song, error) {
 	f.calls++
+	if f.onCall != nil {
+		f.onCall()
+	}
 	f.tracks = append(f.tracks, t)
 	if f.err != nil {
 		return models.Song{}, f.err
