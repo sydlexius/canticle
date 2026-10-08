@@ -103,11 +103,9 @@ const repairHealthyFilter = `NOT (CASE WHEN json_valid(output_paths) THEN
 // differs from {outdir, filename}, its directory does not exist
 // (fs.ErrNotExist), and the row's own outdir does exist. That entry is
 // rewritten to {outdir, filename}. The relink keeps the row's fields in step,
-// so relinkShape must also hold. Everything else is counted and left alone.
-//
-// Known limitation: the row's outdir is not checked against a configured
-// library root, so a row left on a since-removed library whose directory still
-// exists is repaired to point there.
+// so relinkShape must also hold, and the entry must lie under the same
+// configured library root as the row's source (#1430). Everything else is
+// counted and left alone.
 //
 // Each repair is its own transaction: a compare-and-set UPDATE (status plus the
 // output_paths/outdir/filename values read at gather), then Report, then
@@ -142,6 +140,11 @@ func (p *Pruner) RepairOutputPaths(ctx context.Context, opts RepairOptions) (Rep
 		return RepairResult{}, fmt.Errorf("prune: gather output_paths repair candidates: %w", err)
 	}
 
+	libRoots, err := p.LibraryRoots(ctx)
+	if err != nil {
+		return RepairResult{}, err
+	}
+	roots := newRootSet(libRoots)
 	var res RepairResult
 	for _, c := range candidates {
 		var paths []models.OutputPath
@@ -149,30 +152,27 @@ func (p *Pruner) RepairOutputPaths(ctx context.Context, opts RepairOptions) (Rep
 			res.SkippedMalformed++
 			continue
 		}
-		if len(paths) > 1 {
+		var fixed []models.OutputPath
+		switch {
+		case len(paths) == 0:
+			continue
+		case len(paths) > 1:
 			res.SkippedAmbiguous++
 			continue
+		default:
+			newEntry, v := classifyEntry(roots, c.outdir, c.filename, c.sourcePath, paths[0])
+			switch v {
+			case verdictShape, verdictNoTarget, verdictForeignRoot:
+				res.SkippedUnfixable++
+				continue
+			case verdictStatError:
+				res.SkippedStatError++
+				continue
+			case verdictPresent:
+				continue // the entry's path exists (dir or not); not the #921 shape
+			}
+			fixed = []models.OutputPath{newEntry}
 		}
-		if len(paths) == 0 {
-			continue
-		}
-		if !relinkShape(c.outdir, c.filename, c.sourcePath, paths[0]) {
-			res.SkippedUnfixable++
-			continue
-		}
-		newEntry := models.OutputPath{Outdir: c.outdir, Filename: c.filename}
-		entryState, rowState := statDir(paths[0].Outdir), statDir(c.outdir)
-		switch {
-		case entryState == dirStatError || rowState == dirStatError:
-			res.SkippedStatError++
-			continue
-		case entryState != dirMissing:
-			continue // the entry's path exists (dir or not); not the #921 shape
-		case rowState != dirPresent:
-			res.SkippedUnfixable++
-			continue
-		}
-		fixed := []models.OutputPath{newEntry}
 		row := RepairedRow{WorkItemID: c.id, OldOutputPaths: paths, NewOutputPaths: fixed}
 		if opts.DryRun {
 			res.Repaired = append(res.Repaired, row)
@@ -298,4 +298,90 @@ func statDir(path string) dirState {
 	default:
 		return dirStatError
 	}
+}
+
+// entryVerdict is classifyEntry's answer for one output_paths entry.
+type entryVerdict int
+
+const (
+	verdictShape       entryVerdict = iota // outside the relink shape (relinkShape)
+	verdictStatError                       // a stat failed with something other than not-exist
+	verdictPresent                         // the entry's path exists; nothing to repair
+	verdictNoTarget                        // stale, but the row's own outdir is not a directory
+	verdictForeignRoot                     // the entry is not under the library root holding the row's source
+	verdictRepair                          // stale and the row's {outdir, filename} is the fix
+)
+
+// classifyEntry is the one place that decides whether a stale output_paths
+// entry can be corrected to the row's own {outdir, filename}: shared by
+// RepairOutputPaths and the worker's heal (#1430) so the two cannot disagree.
+//
+// roots are the configured library roots. The entry must lie under the SAME root
+// as the row's source: a relink moves a file within its library, so an entry in
+// another library is a second copy there, never this row's stale path.
+func classifyEntry(roots rootSet, outdir, filename, sourcePath string, e models.OutputPath) (models.OutputPath, entryVerdict) {
+	if !relinkShape(outdir, filename, sourcePath, e) {
+		return models.OutputPath{}, verdictShape
+	}
+	// Either spelling of a root counts (rootSet), the entry's and the source's
+	// alike, so a symlink-resolved webhook path under a symlinked root is not
+	// mistaken for a foreign one.
+	srcRoot, ok := roots.rootOf(sourcePath)
+	if entryRoot, entryOK := roots.rootOf(e.Outdir); !ok || !entryOK || srcRoot != entryRoot {
+		return models.OutputPath{}, verdictForeignRoot
+	}
+	// The correction is only proven while the row's source audio is present
+	// (#1430): a gone or unreadable source is prune's to relink, not a heal's.
+	if _, err := os.Stat(sourcePath); err != nil {
+		return models.OutputPath{}, verdictNoTarget
+	}
+	entryState, rowState := statDir(e.Outdir), statDir(outdir)
+	switch {
+	case entryState == dirStatError || rowState == dirStatError:
+		return models.OutputPath{}, verdictStatError
+	case entryState != dirMissing:
+		return models.OutputPath{}, verdictPresent
+	case rowState != dirPresent:
+		return models.OutputPath{}, verdictNoTarget
+	}
+	return models.OutputPath{Outdir: outdir, Filename: filename}, verdictRepair
+}
+
+// HealOutputPaths rewrites the row's output_paths when it is the #921 relink
+// shape: exactly ONE entry, its directory missing, the source audio present, and
+// the row's own {outdir, filename} directory present. It returns the new list
+// and healed=true only when the compare-and-set landed. Anything else, a
+// multi-entry row included, changes nothing: the unattended caller never removes
+// an entry (#1430); that is the attended, backup-first reconcile's job.
+func (p *Pruner) HealOutputPaths(ctx context.Context, id int64, sourcePath, outdir, filename string, paths []models.OutputPath) (_ []models.OutputPath, healed bool, _ error) {
+	if len(paths) != 1 {
+		return paths, false, nil
+	}
+	libRoots, err := p.LibraryRoots(ctx)
+	if err != nil {
+		return paths, false, err
+	}
+	fixed, v := classifyEntry(newRootSet(libRoots), outdir, filename, sourcePath, paths[0])
+	if v != verdictRepair {
+		return paths, false, nil
+	}
+	oldJSON, err := json.Marshal(paths)
+	if err != nil {
+		return paths, false, fmt.Errorf("prune: marshal output_paths for work_queue %d: %w", id, err)
+	}
+	next := []models.OutputPath{fixed}
+	newJSON, err := json.Marshal(next)
+	if err != nil {
+		return paths, false, fmt.Errorf("prune: marshal healed output_paths for work_queue %d: %w", id, err)
+	}
+	res, err := p.db.ExecContext(ctx,
+		`UPDATE work_queue SET output_paths = ? WHERE id = ? AND status = 'processing' AND output_paths = ?`,
+		string(newJSON), id, string(oldJSON))
+	if err != nil {
+		return paths, false, fmt.Errorf("prune: heal output_paths for work_queue %d: %w", id, err)
+	}
+	if rowsAffected(res) == 0 {
+		return paths, false, nil
+	}
+	return next, true, nil
 }

@@ -120,6 +120,15 @@ func TestRepairOutputPaths_LeavesNonMatchingRowsAlone(t *testing.T) {
 				return setPaths(mustJSON([]models.OutputPath{{Outdir: newDir, Filename: "01.flac"},
 					{Outdir: filepath.Join(root, "x", "Old"), Filename: "01.flac"}}))
 			}},
+		// F2: an entry under ANOTHER library root is that library's second copy,
+		// never this row's stale path (#1430).
+		{name: "other-library-entry", status: "failed", count: unfixable,
+			setup: func(root, _ string) setupFn {
+				return func(t *testing.T, ctx context.Context, sqlDB *sql.DB, id int64, _, _ string) {
+					b := addLibraryB(t, ctx, sqlDB, root)
+					setPaths(mustJSON([]models.OutputPath{{Outdir: filepath.Join(b, "x", "Old"), Filename: "01.flac"}}))(t, ctx, sqlDB, id, "", "")
+				}
+			}},
 		{name: "malformed", status: "failed", count: func(r RepairResult) int { return r.SkippedMalformed },
 			setup: func(string, string) setupFn { return setPaths("not json") }},
 		{name: "unfixable", status: "failed", count: func(r RepairResult) int { return r.SkippedUnfixable },

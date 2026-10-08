@@ -827,6 +827,11 @@ func companionOwnershipOfErr(path string) (companionOwnership, error) {
 	return companionForeign, nil
 }
 
+// ErrOutputDirMissing is the refusal for an output directory that does not
+// exist (#1430). A sentinel so the worker can tell a destination that is gone
+// from every other write failure; the text is unchanged for existing log greps.
+var ErrOutputDirMissing = errors.New("refusing to write: output dir does not exist")
+
 // resolveOutdir re-resolves and re-confines outdir when it falls under a
 // confinement root, so a symlink swapped in since the caller validated the path
 // cannot redirect the write outside the root. Outside every root it returns
@@ -844,7 +849,7 @@ func (w *LRCWriter) resolveOutdir(outdir string) (string, error) {
 		// error, not a confinement violation. (No MkdirAll here -- behavior is
 		// unchanged; os.CreateTemp already requires the dir to exist.)
 		if _, statErr := os.Stat(outdir); os.IsNotExist(statErr) {
-			return "", errors.New("refusing to write: output dir does not exist")
+			return "", ErrOutputDirMissing
 		}
 		return "", errors.New("refusing to write: output dir escapes the confinement root or is unresolvable")
 	}
