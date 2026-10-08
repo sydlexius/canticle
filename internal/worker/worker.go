@@ -966,9 +966,6 @@ func (w *Worker) SetBlockChecker(c lyrics.BlockChecker) {
 	_ = w.rebuildOrchestrator()
 }
 
-// BlockChecker returns the installed lyric-block check, nil when none (#1394).
-func (w *Worker) BlockChecker() lyrics.BlockChecker { return w.blocks }
-
 // EnableGuard configures the language/script guard used to reject lyric
 // results whose script mix falls outside the configured allowlist.
 func (w *Worker) EnableGuard(g ScriptGuard) {

@@ -313,3 +313,21 @@ func TestBlocked_WordRecheck_KeepsSettledLRC(t *testing.T) {
 		t.Fatalf("word_timing_state = %q; want the row still queued after a refused write", row.state)
 	}
 }
+
+// The writer backstop's block during a recheck is classified as the all-blocked
+// dispatch is: it must not feed the failure backoff as a transport failure.
+func TestBlocked_WordRecheck_WriterBlockDoesNotFeedFailureCounter(t *testing.T) {
+	song := recheckSong("word line", true, models.WordAnswerServed)
+	rig, w := newRecheckRig(t, &fakeFetcher{song: song}, nil, false)
+	w.writer.(*lyrics.LRCWriter).SetBlockChecker(blockBody(t, rig.db, "Synthetic Artist", "Synthetic Title", song))
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if w.consecutiveFailures != 0 {
+		t.Fatalf("consecutiveFailures = %d; a writer-backstop block in a recheck is not a transport failure", w.consecutiveFailures)
+	}
+	rig.assertUntouched(t)
+	if row := rig.recheckRow(t); row.state != "queued" {
+		t.Fatalf("word_timing_state = %q; want queued", row.state)
+	}
+}

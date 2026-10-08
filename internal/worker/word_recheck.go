@@ -215,6 +215,13 @@ func (w *Worker) writeWordRecheck(ctx context.Context, item queue.WorkItem, trac
 	song.IdentityArtistKey, song.IdentityTitleKey = queue.IdentityKeys(item.Inputs.Track)
 	for _, p := range outputPaths(item.Inputs) {
 		if err := w.writer.WriteLRC(song, p.Filename, p.Outdir); err != nil {
+			if errors.Is(err, lyrics.ErrBlocked) {
+				// The backstop caught a block marked mid-pass: classify as the
+				// all-blocked dispatch (a benign miss), not a transport failure,
+				// as the ordinary write path does (#1394).
+				slog.Info("worker: word recheck write refused, result is blocked", "id", item.ID)
+				return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d: %w", item.ID, orchestrator.ErrAllResultsBlocked))
+			}
 			return w.deferWordRecheck(ctx, item, fmt.Errorf("worker: write item %d output: %w", item.ID, scrubWritePaths(err)))
 		}
 	}
