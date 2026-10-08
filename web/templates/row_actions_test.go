@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/a-h/templ"
 )
 
 func renderCell(t *testing.T, a RowActions) string {
@@ -133,5 +135,25 @@ func TestMarkConfirmPage(t *testing.T) {
 	_ = MarkConfirmPage("v", v, nil, false, false).Render(context.Background(), &b)
 	if strings.Contains(b.String(), `name="csrf_token"`) || !strings.Contains(b.String(), "refused") {
 		t.Error("alert page must have no form")
+	}
+}
+
+func TestRowActionsCellWrapKeepsChildrenOnOneLine(t *testing.T) {
+	var b bytes.Buffer
+	ctx := templ.WithChildren(context.Background(), templ.Raw(`<a class="mx-run-link">Preview</a>`))
+	if err := RowActionsCellWrap().Render(ctx, &b); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.HasPrefix(out, `<span class="mx-row-cell">`) || !strings.HasSuffix(strings.TrimSpace(out), `</span>`) {
+		t.Errorf("wrapper markup = %q", out)
+	}
+	if !strings.Contains(out, `Preview`) {
+		t.Errorf("wrapper dropped its children: %q", out)
+	}
+	for _, banned := range []string{"<br", "<div", "<details"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("wrapper emitted %q", banned)
+		}
 	}
 }

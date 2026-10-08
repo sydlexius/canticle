@@ -1,5 +1,14 @@
 package templates
 
+// RowActionsCellWrap is the one-line wrapper for everything sharing an Actions
+// cell (a Preview link, an Edited badge, then the icons): no wrapping, so the
+// row is never taller than a text-only row.
+templ RowActionsCellWrap() {
+	<span class="mx-row-cell">
+		{ children... }
+	</span>
+}
+
 // RowActionsCell is the Actions cell body (#1249): up to two icon buttons on ONE
 // line (no wrapping, no menu, no JS). A marked track shows its icon "on"
 // (a filled chip, plus the name in a visually hidden span) and the click goes to the undo/unblock page.

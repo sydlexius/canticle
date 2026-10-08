@@ -1524,15 +1524,31 @@ body {
   display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 0.5rem;
-  vertical-align: middle;
+  /* px, not rem: the root font size is 14px, so 0.5rem rendered 7px. */
+  gap: 8px;
+  vertical-align: top;
+  --mx-row-icon-size: 28px;
+}
+.mx-row-cell {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 .mx-row-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  /* Containing block for the absolutely positioned .mx-row-sr name, so it cannot
+     escape the table wrapper and widen the page. */
+  position: relative;
+  width: var(--mx-row-icon-size);
+  height: var(--mx-row-icon-size);
+  /* Only one line of height counts toward the row: the target hangs over the cell
+     padding, so an icon row is as tall as a text-only row. Inside .mx-row-cell the
+     flex gap keeps neighbors apart, so the hang never overlaps them. */
+  margin-block: calc((1lh - var(--mx-row-icon-size)) / 2);
   border-radius: var(--mx-radius-sm);
   color: var(--mx-content-text-secondary);
   text-decoration: none;
@@ -1545,12 +1561,18 @@ body {
   outline-offset: 1px;
 }
 .mx-row-icon-on {
-  color: var(--mx-content-text);
-  background: var(--mx-surface-border);
+  /* Inverted chip: the body-text token as the fill and the surface token as the
+     glyph. The theme is dark-only (design-tokens.css), so the fill is the light
+     slate and clears 3:1 against the row; the glyph is far above 4.5:1 on it. */
+  color: var(--mx-surface-bg);
+  background: var(--mx-content-text);
   /* A real outline, so the on state survives forced-colors mode, where the
      background chip is dropped. */
   outline: 1px solid var(--mx-content-text-secondary);
   outline-offset: -1px;
+}
+.mx-row-icon-on:hover {
+  color: var(--mx-surface-bg);
 }
 .mx-row-icon-on:focus-visible {
   outline: 2px solid var(--mx-sidebar-active-text);
@@ -1587,8 +1609,7 @@ body {
   color: var(--mx-content-text-secondary);
 }
 @media (max-width: 767.98px) {
-  .mx-row-icon {
-    width: 44px;
-    height: 44px;
+  .mx-row-actions {
+    --mx-row-icon-size: 44px;
   }
 }

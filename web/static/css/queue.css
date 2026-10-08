@@ -190,3 +190,15 @@
     min-height: 44px;
   }
 }
+
+/* Inside the one-line Actions cell (.mx-row-cell, input.css) the badge sits beside
+   the link instead of under it, and the 44px link target hangs over the cell
+   padding the way the icons do, so the row is not taller than a text-only row. */
+.mx-row-cell .mx-queue-edited {
+  margin-top: 0;
+}
+@media (max-width: 767.98px) {
+  .mx-row-cell .mx-queue-preview {
+    margin-block: calc((1lh - 44px) / 2);
+  }
+}
