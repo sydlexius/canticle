@@ -204,6 +204,10 @@ type RetainedRow struct {
 	// identically whether or not the sweep is a dry run -- which is what makes a
 	// dry run's report a truthful preview of a real one.
 	WouldRetire bool
+	// HoldsWork reports that the row's source is gone yet a linked work_queue row
+	// is still dequeue-eligible AFTER this pass (not retired, a dry run included),
+	// so the worker keeps attempting it (#1430).
+	HoldsWork bool
 }
 
 // unresolvableGoneError is the last_error value written when a row is retired as
@@ -225,6 +229,8 @@ type Result struct {
 	Pruned      []PrunedRow
 	Relinked    []RelinkedRow
 	Retained    []RetainedRow
+	// RetainedHoldingWork counts Retained rows with HoldsWork set.
+	RetainedHoldingWork int
 	// EditHeld counts relinked work_queue rows a resurrect would have reopened
 	// to 'pending' but that carry the hand-edit mark (#1228): their path moved,
 	// their status did not. Applied runs only; a dry run leaves it 0.
@@ -887,6 +893,10 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 				// the plain retain it actually was, rather than claiming a retirement the
 				// database declined to make.
 				cg.retained.Retired = retired
+			}
+			if !cg.retained.Retired && !c.settled && len(c.workItems) > 0 {
+				cg.retained.HoldsWork = true
+				res.RetainedHoldingWork++
 			}
 			res.Retained = append(res.Retained, cg.retained)
 			if hooks.Retained != nil {

@@ -245,6 +245,11 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 	// A planned prune the apply skipped is not counted; 0 in a dry run (the plan).
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d source(s) with a vanished file (%d scan_results, %d work_items), %s %d source(s) to a moved file, retained %d source(s) with unresolved identity%s\n",
 		verb, len(res.Pruned)-res.PruneSkipped, res.ScanResults, res.WorkItems, relinkVerb, len(res.Relinked), len(res.Retained), suffixDryRun(args.Yes))
+	// Retained rows whose source is gone but whose queue work is still
+	// dequeue-eligible: the worker keeps attempting them (#1430).
+	if res.RetainedHoldingWork > 0 {
+		_, _ = fmt.Fprintf(out, "reconcile-paths: %d retained source(s) still hold dequeue-eligible work, which the worker keeps attempting%s\n", res.RetainedHoldingWork, suffixDryRun(args.Yes))
+	}
 	if res.PruneSkipped > 0 {
 		_, _ = fmt.Fprintf(out, "reconcile-paths: %d planned prune(s) not or only partly applied (the row was in flight, or had moved to another file since it was read); rows already deleted for them are counted above\n", res.PruneSkipped)
 	}
