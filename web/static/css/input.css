@@ -1519,39 +1519,62 @@ body {
    filled chip, so state is never color alone. The accessible name is a visually
    hidden span in each link. Tooltip = title + the visible focus ring. No
    transitions, so nothing to gate on prefers-reduced-motion. */
-.mx-row-actions {
+.mx-row-hit-td {
+  /* Containing block for every icon's hit area (.mx-row-icon::after), so a hit
+     area is bounded by its own row and can never reach into a neighbor's. */
   position: relative;
-  display: inline-flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  /* px, not rem: the root font size is 14px, so 0.5rem rendered 7px. */
-  gap: 8px;
-  vertical-align: top;
-  --mx-row-icon-size: 28px;
 }
 .mx-row-cell {
+  --mx-row-icon-size: 28px;
+  /* px, not rem: the root font size is 14px, so 0.5rem rendered 7px. */
+  --mx-row-icon-gap: 16px;
   display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 8px;
   white-space: nowrap;
+  /* The icon slot is reserved here, as padding, so the Actions column is exactly as
+     wide whether the icons are present or not. The group below takes no width of
+     its own; otherwise a row that gains icons would squeeze the other columns, and
+     a squeezed column wraps onto more lines and makes the row taller. */
+  padding-inline-end: calc(2 * var(--mx-row-icon-size) + var(--mx-row-icon-gap));
+}
+.mx-row-cell > :not(.mx-row-actions) {
+  margin-inline-end: 8px;
+}
+.mx-row-actions {
+  /* Zero in-flow width: the icons overflow into the slot reserved above. */
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--mx-row-icon-gap);
+  width: 0;
+  vertical-align: top;
 }
 .mx-row-icon {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  /* Containing block for the absolutely positioned .mx-row-sr name, so it cannot
-     escape the table wrapper and widen the page. */
-  position: relative;
   width: var(--mx-row-icon-size);
   height: var(--mx-row-icon-size);
-  /* Desktop: only one line of height counts toward the row (the 28px chip fits in
-     the cell padding), so an icon row is as tall as a text-only row. The phone
-     block below drops this and uses a 44px cell instead. */
+  /* Only one line of height counts toward the row (the 28px chip fits in the cell
+     padding), so an icon row is as tall as a text-only row. */
   margin-block: calc((1lh - var(--mx-row-icon-size)) / 2);
   border-radius: var(--mx-radius-sm);
   color: var(--mx-content-text-secondary);
   text-decoration: none;
+}
+/* The 44px hit area. Not positioned itself, so it is sized against the table cell
+   (.mx-row-hit-td): 44px wide, centered on the chip by the flex static position
+   (the 16px gap makes two neighbors just touch, never overlap), and as tall as the
+   cell up to 44px, from the cell top. A row shorter than 44px therefore gets a
+   shorter target rather than one that spills into the next row's. */
+.mx-row-icon::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 44px;
+  height: min(100%, 44px);
 }
 .mx-row-icon:hover {
   color: var(--mx-content-text);
@@ -1607,26 +1630,4 @@ body {
   margin: 0 0 1rem;
   font-size: 0.875rem;
   color: var(--mx-content-text-secondary);
-}
-@media (max-width: 767.98px) {
-  /* The painted chip stays 28px; only the hit area grows to 44px, through an
-     invisible pseudo-element, so nothing paints outside its row. 28px chips with a
-     16px gap make the two 44px hit areas just touch. The cell itself is 44px tall
-     (content centered) so the hit area never reaches into another row. */
-  .mx-row-actions,
-  .mx-row-cell {
-    min-height: 44px;
-    align-items: center;
-  }
-  .mx-row-actions {
-    gap: 16px;
-  }
-  .mx-row-icon {
-    margin-block: 0;
-  }
-  .mx-row-icon::after {
-    content: "";
-    position: absolute;
-    inset: calc((28px - 44px) / 2);
-  }
 }

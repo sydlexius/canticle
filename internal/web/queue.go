@@ -145,8 +145,20 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 	// Only the retired bucket can be revived; failed rows are already retried,
 	// so no other bucket offers an action.
 	view.ReviveLink = bucket == reports.BucketUnavailable && u.queueActions != nil
+	// The mark icons exist only where the mark routes do (markEntry's gate), and
+	// return to this page's own view: bucket, sort, filters and cursor, never the
+	// one-shot ?mark= status.
+	ret := ""
+	if u.mark != nil && u.mark.DBPath != "" {
+		ret = state.href(string(bucket), state.After)
+	}
 	for _, row := range rows {
-		view.Rows = append(view.Rows, buildQueueRow(row, bucket, state))
+		qr := buildQueueRow(row, bucket, state)
+		if ret != "" {
+			qr.Actions = templates.RowActions{ID: row.ID, Return: ret, HasLyric: row.HasLyric,
+				Manual: row.ManualInstrumental, Blocked: row.Blocked, InFlight: row.Status == queue.StatusProcessing}
+		}
+		view.Rows = append(view.Rows, qr)
 	}
 	if more {
 		last := rows[len(rows)-1]
@@ -245,12 +257,12 @@ func queuePreviewHref(row reports.BucketRow, from reports.Bucket, state queueVie
 }
 
 // queueColumns is the table's column order (Artist, Album, Title first). A
-// column with no sort key (Status, Reason, Libraries, Lyrics) is not orderable.
+// column with no sort key (Status, Reason, Libraries, Actions) is not orderable.
 var queueColumns = []struct{ label, key string }{
 	{"Artist", tablesort.KeyArtist}, {"Album", tablesort.KeyAlbum}, {"Title", tablesort.KeyTitle},
 	{"Status", ""}, {"Reason", ""}, {"Next attempt", tablesort.KeyNextAttempt},
 	{"Misses", tablesort.KeyMisses}, {"Attempts", tablesort.KeyAttempts}, {"Updated", tablesort.KeyUpdated},
-	{"Libraries", ""}, {"Lyrics", ""},
+	{"Libraries", ""}, {"Actions", ""},
 }
 
 // buildQueueColumns shapes the header row for the shared SortHeader component:
