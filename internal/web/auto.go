@@ -30,6 +30,23 @@ type AutoAligner interface {
 	AlignFile(ctx context.Context, audio io.Reader, lines []string) (aligner.Result, error)
 }
 
+// AutoBlocks is the lyric-block lookup the Auto alignment run consults before
+// it re-times an on-disk body (#1399). *lyricblock.Store satisfies it and fails
+// open: a lookup error reads as not blocked, and is logged by the store.
+type AutoBlocks interface {
+	AnyBlocked(ctx context.Context, artistKey, titleKey string, fingerprints []string) bool
+}
+
+// AttachAutoBlocks makes the Auto alignment run refuse a lyric body blocked for
+// the row's track identity. A nil checker is a wiring fault: logged, no guard.
+func (u *UI) AttachAutoBlocks(b AutoBlocks) {
+	if b == nil {
+		slog.Error("auto alignment: no lyric-block checker supplied; blocked lyrics will not be refused")
+		return
+	}
+	u.autoBlocks = b
+}
+
 // autoState is the attached aligner plus its cached availability. A render
 // only reads the atomics; the goroutine refresh starts alone calls Health.
 type autoState struct {

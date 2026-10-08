@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/identityrepair"
 	"github.com/sydlexius/canticle/internal/library"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
 
@@ -210,7 +211,7 @@ func runIdentityBackfill(ctx context.Context, sqlDB *sql.DB) {
 	}
 
 	slog.Info("identity backfill: correcting run-together multi-value artist rows (#466); this re-reads file tags and runs once")
-	res, err := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).Run(ctx, identityrepair.Options{
+	res, err := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).WithBlocks(lyricblock.NewStore(sqlDB, nil)).Run(ctx, identityrepair.Options{
 		Progress: func(scanned int) {
 			slog.Debug("identity backfill: progress", "scanned", scanned)
 		},

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/aligner"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/reports"
 )
@@ -336,7 +337,7 @@ func (u *UI) handleAutoStart(w http.ResponseWriter, r *http.Request) {
 	// The accept route's own reader: the current .lrc, never the .orig, no
 	// symlink followed, and only while its mtime is the request's. A file this
 	// refuses could not be accepted either.
-	cues, err := lyrics.CurrentLines(t.LRCPath, roots, time.Unix(0, mtime))
+	cues, body, err := lyrics.CurrentLRC(t.LRCPath, roots, time.Unix(0, mtime))
 	switch {
 	case errors.Is(err, lyrics.ErrEditChanged):
 		writeEditJSON(w, http.StatusConflict, map[string]string{"error": "changed"})
@@ -348,6 +349,14 @@ func (u *UI) handleAutoStart(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		slog.Error("auto alignment: lyric read failed", "id", id, editErrAttr(err))
 		writeEditJSON(w, http.StatusInternalServerError, map[string]string{"error": "read"})
+		return
+	}
+	// A body an operator marked wrong is never re-timed: the refusal is the same
+	// bare 404 as the other refused files, which the player words as "no longer
+	// offered". The lookup fails open (the store logs it).
+	if u.autoBlocks != nil && u.autoBlocks.AnyBlocked(r.Context(), t.ArtistKey, t.TitleKey, []string{lyricblock.Fingerprint(body)}) {
+		slog.Warn("auto alignment refused: the on-disk lyrics are blocked", "id", id)
+		http.NotFound(w, r)
 		return
 	}
 	lines, any := autoLines(cues)

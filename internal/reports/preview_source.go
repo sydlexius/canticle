@@ -29,12 +29,16 @@ var ErrPreviewNotFound = errors.New("reports: work_queue row not found")
 // (pathutil.WithinRoot) is never enough: stored roots are neither cleaned nor
 // symlink-resolved, and a check-then-open races a swapped directory.
 type PreviewTarget struct {
-	ID       int64
-	Artist   string
-	Title    string
-	Album    string
-	Status   string
-	SyncTier string // "word", "line", "unsynced" or "" when not yet classified
+	ID     int64
+	Artist string
+	Title  string
+	Album  string
+	Status string
+	// ArtistKey and TitleKey are the row's own work_queue identity keys, the
+	// identity lyric blocks are recorded under (#1399).
+	ArtistKey string
+	TitleKey  string
+	SyncTier  string // "word", "line", "unsynced" or "" when not yet classified
 	// LineEditable reports a settled synced row at the current line-synced
 	// rung (lineTierPredicate), the only rows the offset editor may rewrite
 	// (#481 Stage 2). Decided in SQL from the row's recorded state.
@@ -96,10 +100,10 @@ type PreviewTarget struct {
 func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, error) {
 	t := PreviewTarget{ID: id}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT artist, title, album, status, COALESCE(sync_tier, ''), source_path,
+		`SELECT artist, title, album, status, COALESCE(sync_tier, ''), source_path, artist_key, title_key,
 		        COALESCE(`+lineEditableSQL+`, 0)
 		   FROM work_queue WHERE id = ?`, id,
-	).Scan(&t.Artist, &t.Title, &t.Album, &t.Status, &t.SyncTier, &t.AudioPath, &t.LineEditable)
+	).Scan(&t.Artist, &t.Title, &t.Album, &t.Status, &t.SyncTier, &t.AudioPath, &t.ArtistKey, &t.TitleKey, &t.LineEditable)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PreviewTarget{}, ErrPreviewNotFound
 	}

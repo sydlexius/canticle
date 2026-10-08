@@ -44,6 +44,11 @@ type ListFilter struct {
 	Orphans    bool // only identities with no work_queue row
 }
 
+// orphanPredicate selects (alias b) the blocks whose identity has no work_queue
+// row. List's Orphans filter and DeleteOrphans share it, so what is listed and
+// what is deleted cannot drift.
+const orphanPredicate = `NOT EXISTS (SELECT 1 FROM work_queue w WHERE w.artist_key = b.artist_key AND w.title_key = b.title_key)`
+
 // Store is the lyric_blocks repository.
 type Store struct {
 	db  *sql.DB
@@ -113,6 +118,21 @@ func (s *Store) DeleteByIdentityTx(ctx context.Context, tx *sql.Tx, artistKey, t
 	return int(n), nil
 }
 
+// DeleteOrphans deletes every block whose identity has no work_queue row and
+// returns how many it removed. One statement re-evaluates the predicate as it
+// deletes, so a row created after a preceding List is not swept.
+func (s *Store) DeleteOrphans(ctx context.Context, ex Execer) (int, error) {
+	res, err := ex.ExecContext(ctx, `DELETE FROM lyric_blocks AS b WHERE `+orphanPredicate)
+	if err != nil {
+		return 0, fmt.Errorf("lyricblock: delete orphans: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("lyricblock: delete orphans rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
 // List returns blocks matching f, oldest first.
 func (s *Store) List(ctx context.Context, f ListFilter) ([]Block, error) {
 	q := `SELECT b.id, b.artist_key, b.title_key, b.fingerprint, COALESCE(b.work_queue_id, 0), b.lane, b.upstream, b.created_at
@@ -131,7 +151,7 @@ func (s *Store) List(ctx context.Context, f ListFilter) ([]Block, error) {
 		args = append(args, normalize.NormalizeKey(f.TitleKey))
 	}
 	if f.Orphans {
-		q += ` AND NOT EXISTS (SELECT 1 FROM work_queue w WHERE w.artist_key = b.artist_key AND w.title_key = b.title_key)`
+		q += ` AND ` + orphanPredicate
 	}
 	q += ` ORDER BY b.id`
 	rows, err := s.db.QueryContext(ctx, q, args...)

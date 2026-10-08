@@ -230,3 +230,24 @@ func TestStore_ListFiltersEachKeyIndependently(t *testing.T) {
 		}
 	}
 }
+
+func TestStore_DeleteOrphans(t *testing.T) {
+	ctx := context.Background()
+	s, d, _ := newStore(t)
+	addWQ(t, d, "Live Artist", "Live Title")
+	addFP(t, s, d, "live artist", "live title", "fp")
+	addFP(t, s, d, "gone artist", "gone title", "fp1")
+	addFP(t, s, d, "gone artist", "gone title", "fp2")
+
+	n, err := s.DeleteOrphans(ctx, d)
+	if err != nil || n != 2 {
+		t.Fatalf("DeleteOrphans = %d, %v; want 2, nil", n, err)
+	}
+	left, err := s.List(ctx, ListFilter{})
+	if err != nil || len(left) != 1 || left[0].ArtistKey != "live artist" {
+		t.Fatalf("blocks left = %+v, %v; want only the identity that has a work_queue row", left, err)
+	}
+	if n, err := s.DeleteOrphans(ctx, d); err != nil || n != 0 {
+		t.Errorf("second DeleteOrphans = %d, %v; want 0, nil", n, err)
+	}
+}

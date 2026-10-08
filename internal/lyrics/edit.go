@@ -362,7 +362,8 @@ func sameStamp(a, b fs.FileInfo) bool {
 // stacked [t1][t2] timestamps), plus the raw header tag lines. Same
 // confinement as ApplyEdit.
 func OriginalLines(path string, roots []string) ([]TimedLine, []string, error) {
-	return editLines(path, roots, false, time.Time{})
+	lines, tags, _, err := editLines(path, roots, false, time.Time{})
+	return lines, tags, err
 }
 
 // CurrentLines returns the lines of <path> itself, never its .orig backup, and
@@ -370,26 +371,34 @@ func OriginalLines(path string, roots []string) ([]TimedLine, []string, error) {
 // never matches). A generated accept validates against these: the mtime binds
 // the posted starts to the cues they were computed for, position by position.
 func CurrentLines(path string, roots []string, expect time.Time) ([]TimedLine, error) {
-	lines, _, err := editLines(path, roots, true, expect)
+	lines, _, _, err := editLines(path, roots, true, expect)
 	return lines, err
 }
 
-func editLines(path string, roots []string, current bool, expect time.Time) ([]TimedLine, []string, error) {
+// CurrentLRC is CurrentLines that also returns the raw body the lines were
+// parsed from, read in the same pass, so a caller fingerprints exactly the
+// bytes it will act on (the lyric-block check, #1399).
+func CurrentLRC(path string, roots []string, expect time.Time) ([]TimedLine, string, error) {
+	lines, _, body, err := editLines(path, roots, true, expect)
+	return lines, body, err
+}
+
+func editLines(path string, roots []string, current bool, expect time.Time) ([]TimedLine, []string, string, error) {
 	canon, rel, err := confineEdit(path, roots)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	root, err := os.OpenRoot(canon)
 	if err != nil {
-		return nil, nil, fmt.Errorf("opening library root: %w", err)
+		return nil, nil, "", fmt.Errorf("opening library root: %w", err)
 	}
 	defer func() { _ = root.Close() }()
 	cur, err := lstatRegular(root, rel)
 	if err != nil {
-		return nil, nil, refuseOrWrap(err)
+		return nil, nil, "", refuseOrWrap(err)
 	}
 	if current && !cur.ModTime().Equal(expect) {
-		return nil, nil, ErrEditChanged
+		return nil, nil, "", ErrEditChanged
 	}
 	src, srcFI := rel, cur
 	ofi, oerr := lstatRegular(root, rel+".orig")
@@ -403,15 +412,15 @@ func editLines(path string, roots []string, current bool, expect time.Time) ([]T
 	default:
 		// A .orig that exists but is not a regular file (symlink, directory,
 		// FIFO) is not a usable original; never silently edit the .lrc instead.
-		return nil, nil, refuseOrWrap(oerr)
+		return nil, nil, "", refuseOrWrap(oerr)
 	}
 	body, err := readRegular(root, src, srcFI)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if src != rel {
 		if err := requireOrigBacksCurrent(root, rel, cur, body, false); err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 	}
 	doc := ParseTimedLRC(string(body))
@@ -419,7 +428,7 @@ func editLines(path string, roots []string, current bool, expect time.Time) ([]T
 	for _, tg := range doc.Tags {
 		tags = append(tags, tg.Raw)
 	}
-	return doc.Lines, tags, nil
+	return doc.Lines, tags, string(body), nil
 }
 
 // lyricIdentityKeys are the tags that say WHICH fetch of which lyric a sidecar

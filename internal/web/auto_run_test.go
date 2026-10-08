@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/aligner"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
@@ -620,5 +621,69 @@ func TestAutoRunCloseBound(t *testing.T) {
 	ended(t, "once released", run)
 	if e.active() != 0 {
 		t.Errorf("active once it ended = %d, want 0", e.active())
+	}
+}
+
+// errBlocks is a block lookup that reads as not blocked, as the real store does
+// when its query fails.
+type errBlocks struct{ calls atomic.Int32 }
+
+func (b *errBlocks) AnyBlocked(context.Context, string, string, []string) bool {
+	b.calls.Add(1)
+	return false
+}
+
+// blockRow records a block for the row's own identity keys with the fingerprint
+// of body, as scan mark-wrong would.
+func (e *autoEnv) blockRow(t *testing.T, store *lyricblock.Store, body string) {
+	t.Helper()
+	var a, ti string
+	if err := e.db.QueryRowContext(context.Background(),
+		`SELECT artist_key, title_key FROM work_queue WHERE id = ?`, e.rowID).Scan(&a, &ti); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Add(context.Background(), e.db, lyricblock.Block{ArtistKey: a, TitleKey: ti, Fingerprint: lyricblock.Fingerprint(body)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A run is refused when the on-disk body is blocked for the row's identity: no
+// sidecar call and the .lrc is byte-for-byte unchanged. A different body for the
+// same track, and a lookup that fails open, still run (#1399).
+func TestAutoRunRefusesBlockedBody(t *testing.T) {
+	fake := &runFake{}
+	e := newAutoEnv(t, fake)
+	store := lyricblock.NewStore(e.db, nil)
+	e.ui.AttachAutoBlocks(store)
+	e.blockRow(t, store, editLRC)
+
+	before := e.lrc(t)
+	logs := captureLogs(t)
+	if rec := e.start(t); rec.Code != http.StatusNotFound {
+		t.Fatalf("start on a blocked body = %d %s, want 404", rec.Code, rec.Body)
+	}
+	if fake.aligns.Load() != 0 || e.run() != nil {
+		t.Errorf("blocked body reached the aligner (calls %d, run %v)", fake.aligns.Load(), e.run())
+	}
+	if e.lrc(t) != before || e.hasOrig() {
+		t.Error("a refused run changed the .lrc")
+	}
+	if l := logs.String(); !strings.Contains(l, "blocked") || strings.Contains(l, "three") {
+		t.Errorf("refusal must be logged without lyric text:\n%s", l)
+	}
+
+	// The same track with different words is not blocked.
+	e.put(t, "song.lrc", "[00:01.00]other\n[00:05.00]words\n")
+	if rec := e.start(t); rec.Code != http.StatusAccepted {
+		t.Fatalf("start on an unblocked body = %d %s, want 202", rec.Code, rec.Body)
+	}
+	e.waitState(t, autoDone)
+
+	// A failing lookup reads as not blocked.
+	e.put(t, "song.lrc", editLRC)
+	failing := &errBlocks{}
+	e.ui.AttachAutoBlocks(failing)
+	if rec := e.start(t); rec.Code != http.StatusAccepted || failing.calls.Load() == 0 {
+		t.Fatalf("start with a failing lookup = %d (lookups %d), want 202 after consulting it", rec.Code, failing.calls.Load())
 	}
 }

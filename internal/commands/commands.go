@@ -166,7 +166,7 @@ type ScanCmd struct {
 	ReconcileEditorTag               *ScanReconcileEditorTagCmd               `arg:"subcommand:reconcile-editor-tag" help:"backfill [re:canticle] onto existing canticle-written .lrc/.elrc files (issue #483)"`
 	MarkWrong                        *ScanMarkWrongCmd                        `arg:"subcommand:mark-wrong" help:"mark one track's current lyrics as wrong: back them up, remove them, block those words and re-queue the track; dry-run unless --yes (issue #1398)"`
 	ListBlocks                       *ScanListBlocksCmd                       `arg:"subcommand:list-blocks" help:"count the blocked lyric results (per-block detail with --tail) (issue #1398)"`
-	Unblock                          *ScanUnblockCmd                          `arg:"subcommand:unblock" help:"remove a block (--id) or every block on a track (--work-item) and reopen it; dry-run unless --yes (issue #1398)"`
+	Unblock                          *ScanUnblockCmd                          `arg:"subcommand:unblock" help:"remove a block (--id) or every block on a track (--work-item) and reopen it, or every block whose track no longer exists (--orphans); dry-run unless --yes (issue #1398)"`
 }
 
 // ScanReconcileSyncTierCmd classifies every completed synced row's sidecar
@@ -1402,6 +1402,8 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		)
 	}
 	handlerOpts = append(handlerOpts, autoAlignerOptions(cfg)...)
+	// The Auto alignment run refuses a body an operator marked wrong (#1399).
+	handlerOpts = append(handlerOpts, server.WithAutoBlocks(blocks))
 	apiHandler := server.NewHandler(authSvc, workQ, outdir, handlerOpts...)
 	// httpDrained closes once the HTTP server has stopped AND every reactive
 	// realign pass has been dropped or finished, so the database is never closed
@@ -3066,7 +3068,7 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			if trigger == scan.TriggerWatcher {
 				divOpts.PathPrefix = path
 			}
-			divRes, direrr := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).RepairDivergence(ctx, divOpts)
+			divRes, direrr := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).WithBlocks(lyricblock.NewStore(sqlDB, nil)).RepairDivergence(ctx, divOpts)
 			if direrr != nil {
 				slog.Warn("scan: divergence repair failed (non-fatal)",
 					"library", lib.Name, "trigger", string(trigger), "error", direrr)

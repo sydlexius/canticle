@@ -150,6 +150,8 @@ type UI struct {
 	// auto is the attached aligner and its cached availability behind the
 	// player's Auto alignment action (#1008); nil when none is attached.
 	auto *autoState
+	// autoBlocks refuses an Auto alignment of a blocked on-disk body (#1399).
+	autoBlocks AutoBlocks
 
 	// guardedRoutes records every pattern Register put behind the session guard
 	// (empty when auth is not configured). It exists so a test can enumerate the

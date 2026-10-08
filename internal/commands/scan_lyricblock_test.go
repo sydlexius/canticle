@@ -201,3 +201,48 @@ func TestScanUnblockDryRunEmptyKeyCountsOnlyItsOwnBlocks(t *testing.T) {
 		t.Fatalf("dry unblock = %d:\n%s", code, out)
 	}
 }
+
+// scan unblock --orphans clears only blocks whose track has no work_queue row;
+// a dry run removes nothing, and the flag excludes --id and --work-item.
+func TestScanUnblockOrphans(t *testing.T) {
+	f := newQIFixture(t)
+	if _, code := f.runBlock(t, func(b *bytes.Buffer) int {
+		return runMarkWrong(f.ctx, b, ScanMarkWrongCmd{ID: f.id, Yes: true, Backup: filepath.Join(t.TempDir(), "b.jsonl"), ConfigPath: f.cfg})
+	}); code != 0 {
+		t.Fatal("mark-wrong failed")
+	}
+	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(f.ctx, `INSERT INTO lyric_blocks (artist_key, title_key, fingerprint) VALUES ('gone artist', 'gone title', 'fp-gone')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = sqlDB.Close()
+	run := func(a ScanUnblockCmd) (string, int) {
+		a.ConfigPath, a.Orphans = f.cfg, true
+		return f.runBlock(t, func(b *bytes.Buffer) int { return runUnblock(f.ctx, b, a) })
+	}
+	before := f.blockCount(t)
+
+	out, code := run(ScanUnblockCmd{Tail: true})
+	if code != 0 || !strings.Contains(out, "orphaned blocks that would be removed: 1") || !strings.Contains(out, "gone artist") {
+		t.Fatalf("dry --orphans = %d:\n%s", code, out)
+	}
+	if n := f.blockCount(t); n != before {
+		t.Fatalf("dry run changed the block count %d -> %d", before, n)
+	}
+	out, code = run(ScanUnblockCmd{Yes: true})
+	if code != 0 || !strings.Contains(out, "orphaned blocks removed: 1") || strings.Contains(out, "gone") {
+		t.Fatalf("--orphans --yes = %d:\n%s", code, out)
+	}
+	if n := f.blockCount(t); n != before-1 {
+		t.Errorf("blocks after = %d, want %d (the tracked block survives)", n, before-1)
+	}
+	if _, code := run(ScanUnblockCmd{ID: 1}); code != 2 {
+		t.Errorf("--orphans with --id = %d, want 2", code)
+	}
+	if _, code := run(ScanUnblockCmd{WorkItem: 1}); code != 2 {
+		t.Errorf("--orphans with --work-item = %d, want 2", code)
+	}
+}

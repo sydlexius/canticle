@@ -35,12 +35,15 @@ type ScanListBlocksCmd struct {
 }
 
 // ScanUnblockCmd removes a block, or every block on a work item's track, and
-// reopens a track that settled as blocked. Dry-run unless --yes. Exactly one of
-// --id and --work-item.
+// reopens a track that settled as blocked, or (--orphans) clears every block
+// whose track has no work_queue row. Dry-run unless --yes. Exactly one of --id,
+// --work-item and --orphans.
 type ScanUnblockCmd struct {
 	ID         int64  `arg:"--id" help:"block id (see scan list-blocks --tail)"`
 	WorkItem   int64  `arg:"--work-item" help:"work_queue row id; removes every block on that track"`
+	Orphans    bool   `arg:"--orphans" help:"remove every block whose track has no work_queue row"`
 	Yes        bool   `arg:"--yes" help:"actually apply (without it, prints what would change)"`
+	Tail       bool   `arg:"--tail" help:"with --orphans, also print one line per block (id, work item, identity keys)"`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -216,8 +219,14 @@ func printDim(out io.Writer, name string, m map[string]int) {
 }
 
 func runUnblock(ctx context.Context, out io.Writer, args ScanUnblockCmd) int {
-	if (args.ID > 0) == (args.WorkItem > 0) {
-		_, _ = fmt.Fprintln(out, "scan unblock needs exactly one of --id <block id> and --work-item <work item id>")
+	set := 0
+	for _, b := range []bool{args.ID > 0, args.WorkItem > 0, args.Orphans} {
+		if b {
+			set++
+		}
+	}
+	if set != 1 {
+		_, _ = fmt.Fprintln(out, "scan unblock needs exactly one of --id <block id>, --work-item <work item id> and --orphans")
 		return 2
 	}
 	_, sqlDB, ok := openBlockDB(ctx, args.ConfigPath, args.Yes)
@@ -225,6 +234,9 @@ func runUnblock(ctx context.Context, out io.Writer, args ScanUnblockCmd) int {
 		return 1
 	}
 	defer func() { _ = sqlDB.Close() }() //nolint:errcheck // reason: best-effort close on command exit
+	if args.Orphans {
+		return runUnblockOrphans(ctx, out, sqlDB, args)
+	}
 
 	res, err := lyricblock.New(sqlDB, slog.Default(), nil).Unblock(ctx, lyricblock.UnblockRequest{BlockID: args.ID, WorkItemID: args.WorkItem, DryRun: !args.Yes})
 	if err != nil {
@@ -249,4 +261,37 @@ func reportUnblockErr(out io.Writer, err error) int {
 	slog.Error("unblock failed", "error", err)
 	_, _ = fmt.Fprintln(out, "failed: see the errors above")
 	return 1
+}
+
+// runUnblockOrphans clears the blocks whose track identity has no work_queue
+// row. The listing before the delete feeds the dry-run count and --tail; the
+// delete re-checks orphan status itself, so a row created in between keeps its
+// blocks and the applied count is what was actually removed.
+func runUnblockOrphans(ctx context.Context, out io.Writer, sqlDB *sql.DB, args ScanUnblockCmd) int {
+	store := lyricblock.NewStore(sqlDB, slog.Default())
+	orphans, err := store.List(ctx, lyricblock.ListFilter{Orphans: true})
+	if err != nil {
+		slog.Error("failed to list orphaned blocks", "error", err)
+		_, _ = fmt.Fprintln(out, "failed: see the errors above")
+		return 1
+	}
+	removed := len(orphans)
+	label := "orphaned blocks that would be removed"
+	if args.Yes {
+		if removed, err = store.DeleteOrphans(ctx, sqlDB); err != nil {
+			slog.Error("failed to remove orphaned blocks", "error", err)
+			_, _ = fmt.Fprintln(out, "failed: see the errors above")
+			return 1
+		}
+		label = "orphaned blocks removed"
+	} else {
+		_, _ = fmt.Fprintln(out, "dry run: nothing changed (pass --yes to unblock)")
+	}
+	_, _ = fmt.Fprintf(out, "%s: %d\n", label, removed)
+	if args.Tail {
+		for _, b := range orphans {
+			_, _ = fmt.Fprintf(out, "block %d: work item %d, artist %q, title %q\n", b.ID, b.WorkQueueID, b.ArtistKey, b.TitleKey)
+		}
+	}
+	return 0
 }

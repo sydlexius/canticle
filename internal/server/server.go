@@ -105,6 +105,7 @@ type Handler struct {
 	previewFlacFFmpeg  string
 	autoAligner        web.AutoAligner
 	autoMaxConcurrent  int
+	autoBlocks         web.AutoBlocks
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
@@ -321,6 +322,12 @@ func WithAutoAligner(a web.AutoAligner, maxConcurrent int) Option {
 	return func(h *Handler) { h.autoAligner, h.autoMaxConcurrent = a, maxConcurrent }
 }
 
+// WithAutoBlocks makes the Auto alignment run refuse an on-disk lyric body an
+// operator marked wrong (#1399). It has no effect unless Auto is attached.
+func WithAutoBlocks(b web.AutoBlocks) Option {
+	return func(h *Handler) { h.autoBlocks = b }
+}
+
 // WithSettingsWriter enables the settings page write path (#288 Phase 2): the
 // resolved config file path the save handlers write through config.ApplyChanges,
 // and the encrypted secret store that absorbs secret-field saves (the Musixmatch
@@ -409,6 +416,11 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.autoAligner != nil {
 			h.webui.AttachAutoAligner(h.autoAligner, h.autoMaxConcurrent)
+			if h.autoBlocks != nil {
+				h.webui.AttachAutoBlocks(h.autoBlocks)
+			} else {
+				slog.Error("auto alignment: no lyric-block checker supplied; blocked lyrics will not be refused")
+			}
 		}
 		if h.settingsConfigPath != "" {
 			h.webui.AttachSettingsWriter(h.settingsConfigPath, h.settingsStore)

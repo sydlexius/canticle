@@ -447,7 +447,7 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 				}
 			}
 		} else {
-			qOut, err := reconcileQueue(ctx, tx, ch, wq.titleKey, lookup)
+			qOut, err := reconcileQueue(ctx, tx, r.blocks, ch, wq.titleKey, lookup)
 			if err != nil {
 				return divergenceOutcome{}, err
 			}
