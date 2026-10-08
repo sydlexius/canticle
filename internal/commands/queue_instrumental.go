@@ -199,7 +199,7 @@ func (b *lazyBackupFile) file() (*os.File, error) {
 	if b.f != nil {
 		return b.f, nil
 	}
-	f, err := openBackupAppend(b.path)
+	f, err := openBackup(b.path)
 	if err != nil {
 		// The PathError text carries the path; surface only the cause.
 		var pe *os.PathError
@@ -208,10 +208,9 @@ func (b *lazyBackupFile) file() (*os.File, error) {
 		}
 		return nil, fmt.Errorf("open %s: %w", b.what, err)
 	}
-	// The no-follow open refuses a symlink; a FIFO or device is refused here.
-	if fi, serr := f.Stat(); serr != nil || !fi.Mode().IsRegular() {
+	if err := checkBackupHandle(f, b.path); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("open %s: not a regular file", b.what)
+		return nil, fmt.Errorf("open %s: %w", b.what, err)
 	}
 	// O_CREATE's mode only applies to a new file; tighten an existing one before any write.
 	if err := f.Chmod(0o600); err != nil {
@@ -221,6 +220,27 @@ func (b *lazyBackupFile) file() (*os.File, error) {
 	b.f = f
 	lyrics.FsyncDir(filepath.Dir(b.path))
 	return f, nil
+}
+
+// openBackup is the open seam; tests swap in a follow-capable open to prove the
+// shared check below does not depend on O_NOFOLLOW.
+var openBackup = openBackupAppend
+
+var errBackupNotRegular = errors.New("not a regular file")
+
+// checkBackupHandle runs on every platform after the open: the path must Lstat
+// as a regular file (not a symlink) and be the very file the handle refers to.
+// The error carries no path.
+func checkBackupHandle(f *os.File, path string) error {
+	hfi, err := f.Stat()
+	if err != nil || !hfi.Mode().IsRegular() {
+		return errBackupNotRegular
+	}
+	lfi, err := os.Lstat(path)
+	if err != nil || !lfi.Mode().IsRegular() || !os.SameFile(hfi, lfi) {
+		return errBackupNotRegular
+	}
+	return nil
 }
 
 func (b *lazyBackupFile) close() {
