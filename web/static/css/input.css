@@ -1512,3 +1512,121 @@ body {
   margin-left: 0.25em;
   font-size: 0.75em;
 }
+
+/* Row actions (#1249): two icon buttons on one line in a table's last cell. They
+   live here, not in queue.css, because the dashboard and Reports do not load the
+   queue stylesheet. Off = bare outline glyph; on (marked) = the same glyph on a
+   filled chip, so state is never color alone. The accessible name is a visually
+   hidden span in each link. Tooltip = title + the visible focus ring. No
+   transitions, so nothing to gate on prefers-reduced-motion. */
+.mx-row-actions {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  /* px, not rem: the root font size is 14px, so 0.5rem rendered 7px. */
+  gap: 8px;
+  vertical-align: top;
+  --mx-row-icon-size: 28px;
+}
+.mx-row-cell {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.mx-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Containing block for the absolutely positioned .mx-row-sr name, so it cannot
+     escape the table wrapper and widen the page. */
+  position: relative;
+  width: var(--mx-row-icon-size);
+  height: var(--mx-row-icon-size);
+  /* Desktop: only one line of height counts toward the row (the 28px chip fits in
+     the cell padding), so an icon row is as tall as a text-only row. The phone
+     block below drops this and uses a 44px cell instead. */
+  margin-block: calc((1lh - var(--mx-row-icon-size)) / 2);
+  border-radius: var(--mx-radius-sm);
+  color: var(--mx-content-text-secondary);
+  text-decoration: none;
+}
+.mx-row-icon:hover {
+  color: var(--mx-content-text);
+}
+.mx-row-icon:focus-visible {
+  outline: 2px solid var(--mx-sidebar-active-text);
+  outline-offset: 1px;
+}
+.mx-row-icon-on {
+  /* Inverted chip: the body-text token as the fill and the surface token as the
+     glyph. The theme is dark-only (design-tokens.css), so the fill is the light
+     slate and clears 3:1 against the row; the glyph is far above 4.5:1 on it. */
+  color: var(--mx-surface-bg);
+  background: var(--mx-content-text);
+  /* A real outline, so the on state survives forced-colors mode, where the
+     background chip is dropped. */
+  outline: 1px solid var(--mx-content-text-secondary);
+  outline-offset: -1px;
+}
+.mx-row-icon-on:hover {
+  color: var(--mx-surface-bg);
+}
+.mx-row-icon-on:focus-visible {
+  outline: 2px solid var(--mx-sidebar-active-text);
+  outline-offset: 1px;
+}
+@media (forced-colors: active) {
+  .mx-row-icon-on {
+    outline: 1px solid ButtonText;
+  }
+}
+.mx-row-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.mx-run-link {
+  color: var(--mx-sidebar-active-text);
+  text-decoration: none;
+  font-size: 0.8125rem;
+}
+.mx-run-link:hover,
+.mx-run-link:focus-visible {
+  text-decoration: underline;
+}
+.mx-row-status {
+  margin: 0 0 1rem;
+  font-size: 0.875rem;
+  color: var(--mx-content-text-secondary);
+}
+@media (max-width: 767.98px) {
+  /* The painted chip stays 28px; only the hit area grows to 44px, through an
+     invisible pseudo-element, so nothing paints outside its row. 28px chips with a
+     16px gap make the two 44px hit areas just touch. The cell itself is 44px tall
+     (content centered) so the hit area never reaches into another row. */
+  .mx-row-actions,
+  .mx-row-cell {
+    min-height: 44px;
+    align-items: center;
+  }
+  .mx-row-actions {
+    gap: 16px;
+  }
+  .mx-row-icon {
+    margin-block: 0;
+  }
+  .mx-row-icon::after {
+    content: "";
+    position: absolute;
+    inset: calc((28px - 44px) / 2);
+  }
+}

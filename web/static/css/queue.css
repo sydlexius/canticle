@@ -190,3 +190,10 @@
     min-height: 44px;
   }
 }
+
+/* Inside the one-line Actions cell (.mx-row-cell, input.css) the badge sits beside
+   the link instead of under it. At phone width the wrapper is 44px tall and
+   centers the 44px link inside it, so nothing hangs over another row. */
+.mx-row-cell .mx-queue-edited {
+  margin-top: 0;
+}
