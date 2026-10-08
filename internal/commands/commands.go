@@ -36,6 +36,7 @@ import (
 	"github.com/sydlexius/canticle/internal/ffmpeg"
 	"github.com/sydlexius/canticle/internal/identityrepair"
 	"github.com/sydlexius/canticle/internal/innertube"
+	"github.com/sydlexius/canticle/internal/instrumentalmark"
 	"github.com/sydlexius/canticle/internal/langguard"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/logging"
@@ -1386,6 +1387,10 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// exact audio duration and records its rewrite so the watcher drops it.
 			server.WithLyricEditDeps(audiodur.New(sqlDB, scanner.DurationReaderVersion), selfWrites),
 			server.WithPreviewFlacFallback(previewFlacFFmpeg),
+			// Web mark actions (#1249): the same services the CLI drives, over a
+			// writer that records its writes in the watcher's registry; backups go
+			// beside the database.
+			server.WithMarkActions(webMarkDeps(sqlDB, cfg.DB.Path, allowedRoots, selfWrites)),
 			// Enable the settings write path (#288 Phase 2): writes go to the
 			// RESOLVED config file (never ""), and secret-field saves route to the
 			// encrypted store rather than the TOML.
@@ -4954,4 +4959,17 @@ func appendReconcileBackup(f *os.File, item queue.WorkItem, deleted []string, re
 		return fmt.Errorf("write reconcile backup record: %w", err)
 	}
 	return nil
+}
+
+// webMarkDeps builds the web UI's mark-action services (#1249). An empty db path
+// leaves the routes answering 404.
+func webMarkDeps(sqlDB *sql.DB, dbPath string, roots []string, selfWrites *selfwrite.Registry) web.MarkDeps {
+	w := lyrics.NewLRCWriter(roots...)
+	configureWriterSelfWrites(w, selfWrites)
+	return web.MarkDeps{
+		DB:           sqlDB,
+		Instrumental: instrumentalmark.New(sqlDB, w),
+		Blocks:       lyricblock.New(sqlDB, slog.Default(), selfWrites),
+		DBPath:       dbPath,
+	}
 }

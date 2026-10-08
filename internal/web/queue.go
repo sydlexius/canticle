@@ -40,6 +40,7 @@ func (u *UI) registerQueueRoutes(reg routeReg) {
 	reg("GET /queue/{bucket}", u.handleQueueBucket)
 	reg("GET /queue/unavailable/revive", u.handleReviveRetiredPreview)
 	reg("POST /queue/unavailable/revive", u.handleReviveRetiredConfirm)
+	u.registerMarkRoutes(reg)
 }
 
 // queueBucketInfo is the heading and one-line meaning of each bucket page.
@@ -135,7 +136,7 @@ func (u *UI) handleQueueBucket(w http.ResponseWriter, r *http.Request) {
 		rows = rows[:queuePageSize]
 	}
 	info := bucketInfo(bucket, u.reports.TopRung())
-	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], After: cursor.ID,
+	view := templates.QueueView{Key: string(bucket), Title: info[0], Blurb: info[1], Status: templates.MarkStatusFromQuery(r.URL.Query()), After: cursor.ID,
 		Query: state.Query, StartHref: state.href(string(bucket), ""), ClearHref: state.withoutQuery().href(string(bucket), ""),
 		Columns: buildQueueColumns(string(bucket), state, spec, order), Sort: state.Sort, Dir: state.Dir,
 		Chips: buildQueueChips(bucket, state, u.reports.TopRung()), Hidden: queueHiddenFilters(state), Filtered: state.chipsActive(),

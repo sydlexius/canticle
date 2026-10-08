@@ -138,6 +138,10 @@ type UI struct {
 	// implementation.
 	queueActions QueueActions
 
+	// mark backs the mark-instrumental / mark-wrong routes (#1249); nil or an
+	// empty DBPath makes them answer 404.
+	mark *MarkDeps
+
 	// editor backs the lyric offset editor's save/revert routes (#481 Stage
 	// 2); nil leaves the player read-only. editLocks serializes edits per row.
 	editor    *EditDeps
