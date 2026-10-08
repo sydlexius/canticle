@@ -781,6 +781,10 @@ const (
 	// SettleRowGone means the row no longer exists (e.g. pruned mid-run). Nothing
 	// was written and no marker is warranted.
 	SettleRowGone
+	// SettleNoBlock means a blocked settle found no block left for the row's
+	// identity (an unblock committed first). Nothing was written; the caller
+	// still holds the row and should release it to retry the fetch.
+	SettleNoBlock
 )
 
 // RowOwnership says which status a settle is allowed to act on, and is the ONLY

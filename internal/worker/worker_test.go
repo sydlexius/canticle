@@ -404,6 +404,23 @@ func (q *fakeQueue) SettleInstrumental(_ context.Context, id int64, tel queue.In
 	return queue.Settled, nil
 }
 
+// SettleBlocked records the blocked outcome like the real settle (#1395): label
+// and completion together, guarded on a held row.
+func (q *fakeQueue) SettleBlocked(_ context.Context, id int64) (queue.SettleOutcome, error) {
+	for _, item := range q.processing {
+		if item.ID == id {
+			if q.outcomeTypes == nil {
+				q.outcomeTypes = make(map[int64]string)
+			}
+			q.outcomeTypes[id] = queue.OutcomeBlocked
+			q.completed = append(q.completed, id)
+			q.removeFromProcessing(id)
+			return queue.Settled, nil
+		}
+	}
+	return queue.SettleClaimed, nil
+}
+
 // SettleGuardRejected models the real transaction's ATOMICITY, which is the
 // property under test (#655): on failure it records nothing at all -- no outcome
 // type, no completion -- because the real statement either commits both or

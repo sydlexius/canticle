@@ -92,6 +92,9 @@ type Queue interface {
 	// it settled with nothing written (#773) rather than only that it was
 	// rejected. Empty means "no reason recorded" and stores NULL.
 	SettleGuardRejected(ctx context.Context, id int64, reason string) (queue.SettleOutcome, error)
+	// SettleBlocked completes a row whose only results were blocked by the
+	// operator, in ONE statement (outcome_type='blocked'; no counter moves, #1395).
+	SettleBlocked(ctx context.Context, id int64) (queue.SettleOutcome, error)
 	// SetCompletionProvenance stamps the identifiers and writer version the row was
 	// settled with, so an outcome that writes no tag block -- an unsynced .txt above
 	// all -- still records what produced it (#620). Call before Complete while the
@@ -1521,7 +1524,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		// Wait budget spent: settle the carried refused song below exactly as when
 		// every lane answered (done + timing_outcome=categorical, nothing written,
 		// never cached). A blocked answer carries no song to settle: it takes the
-		// all-blocked deferral instead (no miss charged; #1395 settles it).
+		// all-blocked settle instead (settleBlocked, #1395).
 		var ru *orchestrator.RefusedUntriedError
 		if errors.As(err, &ru) && ru.Blocked {
 			err = orchestrator.ErrAllResultsBlocked
@@ -1533,6 +1536,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		w.lastItemContactedProvider = contactedProvider(song)
 		// The writer's block backstop keys on the row identity (#1394).
 		song.IdentityArtistKey, song.IdentityTitleKey = blockArtistKey, blockTitleKey
+	}
+	if errors.Is(err, orchestrator.ErrAllResultsBlocked) {
+		return w.settleBlocked(ctx, item) // #1395: its own outcome, not a miss
 	}
 	if err != nil {
 		switch orchestrator.ClassifyOutcome(err) {
@@ -1617,13 +1623,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// Every active lane was tried and none returned lyrics: record a miss for
 			// each. Errors are non-fatal; recording happens before the Defer/Complete
 			// so the queue state is clean regardless of the recording outcome.
-			//
-			// All-blocked (#1394) is neither: no miss or lane attempt is charged,
-			// and the deferral below cannot spin or feed the backoff (#1395 settles it).
-			blocked := errors.Is(err, orchestrator.ErrAllResultsBlocked)
-			if !blocked {
-				w.recordMisses(context.WithoutCancel(ctx))
-			}
+			w.recordMisses(context.WithoutCancel(ctx))
 			// Also persist the per-track attribution (all attempted lanes missed this
 			// track) for the true per-track hit-rate (#282). The orchestrator carries
 			// the attempts on the returned song even on the benign-miss error path.
@@ -1635,9 +1635,7 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// lane - including the detector lane, if present - missed, so there is
 			// nothing further to detect; this branch owns only the miss-counter and
 			// defer/requeue duties.
-			if !blocked {
-				w.recordLaneAttempts(context.WithoutCancel(ctx), item.ID, song.LaneAttempts)
-			}
+			w.recordLaneAttempts(context.WithoutCancel(ctx), item.ID, song.LaneAttempts)
 			// Persist the not-instrumental detector telemetry on the FIRST live
 			// detection so later deferred passes can re-decide from the stored scores
 			// instead of re-running YAMNet (#582). Only when the detector actually ran
@@ -1825,14 +1823,17 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// a failure must never settle an upgrade trip back onto the OLD file
 	// record (R2-M1), so it takes the ordinary fail/retry instead.
 	landed := false
-	for _, p := range paths {
+	for i, p := range paths {
 		err := write(song, p.Filename, p.Outdir)
-		if errors.Is(err, lyrics.ErrBlocked) {
-			// The backstop caught a block marked mid-pass: defer as for an
+		if errors.Is(err, lyrics.ErrBlocked) && !landed && len(kept) == 0 && !heldByLaterPath(song, paths[i+1:]) {
+			// The backstop caught a block marked mid-pass: settle as for an
 			// all-blocked dispatch (an upgrade trip keeps its file record; #1395).
-			slog.Info("worker: write refused, result is blocked", "id", item.ID)
-			w.consecutiveFailures = 0
-			return w.requeueDeferred(ctx, item, fmt.Errorf("worker: write item %d: %w", item.ID, orchestrator.ErrAllResultsBlocked))
+			// Only while NO output path holds a file from this pass, landed or
+			// kept: a blocked row has no file, so with one it takes the ordinary
+			// failure path below instead. The writer refuses on the block BEFORE
+			// its no-downgrade guard, so a later path's file is never reported as
+			// kept here; heldByLaterPath reads the disk for it.
+			return w.settleBlocked(ctx, item)
 		}
 		if errors.Is(err, lyrics.ErrKeptBetter) {
 			kept = append(kept, keptErrorOf(err))
