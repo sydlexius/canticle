@@ -26,6 +26,18 @@ func WithinRoot(root, p string) bool {
 	return ok
 }
 
+// ContainingRoot returns the longest of roots that contains p (a path equal to a
+// root counts), so nested library roots resolve to the innermost one. Lexical,
+// like WithinRoot. ok is false when none contains p.
+func ContainingRoot(roots []string, p string) (root string, ok bool) {
+	for _, r := range roots {
+		if WithinRoot(r, p) && len(r) > len(root) {
+			root, ok = r, true
+		}
+	}
+	return root, ok
+}
+
 // ResolveWithinRoot reports whether p resolves to a location inside root and, on
 // success, returns the fully resolved (symlink-free) path so callers can use the
 // exact value they validated as the filesystem target (check path == write

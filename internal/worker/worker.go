@@ -36,6 +36,9 @@ type Queue interface {
 	Fail(ctx context.Context, id int64, cause error) (queue.WorkItem, error)
 	Defer(ctx context.Context, id int64, retryAfter time.Duration, cause error) (queue.WorkItem, error)
 	Release(ctx context.Context, id int64) error
+	// ReleaseUntil is Release with a wait: the row returns to its prior status
+	// but is not ready until retryAfter has passed. No attempt is charged.
+	ReleaseUntil(ctx context.Context, id int64, retryAfter time.Duration) error
 	// DeferRefused parks a processing row whose only result was timing-refused
 	// while a lane did not answer (#950), bounded by maxWaits on the row's own
 	// refused_waits counter. deferred=false with a nil error means the budget is
@@ -290,8 +293,14 @@ type Worker struct {
 	// with its own independent circuit.Breaker (never a shared pool). The circuit
 	// config setters and the RunOnce idle gate fan out across all of them, and a
 	// fallback lane is appended by SetFallbackProviders.
-	lanes                 []*orchestrator.Lane
-	writer                lyrics.Writer
+	lanes  []*orchestrator.Lane
+	writer lyrics.Writer
+	// healer answers the library-root check (#1430). Nil disables it.
+	healer                OutputHealer
+	rootCache             map[string]rootAnswer
+	rootList              []string // cached library roots; nil until loaded
+	rootListAt            time.Time
+	offlineNotes          map[string]*offlineNote
 	verifier              verification.Verifier
 	verifyBelowConfidence float64
 	// audioDetector, when non-nil, is invoked on provider misses to detect
@@ -1467,6 +1476,16 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			return errQueueEmpty
 		}
 		return fmt.Errorf("worker: dequeue: %w", err)
+	}
+
+	// An absent library root is a mount outage, not this row's failure: set the
+	// row aside before any fetch, no attempt charged, and carry on with the next
+	// row (#1430). It is parked into the future, so it is not re-dequeued at once.
+	if off, relErr := w.parkIfLibraryOffline(ctx, item); relErr != nil {
+		return relErr
+	} else if off {
+		w.lastItemContactedProvider = false // no provider request: no pacing wait
+		return nil
 	}
 
 	// Resolve the matching artist once (album-artist preferred over a possibly
@@ -2717,6 +2736,123 @@ func (w *Worker) failPass(ctx context.Context, item queue.WorkItem, cause error,
 		return fmt.Errorf("worker: fail item %d after %v: %w", item.ID, cause, err)
 	}
 	return nil
+}
+
+// OutputHealer is the worker's seam to the library-root check (#1430),
+// implemented by prune.Pruner. A nil healer disables the mount guard.
+type OutputHealer interface {
+	// LibraryRoots lists the configured library roots. It reads the database
+	// only; the worker caches the answer.
+	LibraryRoots(ctx context.Context) ([]string, error)
+	// RootOnline reports whether that one root is present and populated.
+	RootOnline(root string) bool
+}
+
+// SetOutputHealer installs the healer; nil disables the guard and preflight.
+func (w *Worker) SetOutputHealer(h OutputHealer) { w.healer = h }
+
+const (
+	// rootOnlineTTL bounds how long one root's online answer, and the cached
+	// library-root list, are reused. A pass drains many rows, so this is what
+	// stops a spun-down array being probed (and the libraries table re-read)
+	// once per row; it is a TTL, not a per-pass reset, so a long-running pass
+	// still notices a remount.
+	rootOnlineTTL = time.Minute
+	// libraryOfflineWait is how long a row whose root is offline is set aside.
+	libraryOfflineWait = 5 * time.Minute
+)
+
+type rootAnswer struct {
+	online bool
+	at     time.Time
+}
+
+// offlineNote tracks the per-root offline log line: when it last fired and how
+// many rows were set aside since.
+type offlineNote struct {
+	at     time.Time
+	parked int
+}
+
+// libraryRoots returns the configured roots, cached for rootOnlineTTL.
+func (w *Worker) libraryRoots(ctx context.Context) ([]string, error) {
+	now := w.now()
+	if w.rootList != nil && now.Sub(w.rootListAt) < rootOnlineTTL {
+		return w.rootList, nil
+	}
+	roots, err := w.healer.LibraryRoots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if roots == nil {
+		roots = []string{} // cache an empty list too: non-nil marks it loaded
+	}
+	w.rootList, w.rootListAt = roots, now
+	return roots, nil
+}
+
+// rootIsOnline answers for ONE library root, caching the answer for rootOnlineTTL.
+func (w *Worker) rootIsOnline(root string) bool {
+	now := w.now()
+	if a, ok := w.rootCache[root]; ok && now.Sub(a.at) < rootOnlineTTL {
+		return a.online
+	}
+	if w.rootCache == nil {
+		w.rootCache = map[string]rootAnswer{}
+	}
+	online := w.healer.RootOnline(root)
+	w.rootCache[root] = rootAnswer{online: online, at: now}
+	return online
+}
+
+// noteOffline records one row set aside for root and logs at most once per root
+// per TTL, with the count since the last line, so an offline library of N rows
+// does not write N lines every wait. The line carries no path.
+func (w *Worker) noteOffline(root string) {
+	now := w.now()
+	if w.offlineNotes == nil {
+		w.offlineNotes = map[string]*offlineNote{}
+	}
+	n := w.offlineNotes[root]
+	if n == nil {
+		n = &offlineNote{}
+		w.offlineNotes[root] = n
+	}
+	n.parked++
+	if !n.at.IsZero() && now.Sub(n.at) < rootOnlineTTL {
+		return
+	}
+	slog.Warn("worker: library root offline; rows set aside without a fetch or an attempt", "rows", n.parked, "wait", libraryOfflineWait)
+	n.at, n.parked = now, 0
+}
+
+// parkIfLibraryOffline sets item aside and reports true when the library root
+// holding its source is absent: an unmounted share is not the row's failure, so
+// no fetch, no attempt, and the pass goes on to the next row (#1430). Only the
+// row's own root is checked. A lookup error falls through so a database hiccup
+// never stalls the queue. Logs carry no path.
+func (w *Worker) parkIfLibraryOffline(ctx context.Context, item queue.WorkItem) (bool, error) {
+	if w.healer == nil || item.Inputs.SourcePath == "" {
+		return false, nil
+	}
+	roots, err := w.libraryRoots(ctx)
+	if err != nil {
+		slog.Warn("worker: library root lookup failed; proceeding", "id", item.ID, "error", err)
+		return false, nil
+	}
+	root, ok := pathutil.ContainingRoot(roots, item.Inputs.SourcePath)
+	if !ok {
+		return false, nil
+	}
+	if w.rootIsOnline(root) {
+		delete(w.offlineNotes, root) // back online: the next outage logs at once
+		return false, nil
+	}
+	if relErr := w.queue.ReleaseUntil(context.WithoutCancel(ctx), item.ID, libraryOfflineWait); relErr != nil {
+		return true, fmt.Errorf("worker: park item %d with library root offline: %w", item.ID, relErr)
+	}
+	w.noteOffline(root)
+	return true, nil
 }
 
 // upgradeMaxAttempts caps an upgrade trip's failed attempts (#553): the third

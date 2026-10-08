@@ -1215,6 +1215,38 @@ func (q *DBQueue) Release(ctx context.Context, id int64) error {
 	return requireAffected(res, "queue: release")
 }
 
+// ReleaseUntil is Release plus a wait: the processing row returns to its prior
+// status exactly as Release does, but with next_attempt_at set retryAfter from
+// now, so it leaves the ready set until then instead of being re-claimed at
+// once. No attempt, miss or refused-wait is charged and priority is untouched
+// (#1430: a row whose library root is unmounted is not the row's failure, and
+// no existing parking method is free of a charge). A row not in 'processing'
+// is an error, as with Release.
+func (q *DBQueue) ReleaseUntil(ctx context.Context, id int64, retryAfter time.Duration) error {
+	res, err := q.db.ExecContext(ctx,
+		`UPDATE work_queue
+         SET status = CASE
+                 WHEN prev_status = '' THEN 'pending'
+                 ELSE prev_status
+             END,
+             last_error = CASE
+                 WHEN prev_status IN ('', 'pending') AND last_error <> '' THEN ?
+                 WHEN prev_status IN ('', 'pending') THEN ''
+                 ELSE last_error
+             END,
+             next_attempt_at = ?
+         WHERE id = ?
+           AND status = 'processing'`,
+		releaseCauseClearedError,
+		formatTime(q.now().Add(retryAfter)),
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("queue: release until: %w", err)
+	}
+	return requireAffected(res, "queue: release until")
+}
+
 // Cleanup removes retryable queued work for the same normalized artist/title.
 // Processing and completed rows are preserved to avoid racing active workers or
 // losing history for work that has already finished.

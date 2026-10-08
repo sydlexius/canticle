@@ -1219,6 +1219,8 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	cacheRepo := cache.New(sqlDB)
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
 	w.SetBlockChecker(blocks)
+	// Wait out an offline library root (#1430).
+	w.SetOutputHealer(prune.New(sqlDB))
 	w.SetDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion))
 	// Answer the fetch-time metadata read from audio_metadata rather than by
 	// opening each item's audio file (#712). Same reader identity as the duration
