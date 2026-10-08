@@ -40,23 +40,10 @@ func (s *Service) Unblock(ctx context.Context, req UnblockRequest) (UnblockResul
 	if (req.BlockID == 0) == (req.WorkItemID == 0) {
 		return UnblockResult{}, ErrUnblockTarget
 	}
-	var artistKey, titleKey string
-	var err error
-	if req.BlockID != 0 {
-		err = s.db.QueryRowContext(ctx, `SELECT artist_key, title_key FROM lyric_blocks WHERE id = ?`, req.BlockID).Scan(&artistKey, &titleKey)
-	} else {
-		err = s.db.QueryRowContext(ctx, `SELECT artist_key, title_key FROM work_queue WHERE id = ?`, req.WorkItemID).Scan(&artistKey, &titleKey)
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return UnblockResult{}, ErrNotFound
-	}
-	if err != nil {
-		return UnblockResult{}, fmt.Errorf("lyricblock: unblock lookup: %w", err)
-	}
 	var res UnblockResult
-	err = dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
+	err := dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
 		res = UnblockResult{}
-		return s.unblockTx(ctx, req, artistKey, titleKey, &res)
+		return s.unblockTx(ctx, req, &res)
 	})
 	if err != nil {
 		return UnblockResult{}, err
@@ -65,32 +52,43 @@ func (s *Service) Unblock(ctx context.Context, req UnblockRequest) (UnblockResul
 	return res, nil
 }
 
-func (s *Service) unblockTx(ctx context.Context, req UnblockRequest, artistKey, titleKey string, res *UnblockResult) error {
-	// List before the transaction: the pool has one connection.
-	ids := []int64{req.BlockID}
-	if req.BlockID == 0 {
-		blocks, lerr := s.store.List(ctx, ListFilter{ArtistKey: artistKey, TitleKey: titleKey})
-		if lerr != nil {
-			return lerr
-		}
-		ids = ids[:0]
-		for _, b := range blocks {
-			ids = append(ids, b.ID)
-		}
-	}
+// unblockTx runs the whole unblock in one transaction: the target's identity is
+// read, its blocks are deleted by exact key equality (empty keys included, so a
+// row with an empty key never sweeps another identity's blocks), and the
+// blocked row is reopened. A block added concurrently is therefore either
+// deleted here or committed after, never left behind a reopened row.
+func (s *Service) unblockTx(ctx context.Context, req UnblockRequest, res *UnblockResult) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("lyricblock: begin unblock: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, id := range ids {
-		ok, rerr := s.store.Remove(ctx, tx, id)
+	var artistKey, titleKey string
+	if req.BlockID != 0 {
+		err = tx.QueryRowContext(ctx, `SELECT artist_key, title_key FROM lyric_blocks WHERE id = ?`, req.BlockID).Scan(&artistKey, &titleKey)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT artist_key, title_key FROM work_queue WHERE id = ?`, req.WorkItemID).Scan(&artistKey, &titleKey)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lyricblock: unblock lookup: %w", err)
+	}
+	if req.BlockID != 0 {
+		ok, rerr := s.store.Remove(ctx, tx, req.BlockID)
 		if rerr != nil {
 			return rerr
 		}
 		if ok {
 			res.Removed++
 		}
+	} else {
+		n, derr := s.store.DeleteByIdentityTx(ctx, tx, artistKey, titleKey)
+		if derr != nil {
+			return derr
+		}
+		res.Removed = n
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id FROM work_queue WHERE artist_key = ? AND title_key = ? AND status = 'done' AND outcome_type = ?`,

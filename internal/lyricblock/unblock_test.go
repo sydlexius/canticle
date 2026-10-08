@@ -41,3 +41,77 @@ func TestUnblockRemovesWhatMarkStoredForADifferingAlbumArtist(t *testing.T) {
 		t.Fatalf("Unblock = %+v, %v", res, err)
 	}
 }
+
+func (f *fx) addBlock(t *testing.T, artistKey, fp string) int64 {
+	t.Helper()
+	if _, err := f.svc.store.Add(f.ctx, f.db, Block{ArtistKey: artistKey, TitleKey: "quill moor", Fingerprint: fp}); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	if err := f.db.QueryRow(`SELECT id FROM lyric_blocks WHERE fingerprint = ?`, fp).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestUnblockByBlockIDReopensTheBlockedRow(t *testing.T) {
+	f := newFx(t)
+	f.mustExec(t, `UPDATE work_queue SET outcome_type = 'blocked'`)
+	keep := f.addBlock(t, "vexa dunn", "fp-keep")
+	drop := f.addBlock(t, "vexa dunn", "fp-drop")
+	res, err := f.svc.Unblock(f.ctx, UnblockRequest{BlockID: drop})
+	if err != nil || res.Removed != 1 || res.Reopened != 1 {
+		t.Fatalf("Unblock = %+v, %v", res, err)
+	}
+	if f.count(t, `SELECT COUNT(*) FROM lyric_blocks WHERE id = ?`, keep) != 1 || f.count(t, `SELECT COUNT(*) FROM lyric_blocks WHERE id = ?`, drop) != 0 {
+		t.Error("only the named block should be removed")
+	}
+	if f.status(t) != "pending" {
+		t.Errorf("status = %q, want pending", f.status(t))
+	}
+}
+
+func TestUnblockRejectsBothTargetsAndUnknownWorkItem(t *testing.T) {
+	f := newFx(t)
+	if _, err := f.svc.Unblock(f.ctx, UnblockRequest{BlockID: 1, WorkItemID: f.id}); !errors.Is(err, ErrUnblockTarget) {
+		t.Errorf("both targets err = %v", err)
+	}
+	if _, err := f.svc.Unblock(f.ctx, UnblockRequest{WorkItemID: f.id + 999}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown work item err = %v", err)
+	}
+}
+
+func TestUnblockLeavesANonBlockedDoneRowSettled(t *testing.T) {
+	f := newFx(t)
+	f.addBlock(t, "vexa dunn", "fp-a")
+	res, err := f.svc.Unblock(f.ctx, UnblockRequest{WorkItemID: f.id})
+	if err != nil || res.Removed != 1 || res.Reopened != 0 {
+		t.Fatalf("Unblock = %+v, %v", res, err)
+	}
+	if f.status(t) != "done" {
+		t.Errorf("status = %q, want done", f.status(t))
+	}
+}
+
+// An empty key on the work item is a value to match, not a wildcard: it must
+// not delete another artist's block that shares the title.
+func TestUnblockEmptyArtistKeyDoesNotSweepOtherArtists(t *testing.T) {
+	f := newFx(t)
+	var emptyID int64
+	if err := f.db.QueryRow(`INSERT INTO work_queue (artist, title, artist_key, title_key, outdir, filename, status, outcome_type)
+		VALUES ('', 'Quill Moor', '', 'quill moor', ?, 'other.flac', 'done', 'synced') RETURNING id`, f.dir).Scan(&emptyID); err != nil {
+		t.Fatal(err)
+	}
+	other := f.addBlock(t, "vexa dunn", "fp-other")
+	own := f.addBlock(t, "", "fp-own")
+	res, err := f.svc.Unblock(f.ctx, UnblockRequest{WorkItemID: emptyID})
+	if err != nil || res.Removed != 1 {
+		t.Fatalf("Unblock = %+v, %v", res, err)
+	}
+	if f.count(t, `SELECT COUNT(*) FROM lyric_blocks WHERE id = ?`, other) != 1 {
+		t.Error("another artist's block was removed")
+	}
+	if f.count(t, `SELECT COUNT(*) FROM lyric_blocks WHERE id = ?`, own) != 0 {
+		t.Error("the empty-key block was not removed")
+	}
+}
