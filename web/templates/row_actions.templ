@@ -1,0 +1,89 @@
+package templates
+
+// RowActionsCell is the Actions cell body (#1249): up to two icon buttons on ONE
+// line (no wrapping, no menu, no JS). A marked track shows its icon "on"
+// (a filled chip, plus the name in a visually hidden span) and the click goes to the undo/unblock page.
+templ RowActionsCell(a RowActions) {
+	if a.ID != 0 && a.HasLinks() {
+		<span class="mx-row-actions">
+			if a.ShowInstrumental() {
+				if a.Manual {
+					<a class="mx-row-icon mx-row-icon-on" href={ templ.SafeURL(a.Href("instrumental/undo")) } title="Marked instrumental by hand. Undo">
+						@iconMicMuted()
+						<span class="mx-row-sr">Marked instrumental by hand. Undo</span>
+					</a>
+				} else {
+					<a class="mx-row-icon" href={ templ.SafeURL(a.Href("instrumental")) } title="Mark instrumental">
+						@iconMicMuted()
+						<span class="mx-row-sr">Mark instrumental</span>
+					</a>
+				}
+			}
+			if a.ShowUnblock() {
+				<a class="mx-row-icon mx-row-icon-on" href={ templ.SafeURL(a.Href("unblock")) } title="Lyrics blocked. Unblock">
+					@iconFlag()
+					<span class="mx-row-sr">Lyrics blocked. Unblock</span>
+				</a>
+			} else if a.ShowWrong() {
+				<a class="mx-row-icon" href={ templ.SafeURL(a.Href("wrong")) } title="Lyrics are wrong">
+					@iconFlag()
+					<span class="mx-row-sr">Lyrics are wrong</span>
+				</a>
+			}
+		</span>
+	}
+}
+
+// iconMicMuted reuses the muted-microphone geometry of iconInstrumentalDetector
+// (lanemark.templ:87), the glyph already tied to "instrumental" in this UI.
+templ iconMicMuted() {
+	<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+		<rect x="9" y="3" width="6" height="10" rx="3"></rect>
+		<path d="M6 11v1a6 6 0 0 0 12 0v-1"></path>
+		<path d="M12 18v3"></path>
+		<path d="M4 4 20 20"></path>
+	</svg>
+}
+
+// iconFlag is a flag, same stroke style: the "these lyrics are wrong" glyph.
+templ iconFlag() {
+	<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+		<path d="M4 22V4"></path>
+		<path d="M4 4h13l-2 4 2 4H4"></path>
+	</svg>
+}
+
+// MarkStatusLine is the one-line result of a mark action, shown at the top of
+// the page the action returned to; empty text renders nothing.
+templ MarkStatusLine(text string) {
+	if text != "" {
+		<p class="mx-row-status" role="status">{ text }</p>
+	}
+}
+
+// MarkConfirmPage is the confirm page for a mark action, the revive confirm
+// page's pattern: what will happen in plain words, then a POST form carrying the
+// CSRF token and the return target.
+templ MarkConfirmPage(version string, view MarkConfirmView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout(view.Title, "/queue", version, reports, "/static/css/queue.css", musixmatchInactive, musixmatchServing) {
+		<h1 class="mx-page-title">{ view.Title }</h1>
+		<p class="mx-page-subtitle">{ view.Track }</p>
+		if view.Alert != "" {
+			<p class="mx-revive-error mx-status-error" role="alert">{ view.Alert }</p>
+			<p class="mx-revive-confirm"><a class="mx-run-link" href={ templ.SafeURL(view.Return) }>Back</a></p>
+		} else {
+			for _, n := range view.Notes {
+				<p class="mx-revive-note">{ n }</p>
+			}
+			if view.Files != nil {
+				<p class="mx-revive-note">Lyric files that would be removed: { itoa64(int64(*view.Files)) }.</p>
+			}
+			<form class="mx-revive-confirm" method="post" action={ templ.SafeURL(view.Action) }>
+				<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+				<input type="hidden" name="return" value={ view.Return }/>
+				<button type="submit" class="mx-run-button">{ view.Confirm }</button>
+				<a class="mx-run-link" href={ templ.SafeURL(view.Return) }>Cancel</a>
+			</form>
+		}
+	}
+}
