@@ -34,6 +34,11 @@ type cacheLaneRig struct {
 
 func newCacheLaneRig(t *testing.T, primary *fakeFetcher) (*cacheLaneRig, *Worker) {
 	t.Helper()
+	return newCacheLaneRigFor(t, primary, models.Track{ArtistName: "Synthetic Artist", TrackName: "Synthetic Title"})
+}
+
+func newCacheLaneRigFor(t *testing.T, primary *fakeFetcher, track models.Track) (*cacheLaneRig, *Worker) {
+	t.Helper()
 	ctx := context.Background()
 	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -44,7 +49,7 @@ func newCacheLaneRig(t *testing.T, primary *fakeFetcher) (*cacheLaneRig, *Worker
 	q.SetRandomized(false)
 	lib := t.TempDir()
 	item, err := q.Enqueue(ctx, models.Inputs{
-		Track:      models.Track{ArtistName: "Synthetic Artist", TrackName: "Synthetic Title"},
+		Track:      track,
 		Outdir:     lib,
 		Filename:   "track.lrc",
 		SourcePath: filepath.Join(lib, "track.flac"),

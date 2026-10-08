@@ -313,6 +313,10 @@ type Worker struct {
 	// mix falls outside the configured allowlist. Named scriptGuard (not guard)
 	// to avoid colliding with the guardReject helper. Default nil (no guard).
 	scriptGuard ScriptGuard
+	// blocks, when non-nil, is the lyric-block check (#1394) fed to every
+	// orchestrator this worker builds and to the cache accept predicate. Nil
+	// (the default) means no blocking.
+	blocks lyrics.BlockChecker
 	// providerRecorder, when non-nil, receives per-lane hit and miss events so the
 	// /metrics endpoint can report mxlrcgo_provider_hits_total{lane} and
 	// mxlrcgo_provider_misses_total{lane}. Errors from it are non-fatal (logged at
@@ -634,6 +638,7 @@ func (w *Worker) rebuildOrchestrator() error {
 		return err
 	}
 	orch.SetRaceWait(w.raceWait)
+	orch.SetBlockChecker(w.blocks)
 	// With more than one lane the guard governs fall-through, so wire it into
 	// suitability. With a single lane it stays unset (the worker's guardReject is
 	// the sole screen), preserving exactly-one Accept call per result. This must
@@ -949,6 +954,15 @@ func (w *Worker) SetDetectorOrdering(ordering string) {
 	w.detectorOrdering = ordering
 	// The mode is unchanged (and already valid) and the primary lane is always
 	// present, so the rebuild cannot fail here.
+	_ = w.rebuildOrchestrator()
+}
+
+// SetBlockChecker installs the lyric-block check (#1394) used by the dispatch,
+// the cache accept predicate and (through the shared writer) the write
+// backstop. Serve mode only; nil disables it. Rebuilds the orchestrator so
+// the check is wired in whatever order the setters run.
+func (w *Worker) SetBlockChecker(c lyrics.BlockChecker) {
+	w.blocks = c
 	_ = w.rebuildOrchestrator()
 }
 
@@ -1456,6 +1470,12 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// multi-valued track artist) and use the SAME resolved track for the cache
 	// lookup, the provider query, and the cache store, so the read and write
 	// cache keys always agree. Confidence still scores against the original tag.
+	// A lyric block is keyed by the ROW's identity (queue.IdentityKeys of the
+	// row's own track, exactly its artist_key/title_key), not by the resolved
+	// track below, whose artist may be the album artist (#1394). Carried on ctx so
+	// the dispatch, the cache accept predicate and the word recheck all use it.
+	blockArtistKey, blockTitleKey := queue.IdentityKeys(item.Inputs.Track)
+	ctx = lyrics.WithBlockIdentity(ctx, blockArtistKey, blockTitleKey)
 	resolvedTrack := item.Inputs.Track
 	resolvedTrack.ArtistName = normalize.ResolveArtist(item.Inputs.Track.AlbumArtist, item.Inputs.Track.ArtistName)
 	// Restore the recording identity work_queue does not persist (duration, ISRC)
@@ -1500,11 +1520,19 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		}
 		// Wait budget spent: settle the carried refused song below exactly as when
 		// every lane answered (done + timing_outcome=categorical, nothing written,
-		// never cached).
-		err = nil
+		// never cached). A blocked answer carries no song to settle: it takes the
+		// all-blocked deferral instead (no miss charged; #1395 settles it).
+		var ru *orchestrator.RefusedUntriedError
+		if errors.As(err, &ru) && ru.Blocked {
+			err = orchestrator.ErrAllResultsBlocked
+		} else {
+			err = nil
+		}
 	}
 	if err == nil {
 		w.lastItemContactedProvider = contactedProvider(song)
+		// The writer's block backstop keys on the row identity (#1394).
+		song.IdentityArtistKey, song.IdentityTitleKey = blockArtistKey, blockTitleKey
 	}
 	if err != nil {
 		switch orchestrator.ClassifyOutcome(err) {
@@ -1589,7 +1617,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// Every active lane was tried and none returned lyrics: record a miss for
 			// each. Errors are non-fatal; recording happens before the Defer/Complete
 			// so the queue state is clean regardless of the recording outcome.
-			w.recordMisses(context.WithoutCancel(ctx))
+			//
+			// All-blocked (#1394) is neither: no miss or lane attempt is charged,
+			// and the deferral below cannot spin or feed the backoff (#1395 settles it).
+			blocked := errors.Is(err, orchestrator.ErrAllResultsBlocked)
+			if !blocked {
+				w.recordMisses(context.WithoutCancel(ctx))
+			}
 			// Also persist the per-track attribution (all attempted lanes missed this
 			// track) for the true per-track hit-rate (#282). The orchestrator carries
 			// the attempts on the returned song even on the benign-miss error path.
@@ -1601,7 +1635,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// lane - including the detector lane, if present - missed, so there is
 			// nothing further to detect; this branch owns only the miss-counter and
 			// defer/requeue duties.
-			w.recordLaneAttempts(context.WithoutCancel(ctx), item.ID, song.LaneAttempts)
+			if !blocked {
+				w.recordLaneAttempts(context.WithoutCancel(ctx), item.ID, song.LaneAttempts)
+			}
 			// Persist the not-instrumental detector telemetry on the FIRST live
 			// detection so later deferred passes can re-decide from the stored scores
 			// instead of re-running YAMNet (#582). Only when the detector actually ran
@@ -1791,6 +1827,13 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	landed := false
 	for _, p := range paths {
 		err := write(song, p.Filename, p.Outdir)
+		if errors.Is(err, lyrics.ErrBlocked) {
+			// The backstop caught a block marked mid-pass: defer as for an
+			// all-blocked dispatch (an upgrade trip keeps its file record; #1395).
+			slog.Info("worker: write refused, result is blocked", "id", item.ID)
+			w.consecutiveFailures = 0
+			return w.requeueDeferred(ctx, item, fmt.Errorf("worker: write item %d: %w", item.ID, orchestrator.ErrAllResultsBlocked))
+		}
 		if errors.Is(err, lyrics.ErrKeptBetter) {
 			kept = append(kept, keptErrorOf(err))
 			continue
@@ -2484,6 +2527,13 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 		_, err := w.cache.LookupAccepted(ctx, track.ArtistName, track.TrackName, normalize.DurationBucket(track.TrackLength),
 			func(raw string) bool {
 				decoded = lyrics.DecodeCachedSong(raw, track)
+				// A blocked entry reads as a miss, like a timing-refused one (#1394).
+				// The row identity on ctx keys the block (DecodeCachedSong restores
+				// the stored provider track, which may be spelled differently).
+				decoded = lyrics.StampBlockIdentity(ctx, decoded)
+				if w.blocks != nil && w.blocks.SongBlocked(ctx, decoded) {
+					return false
+				}
 				return !lyrics.RefusedByTimingGuard(decoded, track.TrackLength)
 			})
 		if err == nil {
