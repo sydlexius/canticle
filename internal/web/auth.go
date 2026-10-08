@@ -317,8 +317,14 @@ func safeReturnPath(r *http.Request) string {
 // scheme-relative "//host", and backslash tricks) to close the open-redirect
 // vector.
 func safeNext(raw string) string {
-	const fallback = dashboardPath
-	raw = strings.TrimSpace(raw)
+	return safeLocalPath(strings.TrimSpace(raw), dashboardPath)
+}
+
+// safeLocalPath returns raw when it is a single-slash-rooted local path and
+// fallback otherwise. It is the one redirect-target sanitizer in this package
+// (safeNext and safeReturn both call it), so the open-redirect rules live in
+// one place. raw is not trimmed; callers that want that do it first.
+func safeLocalPath(raw, fallback string) string {
 	if raw == "" || raw[0] != '/' {
 		return fallback
 	}

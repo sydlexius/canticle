@@ -307,6 +307,10 @@ func TestSafeReturn(t *testing.T) {
 	for in, want := range map[string]string{
 		"/queue/failed?x=1": "/queue/failed?x=1", "/dashboard": "/dashboard",
 		"//h": "/queue", "http://h/": "/queue", "": "/queue", "queue": "/queue", "/a\nb": "/queue",
+		`/\evil.example`: "/queue", `/\\evil.example`: "/queue", "//evil.example": "/queue",
+		"/%5Cevil.example": "/%5Cevil.example", // encoded: never decoded into a host server-side, so local
+		`/ok\x`:            "/queue", "/a\tb": "/queue", "/a\rb": "/queue", "/a\nb?x=1": "/queue",
+		"/queue?filter=failed&page=2": "/queue?filter=failed&page=2",
 	} {
 		if got := safeReturn(in); got != want {
 			t.Errorf("safeReturn(%q) = %q, want %q", in, got, want)

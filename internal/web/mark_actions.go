@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -81,14 +80,7 @@ var markKinds = []markKind{
 // form) so the post-action redirect can never leave the site; anything else is
 // the queue landing page.
 func safeReturn(raw string) string {
-	const fallback = "/queue"
-	if raw == "" || raw[0] != '/' || strings.HasPrefix(raw, "//") || strings.ContainsAny(raw, "\\\r\n") {
-		return fallback
-	}
-	if p, err := url.Parse(raw); err != nil || p.Scheme != "" || p.Host != "" {
-		return fallback
-	}
-	return raw
+	return safeLocalPath(raw, "/queue")
 }
 
 // markTrack reads the track's display name by work item id, never from the request.
