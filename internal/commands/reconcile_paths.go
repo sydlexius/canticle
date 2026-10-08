@@ -280,6 +280,10 @@ func runReconcilePaths(ctx context.Context, out io.Writer, args ScanReconcilePat
 	_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d work_queue row(s) with a stale output_paths destination (skipped: %d ambiguous, %d unfixable, %d stat error, %d malformed, %d raced)%s\n",
 		repairVerb, len(repairRes.Repaired), repairRes.SkippedAmbiguous, repairRes.SkippedUnfixable,
 		repairRes.SkippedStatError, repairRes.SkippedMalformed, repairRes.SkippedRaced, suffixDryRun(args.Yes))
+	if repairRes.DroppedEntries+repairRes.RetainedEntries > 0 {
+		_, _ = fmt.Fprintf(out, "reconcile-paths: %s %d stale output_paths entr(ies) from multi-entry rows, retained %d (offline library or folder, no linked file to prove it stale, or a real second copy)%s\n",
+			repairVerb, repairRes.DroppedEntries, repairRes.RetainedEntries, suffixDryRun(args.Yes))
+	}
 	if backupFile != nil {
 		_, _ = fmt.Fprintf(out, "backup of pruned/relinked/retained/repaired rows written to %s\n", backupPath)
 	}

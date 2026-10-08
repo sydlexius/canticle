@@ -12,18 +12,18 @@ import (
 )
 
 // addLibraryB registers a second library root beside root, populated so it is
-// online, and returns its path.
-func addLibraryB(t *testing.T, ctx context.Context, sqlDB *sql.DB, root string) string {
+// online, and returns its path and id.
+func addLibraryB(t *testing.T, ctx context.Context, sqlDB *sql.DB, root string) (string, int64) {
 	t.Helper()
 	b := filepath.Join(filepath.Dir(root), "musicB")
 	if err := os.MkdirAll(filepath.Join(b, "keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := library.New(sqlDB).Add(ctx, b, "libB", models.LibrarySettings{})
+	lib, err := library.New(sqlDB).Add(ctx, b, "libB", models.LibrarySettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return b, lib.ID
 }
 
 // linkScanResult adds a scan_results row for file in library libID and links it

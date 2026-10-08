@@ -115,17 +115,50 @@ func TestRepairOutputPaths_LeavesNonMatchingRowsAlone(t *testing.T) {
 		{name: "done", status: "done"},
 		{name: "processing", status: "processing"},
 		{name: "multi-entry", status: "failed", count: func(r RepairResult) int { return r.SkippedAmbiguous },
-			// [{New,a},{Old,a}] with outdir New: rewriting Old would duplicate New.
+			// Every entry is stale: no entry exists, so nothing can be dropped
+			// (a drop needs a surviving entry; see planMultiRepair).
+			setup: func(root, _ string) setupFn {
+				return setPaths(mustJSON([]models.OutputPath{{Outdir: filepath.Join(root, "x", "Old1"), Filename: "02.flac"},
+					{Outdir: filepath.Join(root, "x", "Old2"), Filename: "03.flac"}}))
+			}},
+		// The multi-entry rows below are kept whole: every missing entry is
+		// retained (counted in RetainedEntries) because the evidence that it is
+		// stale is absent (#1430).
+		{name: "second-copy-retained", status: "failed", count: func(r RepairResult) int { return r.RetainedEntries },
 			setup: func(root, newDir string) setupFn {
-				return setPaths(mustJSON([]models.OutputPath{{Outdir: newDir, Filename: "01.flac"},
-					{Outdir: filepath.Join(root, "x", "Old"), Filename: "01.flac"}}))
+				return func(t *testing.T, ctx context.Context, sqlDB *sql.DB, id int64, _, _ string) {
+					second := filepath.Join(root, "x", "Second")
+					var libID int64
+					if err := sqlDB.QueryRowContext(ctx, `SELECT id FROM libraries LIMIT 1`).Scan(&libID); err != nil {
+						t.Fatal(err)
+					}
+					linkScanResult(t, ctx, sqlDB, libID, id, filepath.Join(second, "01.flac"))
+					setPaths(mustJSON([]models.OutputPath{{Outdir: newDir, Filename: "01.flac"}, {Outdir: second, Filename: "01.flac"}}))(t, ctx, sqlDB, id, "", "")
+				}
+			}},
+		{name: "offline-library-root", status: "failed", count: func(r RepairResult) int { return r.RetainedEntries },
+			setup: func(root, newDir string) setupFn {
+				return func(t *testing.T, ctx context.Context, sqlDB *sql.DB, id int64, _, _ string) {
+					b, _ := addLibraryB(t, ctx, sqlDB, root)
+					if err := os.RemoveAll(b); err != nil {
+						t.Fatal(err)
+					}
+					setPaths(mustJSON([]models.OutputPath{{Outdir: newDir, Filename: "01.flac"}, {Outdir: filepath.Join(b, "x", "Old"), Filename: "01.flac"}}))(t, ctx, sqlDB, id, "", "")
+				}
+			}},
+		{name: "no-link-rows", status: "failed", count: func(r RepairResult) int { return r.RetainedEntries },
+			setup: func(root, newDir string) setupFn {
+				return func(t *testing.T, ctx context.Context, sqlDB *sql.DB, id int64, _, _ string) {
+					execWQ(t, ctx, sqlDB, `DELETE FROM work_queue_scan_results WHERE work_queue_id = ?`, id)
+					setPaths(mustJSON([]models.OutputPath{{Outdir: newDir, Filename: "01.flac"}, {Outdir: filepath.Join(root, "x", "Old"), Filename: "01.flac"}}))(t, ctx, sqlDB, id, "", "")
+				}
 			}},
 		// F2: an entry under ANOTHER library root is that library's second copy,
 		// never this row's stale path (#1430).
 		{name: "other-library-entry", status: "failed", count: unfixable,
 			setup: func(root, _ string) setupFn {
 				return func(t *testing.T, ctx context.Context, sqlDB *sql.DB, id int64, _, _ string) {
-					b := addLibraryB(t, ctx, sqlDB, root)
+					b, _ := addLibraryB(t, ctx, sqlDB, root)
 					setPaths(mustJSON([]models.OutputPath{{Outdir: filepath.Join(b, "x", "Old"), Filename: "01.flac"}}))(t, ctx, sqlDB, id, "", "")
 				}
 			}},

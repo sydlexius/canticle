@@ -48,11 +48,17 @@ type RepairOptions struct {
 // RepairResult totals a repair pass.
 type RepairResult struct {
 	Repaired []RepairedRow
-	// SkippedAmbiguous counts rows whose output_paths holds more than one entry.
+	// SkippedAmbiguous counts multi-entry rows where nothing is provably stale.
 	// Such rows come from identityrepair's output_paths union, where the other
 	// entry is usually a different file in a different directory; the row alone
-	// cannot say which entry (if any) a relink left stale, so none is touched.
+	// cannot say which entry (if any) a relink left stale, so planMultiRepair
+	// drops only an entry it can prove stale.
 	SkippedAmbiguous int
+	// DroppedEntries counts missing-directory entries removed from multi-entry
+	// rows (would-remove in a dry run); RetainedEntries counts those left in
+	// place because their root is offline or they are a real second copy (#1430).
+	DroppedEntries  int
+	RetainedEntries int
 	// SkippedUnfixable counts rows outside the relink shape (see relinkShape)
 	// and rows whose own outdir does not exist (or is not a directory): there is
 	// nothing in the row to repair output_paths TO.
@@ -153,12 +159,30 @@ func (p *Pruner) RepairOutputPaths(ctx context.Context, opts RepairOptions) (Rep
 			continue
 		}
 		var fixed []models.OutputPath
+		var dropped, retained int // multi-entry plan counts, added once applied
 		switch {
 		case len(paths) == 0:
 			continue
 		case len(paths) > 1:
-			res.SkippedAmbiguous++
-			continue
+			// Several entries (identityrepair's union): drop only what
+			// planMultiRepair proves stale, else leave the row (#1430).
+			pl, err := p.planMultiRepair(ctx, c.id, c.sourcePath, paths)
+			if err != nil {
+				return res, err
+			}
+			switch {
+			case pl.statErr:
+				res.SkippedStatError++
+				continue
+			case pl.kept == nil:
+				// Nothing is written, so there is no write to race.
+				res.RetainedEntries += pl.retained
+				res.SkippedAmbiguous++
+				continue
+			}
+			// The counts join the result only once the row applies (below).
+			fixed = pl.kept
+			dropped, retained = pl.dropped, pl.retained
 		default:
 			newEntry, v := classifyEntry(roots, c.outdir, c.filename, c.sourcePath, paths[0])
 			switch v {
@@ -176,6 +200,8 @@ func (p *Pruner) RepairOutputPaths(ctx context.Context, opts RepairOptions) (Rep
 		row := RepairedRow{WorkItemID: c.id, OldOutputPaths: paths, NewOutputPaths: fixed}
 		if opts.DryRun {
 			res.Repaired = append(res.Repaired, row)
+			res.DroppedEntries += dropped
+			res.RetainedEntries += retained
 			if opts.Report != nil {
 				if err := opts.Report(row); err != nil {
 					return res, fmt.Errorf("prune: report repaired work_queue %d: %w", c.id, err)
@@ -195,6 +221,8 @@ func (p *Pruner) RepairOutputPaths(ctx context.Context, opts RepairOptions) (Rep
 			continue
 		}
 		res.Repaired = append(res.Repaired, row)
+		res.DroppedEntries += dropped
+		res.RetainedEntries += retained
 	}
 	return res, nil
 }

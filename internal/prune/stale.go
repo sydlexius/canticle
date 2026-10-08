@@ -3,7 +3,11 @@ package prune
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
@@ -61,6 +65,10 @@ func provablyStale(roots rootSet, rootOnline func(string) bool, files []string, 
 	if !ok {
 		return false
 	}
+	spelling, ok := roots.match(dir)
+	if !ok || !subtreeIntact(spelling, dir) {
+		return false
+	}
 	for _, f := range files {
 		if f == "" {
 			continue
@@ -79,6 +87,46 @@ func provablyStale(roots rootSet, rootOnline func(string) bool, files []string, 
 		}
 	}
 	return true
+}
+
+// subtreeIntact reports whether the path from root down to dir shows no sign
+// that a sub-share went away under a populated root (#1430). RootOnline asks
+// only about the root, so a dangling symlink or an unmounted mount point (which
+// reads as an EMPTY directory) inside a live root would otherwise look like a
+// stale path. Every component between root and dir is Lstat'ed, in the spelling
+// the caller matched; the root's own symlink is not a component. It answers
+// false (not proven) when:
+//
+//   - any component is a symlink, dangling or not;
+//   - an Lstat fails with anything other than not-exist;
+//   - the nearest existing ancestor is not a directory; or
+//   - the nearest existing ancestor below the root is an empty directory (the
+//     same "at least one entry" rule dirPopulated applies to a root).
+//
+// When the nearest existing ancestor is the root itself, rootOnline's answer
+// stands. Nothing is cached: one Lstat chain per missing entry, and the
+// populated probe reads at most one directory entry.
+func subtreeIntact(root, dir string) bool {
+	root = filepath.Clean(root)
+	nearest := ""
+	for cur := filepath.Clean(dir); cur != root; cur = filepath.Dir(cur) {
+		if cur == filepath.Dir(cur) {
+			return false // walked off the top without meeting the root
+		}
+		info, err := os.Lstat(cur)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			return false
+		case info.Mode()&fs.ModeSymlink != 0, !info.IsDir():
+			return false
+		}
+		if nearest == "" {
+			nearest = cur
+		}
+	}
+	return nearest == "" || dirPopulated(nearest)
 }
 
 // linkedFiles lists the file paths of every scan_results row linked to the work
