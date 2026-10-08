@@ -6,8 +6,9 @@ package templates
 // two surfaces cannot disagree. Finished and Settled rows add a hint about the
 // player, since those buckets are the only route to it (see queueIndexHint for
 // which bucket holds the editable line-synced tracks under each word sync mode).
-templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musixmatchInactive bool, musixmatchServing bool, lineTop bool) {
+templ QueueIndexPage(version string, tiles []StatTile, reports []RailItem, musixmatchInactive bool, musixmatchServing bool, lineTop bool, status string) {
 	@Layout("Queue", "/queue", version, reports, "/static/css/queue-index.css", musixmatchInactive, musixmatchServing) {
+		@MarkStatusLine(status)
 		<h1 class="mx-page-title">Queue</h1>
 		<p class="mx-page-subtitle">Every track canticle is working on, by where it stands. Pick a bucket to see its tracks.</p>
 		<div class="mx-table-wrap">

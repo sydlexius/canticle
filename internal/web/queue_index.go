@@ -25,5 +25,5 @@ func (u *UI) handleQueueIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render(w, r, templates.QueueIndexPage(u.version, buildQueueTiles(qs), u.buildRail(""), u.musixmatchInactive, u.musixmatchServing,
-		qs.TopRung == reports.TopRungLine))
+		qs.TopRung == reports.TopRungLine, templates.MarkStatusFromQuery(r.URL.Query())))
 }

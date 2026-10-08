@@ -106,6 +106,7 @@ type Handler struct {
 	autoAligner        web.AutoAligner
 	autoMaxConcurrent  int
 	autoBlocks         web.AutoBlocks
+	markDeps           *web.MarkDeps
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
@@ -348,6 +349,12 @@ func WithKeyManagerUI(km web.KeyManager) Option {
 	return func(h *Handler) { h.keyManager = km }
 }
 
+// WithMarkActions wires the web mark-instrumental / mark-wrong routes (#1249).
+// Meaningful only alongside a mounted web UI; without it the routes answer 404.
+func WithMarkActions(d web.MarkDeps) Option {
+	return func(h *Handler) { h.markDeps = &d }
+}
+
 // WithMusixmatchInactive marks the Musixmatch provider as token-less (#385) so
 // the mounted web UI renders the lyrics-disabled notice banner on every shell
 // page. Threaded from runServe. Meaningful only alongside a mounted web UI; with
@@ -410,6 +417,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 			h.webui.AttachLyricEditor(web.EditDeps{
 				Queue: queue.NewDBQueue(h.reportsDB), Durations: h.editDurations, SelfWrites: h.editSelfWrites,
 			})
+		}
+		if h.markDeps != nil {
+			h.webui.AttachMarkActions(*h.markDeps)
 		}
 		if h.previewFlacFFmpeg != "" {
 			h.webui.AttachPreviewFlacFallback(h.previewFlacFFmpeg)
