@@ -20,6 +20,8 @@ var ErrUnblockTarget = errors.New("lyricblock: set exactly one of BlockID and Wo
 type UnblockRequest struct {
 	BlockID    int64
 	WorkItemID int64
+	// DryRun counts what a real run would remove and reopen and changes nothing.
+	DryRun bool
 }
 
 // UnblockResult holds counts only.
@@ -42,6 +44,9 @@ func (s *Service) Unblock(ctx context.Context, req UnblockRequest) (UnblockResul
 	})
 	if err != nil {
 		return UnblockResult{}, err
+	}
+	if req.DryRun {
+		return res, nil
 	}
 	s.log.Info("lyricblock: unblocked", "block_id", req.BlockID, "work_item_id", req.WorkItemID, "removed", res.Removed, "reopened", res.Reopened)
 	return res, nil
@@ -92,6 +97,11 @@ func (s *Service) unblockTx(ctx context.Context, req UnblockRequest, res *Unbloc
 	}
 	if ok {
 		res.Reopened++
+	}
+	if req.DryRun {
+		// The counts above came from the real delete and reopen; the deferred
+		// rollback discards them, so a dry run can never drift from a real run.
+		return nil
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("lyricblock: commit unblock: %w", err)

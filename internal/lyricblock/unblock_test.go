@@ -149,3 +149,50 @@ func TestUnblockRacingAWorkerSettleNeverStrandsABlockedRow(t *testing.T) {
 		t.Fatalf("recovery Unblock = %+v, %v; want 0 removed, 1 reopened", res, err)
 	}
 }
+
+// A dry run changes nothing and its counts equal what the real run then
+// returns, for both targets.
+func TestUnblockDryRunCountsWhatTheRealRunReturns(t *testing.T) {
+	for _, byBlock := range []bool{false, true} {
+		f := newFx(t)
+		f.mustExec(t, `UPDATE work_queue SET outcome_type = 'blocked'`)
+		f.addBlock(t, "vexa dunn", "fp-keep")
+		drop := f.addBlock(t, "vexa dunn", "fp-drop")
+		req := UnblockRequest{WorkItemID: f.id}
+		if byBlock {
+			req = UnblockRequest{BlockID: drop}
+		}
+		dry := req
+		dry.DryRun = true
+		want, err := f.svc.Unblock(f.ctx, dry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.count(t, `SELECT COUNT(*) FROM lyric_blocks`) != 2 || f.status(t) != "done" {
+			t.Fatalf("byBlock=%v: dry run changed state", byBlock)
+		}
+		got, err := f.svc.Unblock(f.ctx, req)
+		if err != nil || got != want || got.Reopened != 1 {
+			t.Errorf("byBlock=%v: dry %+v, real %+v, %v", byBlock, want, got, err)
+		}
+	}
+	f := newFx(t)
+	if _, err := f.svc.Unblock(f.ctx, UnblockRequest{BlockID: 999, DryRun: true}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("dry run unknown id err = %v", err)
+	}
+}
+
+// An empty key is a value, not a wildcard, in the dry-run count too.
+func TestUnblockDryRunEmptyArtistKeyDoesNotCountOtherArtists(t *testing.T) {
+	f := newFx(t)
+	var emptyID int64
+	if err := f.db.QueryRow(`INSERT INTO work_queue (artist, title, artist_key, title_key, outdir, filename, status, outcome_type)
+		VALUES ('', 'Quill Moor', '', 'quill moor', ?, 'other.flac', 'done', 'synced') RETURNING id`, f.dir).Scan(&emptyID); err != nil {
+		t.Fatal(err)
+	}
+	f.addBlock(t, "vexa dunn", "fp-other")
+	res, err := f.svc.Unblock(f.ctx, UnblockRequest{WorkItemID: emptyID, DryRun: true})
+	if err != nil || res.Removed != 0 {
+		t.Fatalf("dry run = %+v, %v; want 0 removed", res, err)
+	}
+}

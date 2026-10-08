@@ -2,12 +2,14 @@ package commands
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 )
 
 func (f *qiFixture) blockCount(t *testing.T) int {
@@ -41,6 +43,11 @@ func TestScanMarkWrongDryRunChangesNothing(t *testing.T) {
 		t.Fatalf("dry mark-wrong = %d:\n%s", code, out)
 	}
 	qiNoLeak(t, "dry mark-wrong", out, f)
+	for _, line := range []string{"lyric files removed", "new blocks", "reopened", "cache entries invalidated"} {
+		if strings.Contains(out, line) {
+			t.Errorf("dry run prints outcome line %q:\n%s", line, out)
+		}
+	}
 	if b, _ := os.ReadFile(f.lrcPath); string(b) != qiLRC {
 		t.Errorf("lrc changed in a dry run: %q", b)
 	}
@@ -155,5 +162,42 @@ func TestScanMarkWrongRefusals(t *testing.T) {
 	}
 	if _, err := os.Stat(f.lrcPath); err != nil {
 		t.Error("refused run removed the .lrc")
+	}
+}
+
+// An error returned after Mark changed things is a failure, not a refusal, even
+// when it wraps a refusal sentinel (the reopen step can wrap ErrBusy).
+func TestScanMarkWrongRefusalMappingNeedsAZeroResult(t *testing.T) {
+	err := fmt.Errorf("files removed but row not reopened: %w", lyricblock.ErrBusy)
+	if w := markWrongRefusal(err, lyricblock.MarkResult{}); w != "in flight" {
+		t.Errorf("zero result = %q, want in flight", w)
+	}
+	if w := markWrongRefusal(err, lyricblock.MarkResult{Files: 1, Removed: 1}); w != "" {
+		t.Errorf("non-zero result = %q, want no refusal", w)
+	}
+}
+
+// A work item with an empty artist key must not count another artist's block
+// on the same title.
+func TestScanUnblockDryRunEmptyKeyCountsOnlyItsOwnBlocks(t *testing.T) {
+	f := newQIFixture(t)
+	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var emptyID int64
+	if err := sqlDB.QueryRowContext(f.ctx, `INSERT INTO work_queue (artist, title, artist_key, title_key, outdir, filename, status, outcome_type)
+		VALUES ('', 'Quill Moor', '', 'quill moor', ?, 'other.flac', 'done', 'synced') RETURNING id`, f.dir).Scan(&emptyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(f.ctx, `INSERT INTO lyric_blocks (artist_key, title_key, fingerprint) VALUES ('vexa dunn', 'quill moor', 'fp-other')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = sqlDB.Close()
+	out, code := f.runBlock(t, func(b *bytes.Buffer) int {
+		return runUnblock(f.ctx, b, ScanUnblockCmd{WorkItem: emptyID, ConfigPath: f.cfg})
+	})
+	if code != 0 || !strings.Contains(out, "blocks that would be removed: 0") {
+		t.Fatalf("dry unblock = %d:\n%s", code, out)
 	}
 }

@@ -24,7 +24,7 @@ type ScanMarkWrongCmd struct {
 	ID         int64  `arg:"--id" help:"work_queue row id of the track (required)"`
 	Yes        bool   `arg:"--yes" help:"actually apply (without it, prints what would change)"`
 	Backup     string `arg:"--backup" help:"path for the JSONL backup of the lyric files removed (default: <db-dir>/mark-wrong-backup-<ts>.jsonl)" default:""`
-	Tail       bool   `arg:"--tail" help:"also print the path of each lyric file backed up"`
+	Tail       bool   `arg:"--tail" help:"also print the path of each lyric file backed up (applied runs only)"`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
 
@@ -43,10 +43,6 @@ type ScanUnblockCmd struct {
 	Yes        bool   `arg:"--yes" help:"actually apply (without it, prints what would change)"`
 	ConfigPath string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
-
-// settledBlockedOutcome mirrors lyricblock's work_queue.outcome_type for a row
-// whose every result was blocked; the unblock dry run counts such rows.
-const settledBlockedOutcome = "blocked"
 
 // openBlockDB loads config and opens the database; write is true when the run
 // will change rows.
@@ -113,30 +109,34 @@ func runMarkWrong(ctx context.Context, out io.Writer, args ScanMarkWrongCmd) int
 	svc := lyricblock.New(sqlDB, slog.Default(), nil)
 	res, merr := svc.Mark(ctx, lyricblock.MarkRequest{WorkItemID: args.ID, Roots: roots, DryRun: !args.Yes, Report: report})
 	_, _ = fmt.Fprintf(out, "work item: %d\n", args.ID)
-	if word := markWrongRefusal(merr); word != "" {
+	if args.Yes && bk.f != nil {
+		_, _ = fmt.Fprintf(out, "backup: %s\n", backupPath)
+	}
+	if word := markWrongRefusal(merr, res); word != "" {
 		_, _ = fmt.Fprintf(out, "refused: %s\n", word)
 		return 1
-	}
-	files := "lyric files backed up"
-	if !args.Yes {
-		_, _ = fmt.Fprintln(out, "dry run: nothing changed (pass --yes to mark wrong)")
-		files = "lyric files that would be backed up"
 	}
 	if merr != nil {
 		// The service's errors carry the work item id and no path.
 		slog.Error("mark-wrong failed", "work_item", args.ID, "error", merr)
-		_, _ = fmt.Fprintln(out, "failed: see the errors above")
+		if res != (lyricblock.MarkResult{}) {
+			_, _ = fmt.Fprintf(out, "failed after changes: lyric files backed up %d, removed %d, new blocks %d, reopened %t; run it again to finish\n",
+				res.Files, res.Removed, res.NewBlocks, res.Reopened)
+		} else {
+			_, _ = fmt.Fprintln(out, "failed: see the errors above")
+		}
 		return 1
+	}
+	if !args.Yes {
+		_, _ = fmt.Fprintf(out, "dry run: nothing changed (pass --yes to mark wrong)\nlyric files that would be backed up: %d\n", res.Files)
+		return 0
 	}
 	reopened := "no"
 	if res.Reopened {
 		reopened = "yes"
 	}
-	_, _ = fmt.Fprintf(out, "%s: %d\nlyric files removed: %d\nnew blocks: %d\nreopened: %s\ncache entries invalidated: %d\n",
-		files, res.Files, res.Removed, res.NewBlocks, reopened, res.CacheInvalidated)
-	if args.Yes && bk.f != nil {
-		_, _ = fmt.Fprintf(out, "backup: %s\n", backupPath)
-	}
+	_, _ = fmt.Fprintf(out, "lyric files backed up: %d\nlyric files removed: %d\nnew blocks: %d\nreopened: %s\ncache entries invalidated: %d\n",
+		res.Files, res.Removed, res.NewBlocks, reopened, res.CacheInvalidated)
 	if args.Tail {
 		for _, p := range tailPaths {
 			_, _ = fmt.Fprintf(out, "file: %s\n", p)
@@ -146,8 +146,13 @@ func runMarkWrong(ctx context.Context, out io.Writer, args ScanMarkWrongCmd) int
 }
 
 // markWrongRefusal maps the service's refusal errors to a path-free outcome
-// word, or "" when err is nil or not a refusal.
-func markWrongRefusal(err error) string {
+// word, or "" when err is nil or not a refusal. A refusal changes nothing, so a
+// non-zero res means the error came after Mark began changing things: a failure,
+// whatever sentinel it wraps.
+func markWrongRefusal(err error, res lyricblock.MarkResult) string {
+	if res != (lyricblock.MarkResult{}) {
+		return ""
+	}
 	switch {
 	case errors.Is(err, lyricblock.ErrNotFound):
 		return "not found"
@@ -221,19 +226,11 @@ func runUnblock(ctx context.Context, out io.Writer, args ScanUnblockCmd) int {
 	}
 	defer func() { _ = sqlDB.Close() }() //nolint:errcheck // reason: best-effort close on command exit
 
-	var res lyricblock.UnblockResult
-	if args.Yes {
-		var err error
-		res, err = lyricblock.New(sqlDB, slog.Default(), nil).Unblock(ctx, lyricblock.UnblockRequest{BlockID: args.ID, WorkItemID: args.WorkItem})
-		if err != nil {
-			return reportUnblockErr(out, err)
-		}
-	} else {
-		var err error
-		res, err = unblockDryRun(ctx, sqlDB, args)
-		if err != nil {
-			return reportUnblockErr(out, err)
-		}
+	res, err := lyricblock.New(sqlDB, slog.Default(), nil).Unblock(ctx, lyricblock.UnblockRequest{BlockID: args.ID, WorkItemID: args.WorkItem, DryRun: !args.Yes})
+	if err != nil {
+		return reportUnblockErr(out, err)
+	}
+	if !args.Yes {
 		_, _ = fmt.Fprintln(out, "dry run: nothing changed (pass --yes to unblock)")
 	}
 	removed, reopened := "blocks removed", "rows reopened"
@@ -252,48 +249,4 @@ func reportUnblockErr(out io.Writer, err error) int {
 	slog.Error("unblock failed", "error", err)
 	_, _ = fmt.Fprintln(out, "failed: see the errors above")
 	return 1
-}
-
-// unblockDryRun reads the store to report what Unblock would remove and reopen,
-// without calling it.
-func unblockDryRun(ctx context.Context, sqlDB *sql.DB, args ScanUnblockCmd) (lyricblock.UnblockResult, error) {
-	store := lyricblock.NewStore(sqlDB, slog.Default())
-	var artistKey, titleKey string
-	var res lyricblock.UnblockResult
-	if args.ID > 0 {
-		all, err := store.List(ctx, lyricblock.ListFilter{})
-		if err != nil {
-			return res, fmt.Errorf("list blocks: %w", err)
-		}
-		found := false
-		for _, b := range all {
-			if b.ID == args.ID {
-				artistKey, titleKey, found = b.ArtistKey, b.TitleKey, true
-			}
-		}
-		if !found {
-			return res, lyricblock.ErrNotFound
-		}
-		res.Removed = 1
-	} else {
-		err := sqlDB.QueryRowContext(ctx, `SELECT artist_key, title_key FROM work_queue WHERE id = ?`, args.WorkItem).Scan(&artistKey, &titleKey)
-		if errors.Is(err, sql.ErrNoRows) {
-			return res, lyricblock.ErrNotFound
-		}
-		if err != nil {
-			return res, fmt.Errorf("look up work item: %w", err)
-		}
-		blocks, err := store.List(ctx, lyricblock.ListFilter{ArtistKey: artistKey, TitleKey: titleKey})
-		if err != nil {
-			return res, fmt.Errorf("list blocks: %w", err)
-		}
-		res.Removed = len(blocks)
-	}
-	err := sqlDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE artist_key = ? AND title_key = ? AND status = 'done' AND outcome_type = ?`,
-		artistKey, titleKey, settledBlockedOutcome).Scan(&res.Reopened)
-	if err != nil {
-		return res, fmt.Errorf("count blocked rows: %w", err)
-	}
-	return res, nil
 }
