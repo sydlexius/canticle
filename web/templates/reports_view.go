@@ -35,6 +35,10 @@ type ReportView struct {
 	// never run (the default-pane case never carries a populated ReportView).
 	LastRun string
 
+	// Status is the one-line result of a mark action (#1433), shown above the
+	// report; empty renders nothing.
+	Status string
+
 	// Columns is the sortable header row of the selected report's track table
 	// (#1260), built by the handler from the report's tablesort spec.
 	Columns []SortHeaderView
@@ -57,10 +61,12 @@ type ReportView struct {
 
 // RecentOutcomeRow is one recently-completed track with its derived result.
 type RecentOutcomeRow struct {
-	Artist string
-	Title  string
-	Album  string
-	Result string
+	// Actions is the row's mark icons (#1433); the zero value (ID 0) renders none.
+	Actions RowActions
+	Artist  string
+	Title   string
+	Album   string
+	Result  string
 	// ResultTierClass is the CSS class for the Result cell's word/line-sync tier
 	// badge (#627), empty for every non-synced-with-a-known-tier result (no
 	// badge rendered). See internal/web.resultTierClass.

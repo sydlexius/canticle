@@ -30,12 +30,12 @@ var reportSortSpecs = map[string]tablesort.Spec{
 type sortCol struct{ label, key string }
 
 // Column sets of the Reports tables, in display order (Artist, Album, Title
-// first). ID, File, Detail, Lyrics are not sortable.
+// first). ID, File, Detail, Lyrics, Actions are not sortable.
 var (
 	recentOutcomeCols = []sortCol{
 		{"Artist", tablesort.KeyArtist}, {"Album", tablesort.KeyAlbum}, {"Title", tablesort.KeyTitle},
 		{"Result", tablesort.KeyResult}, {"Detail", ""}, {"Source", tablesort.KeySource},
-		{"Completed", tablesort.KeyCompleted},
+		{"Completed", tablesort.KeyCompleted}, {"Actions", ""},
 	}
 	instrumentalCols = []sortCol{
 		{"Artist", tablesort.KeyArtist}, {"Album", tablesort.KeyAlbum}, {"Title", tablesort.KeyTitle},

@@ -56,6 +56,7 @@ templ reportPlaceholder() {
 // reportView renders the right-pane header (title, last-run, Refresh) and the
 // report's results table, dispatched by Key.
 templ reportView(v ReportView) {
+	@MarkStatusLine(v.Status)
 	<div class="mx-report-head">
 		<div>
 			<h2 class="mx-report-title">{ v.Title }</h2>
@@ -134,6 +135,11 @@ templ tableRecentOutcomes(cols []SortHeaderView, rows []RecentOutcomeRow) {
 							<td class="mx-cell-mono">{ r.Detail }</td>
 							<td class="mx-cell-mono">@laneCell(r.Lane, r.LaneMark)</td>
 							<td class="mx-cell-mono">{ r.CompletedAt }</td>
+							<td class="mx-row-hit-td">
+								@RowActionsCellWrap() {
+									@RowActionsCell(r.Actions)
+								}
+							</td>
 						</tr>
 					}
 				</tbody>

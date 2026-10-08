@@ -123,6 +123,8 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	}
 	view.RecentRows = buildRecentRows(recent, serverLoc)
 	stampRecentRelative(view.RecentRows, recent, time.Now())
+	stampRecentActions(view.RecentRows, recent, u.markReturnTo(dashboardPath))
+	view.Status = templates.MarkStatusFromQuery(r.URL.Query())
 
 	attention, err := u.reports.NeedsAttention(ctx, dashboardAttentionLimit)
 	if err != nil {

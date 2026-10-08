@@ -311,6 +311,9 @@ const (
 
 // RecentOutcome is one recently-completed track with its derived result class.
 type RecentOutcome struct {
+	// ID is the work_queue row id (#1433): the handle the mark actions address.
+	// Every Recent row is a work_queue row, so it is always set.
+	ID     int64
 	Artist string
 	Title  string
 	Album  string
@@ -335,8 +338,13 @@ type RecentOutcome struct {
 	// Blocked is true when the track has at least one row in lyric_blocks for
 	// its identity (#1396), whatever its Result: a blocked track settles as
 	// ResultBlocked, but a track that was re-fetched after a block shows the
-	// block here too. Row data only; it drives no control yet (#1249).
+	// block here too. It drives the flag's "on" state (#1249).
 	Blocked bool
+	// HasLyric is true when the row's own record says a .lrc/.txt lyric was
+	// written (hasLyricSQL, shared with the bucket listing, #1433); it gates
+	// "Lyrics are wrong". A re-fetched blocked track has one; a blocked track
+	// that settled with nothing on disk does not.
+	HasLyric bool
 	// Detail is the recorded reason WITHIN the Result class (work_queue
 	// outcome_detail, #773) -- today the script guard's own verdict on a
 	// 'rejected' row, e.g. "foreign-script share 1.00 exceeds 0.05".
@@ -476,7 +484,7 @@ func (r *Repo) RecentOutcomesSorted(ctx context.Context, limit int, o tablesort.
 const recentWhere = `status IN ('done', 'unavailable') AND NOT (` + retiredPredicate + `)`
 
 // recentSelect is the column list scanRecentOutcomes reads.
-const recentSelect = `SELECT artist, title, album, completed_at, provider_lane, COALESCE(last_error, ''),
+const recentSelect = `SELECT id, artist, title, album, completed_at, provider_lane, COALESCE(last_error, ''),
             COALESCE(
                 NULLIF(outcome_detail, ''),
                 -- outcome_type IS NULL explains the rows that render 'unknown': a
@@ -491,7 +499,8 @@ const recentSelect = `SELECT artist, title, album, completed_at, provider_lane, 
             ` + recentTimingVerdictExpr + ` AS timing_verdict,
             ` + recentResultExpr + ` AS result,
             manual_instrumental_at IS NOT NULL,
-            ` + blockedExistsSQL
+            ` + blockedExistsSQL + `,
+            ` + hasLyricSQL
 
 // recentTimingVerdictExpr is true for a row with a recorded timing verdict;
 // scanRecentOutcomes keeps such a row's lane, and the Source sort mirrors that.
@@ -561,7 +570,7 @@ func scanRecentOutcomes(rows *sql.Rows, err error) ([]RecentOutcome, error) {
 			result        string
 			manual        bool
 		)
-		if err := rows.Scan(&o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &lastError, &detail, &timingVerdict, &result, &manual, &o.Blocked); err != nil {
+		if err := rows.Scan(&o.ID, &o.Artist, &o.Title, &o.Album, &completedAt, &providerLane, &lastError, &detail, &timingVerdict, &result, &manual, &o.Blocked, &o.HasLyric); err != nil {
 			return nil, fmt.Errorf("reports: scan recent outcome: %w", err)
 		}
 		if completedAt.Valid && completedAt.String != "" {

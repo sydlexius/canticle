@@ -17,6 +17,7 @@ import (
 	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/reports"
 	"github.com/sydlexius/canticle/web/templates"
 )
 
@@ -228,6 +229,35 @@ func markRefusalCode(phrase string) string {
 		return templates.MarkNotMarkable
 	}
 	return ""
+}
+
+// markReturnTo is the return target the mark icons of a page carry, or "" when
+// the mark routes do not exist (the same gate as markEntry): the icons are then
+// not rendered. page is the page's own local path with its own validated query,
+// never the one-shot mark/files status.
+func (u *UI) markReturnTo(page string) string {
+	if u.mark == nil || u.mark.DBPath == "" {
+		return ""
+	}
+	return page
+}
+
+// stampRecentActions fills the Actions of rows built by buildRecentRows from the
+// same-index recent outcomes (#1433). ret "" (no mark routes) leaves the zero
+// RowActions, which renders no icons. A Recent row is always settled (done or
+// unavailable), never in flight, so InFlight stays false.
+func stampRecentActions(rows []templates.RecentOutcomeRow, recent []reports.RecentOutcome, ret string) {
+	if ret == "" {
+		return
+	}
+	for i := range rows {
+		if i >= len(recent) {
+			break
+		}
+		o := recent[i]
+		rows[i].Actions = templates.RowActions{ID: o.ID, Return: ret, HasLyric: o.HasLyric,
+			Manual: o.ManualInstrumental, Blocked: o.Blocked}
+	}
 }
 
 // markEntry is the shared front of both handlers: the 404 gates and the id.
