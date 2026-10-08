@@ -208,3 +208,44 @@ func TestSourceBreakdownTieBreakOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestUnattributedDoneCountMatchesBreakdownGroup pins #1422: the count the
+// dashboard tile reads equals the SourceBreakdown unattributed group total (the
+// figure the unattributed page shows), over attributed, unattributed, blocked
+// and not-done rows, and a database with none is zero.
+func TestUnattributedDoneCountMatchesBreakdownGroup(t *testing.T) {
+	ctx := context.Background()
+	empty := reports.New(openTestDB(t))
+	if n, err := empty.UnattributedDoneCount(ctx); err != nil || n != 0 {
+		t.Fatalf("empty db: count = %d, err = %v, want 0", n, err)
+	}
+
+	sqlDB := openTestDB(t)
+	seedSourceFixture(t, sqlDB)
+	for _, w := range []workItem{
+		{title: "none-blocked", outcomeType: "blocked", status: "done"},
+		{title: "none-pending", outcomeType: "synced", syncTier: "line", status: "pending"},
+		{title: "none-failed", status: "failed"},
+		{title: "lane-blocked", providerLane: providers.Musixmatch, outcomeType: "blocked", status: "done"},
+	} {
+		w.artist = "A"
+		insertWorkItem(t, sqlDB, w)
+	}
+	repo := reports.New(sqlDB)
+	got, err := repo.UnattributedDoneCount(ctx)
+	if err != nil {
+		t.Fatalf("UnattributedDoneCount: %v", err)
+	}
+	// none-line, none-legacy and none-blocked: the pending/failed and the
+	// attributed blocked rows must not count.
+	if got != 3 {
+		t.Errorf("UnattributedDoneCount = %d, want 3", got)
+	}
+	groups, err := repo.SourceBreakdown(ctx)
+	if err != nil {
+		t.Fatalf("SourceBreakdown: %v", err)
+	}
+	if want := findSource(t, groups, "", true).Counts.Total(); got != want {
+		t.Errorf("count %d != SourceBreakdown unattributed total %d", got, want)
+	}
+}
