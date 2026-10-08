@@ -14,10 +14,9 @@ type DashboardView struct {
 	// QueueTiles holds one tile per work-queue status
 	// (pending, processing, done, failed, deferred); statuses only (#599).
 	QueueTiles []StatTile
-	// ProviderTiles holds one tile per provider lane showing hit count + hit rate.
+	// ProviderTiles holds one tile per provider lane showing hit count + hit rate,
+	// then the Unattributed tile (#1422) when any result has no recorded source.
 	ProviderTiles []StatTile
-	// UnattributedHref links the page for results with no recorded source (#1300).
-	UnattributedHref string
 	// ResultsTiles holds the Results row (#599): completed tracks split by
 	// result type. Always every bucket, so the tiles sum to Done.
 	ResultsTiles []StatTile

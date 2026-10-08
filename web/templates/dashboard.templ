@@ -30,7 +30,7 @@ templ dashboardContent(view DashboardView) {
 		</div>
 		@dashQueueTiles(view.QueueTiles, view.QueueChart)
 		@dashResultsTiles(view.ResultsTiles)
-		@dashProviderTiles(view.ProviderTiles, view.UnattributedHref)
+		@dashProviderTiles(view.ProviderTiles)
 		@dashUpNext(view.InFlightRows, view.UpNextRows, view.UpNextHeader, view.UpNextEmpty)
 		@dashRecentOutcomes(view.RecentRows)
 		@dashNeedsAttention(view.AttentionRows, view.AttentionLimit)
@@ -146,7 +146,7 @@ templ dashResultsTiles(tiles []StatTile) {
 // hit-rate bar chart. The fill width is applied by chart-init.js from the
 // data-hit-rate attribute -- the serve-mode CSP (style-src 'self', no
 // unsafe-inline) forbids an inline style="" width.
-templ dashProviderTiles(tiles []StatTile, unattributedHref string) {
+templ dashProviderTiles(tiles []StatTile) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-provider-heading"
@@ -169,9 +169,6 @@ templ dashProviderTiles(tiles []StatTile, unattributedHref string) {
 				</div>
 			}
 		</div>
-		if unattributedHref != "" {
-			<p class="mx-dash-section-sub"><a class="mx-source-link" href={ templ.SafeURL(unattributedHref) }>Results with no recorded source</a></p>
-		}
 	</section>
 }
 

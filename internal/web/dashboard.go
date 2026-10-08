@@ -103,7 +103,13 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		view.ProviderTiles = buildProviderTiles(pe)
 	}
 
-	view.UnattributedHref = unattributedPath
+	sources, err := u.reports.SourceBreakdown(ctx)
+	if err != nil {
+		return templates.DashboardView{}, fmt.Errorf("dashboard: source breakdown: %w", err)
+	}
+	if t, ok := buildUnattributedTile(sources); ok {
+		view.ProviderTiles = append(view.ProviderTiles, t)
+	}
 
 	results, err := u.reports.ResultsBreakdown(ctx)
 	if err != nil {
@@ -398,6 +404,27 @@ func buildProviderTile(p reports.ProviderEffectiveness) templates.StatTile {
 		BarLabel:  barLabel,
 		Href:      sourceHref(p.Lane),
 	}
+}
+
+// buildUnattributedTile is the Lyrics Sources tile for done results with no
+// recorded source (#1422): a cache hit, a blocked track, or a row finished
+// before sources were recorded. It reads the same SourceBreakdown group the
+// /sources/-/unattributed page totals, so the two counts cannot differ. It is
+// absent at zero, as a lane with no recorded attempts and no configured
+// health gets no tile; it carries no hit rate, bar or status, which only a
+// lane has.
+func buildUnattributedTile(all []reports.SourceBreakdown) (templates.StatTile, bool) {
+	for _, sb := range all {
+		if !sb.Unattributed || sb.Counts.Total() == 0 {
+			continue
+		}
+		return templates.StatTile{
+			Label: "Unattributed",
+			Value: strconv.FormatInt(sb.Counts.Total(), 10),
+			Href:  unattributedPath,
+		}, true
+	}
+	return templates.StatTile{}, false
 }
 
 // Lane status tokens carried on StatTile.Status; they are CSS class suffixes.

@@ -232,7 +232,7 @@ func buildSourceView(sb reports.SourceBreakdown, top reports.TopRung) templates.
 	switch {
 	case sb.Unattributed:
 		v.Name, v.Mark = "Unattributed", markNone
-		v.Blurb = "Completed tracks with no recorded source: served from cache, or finished before sources were recorded."
+		v.Blurb = "Completed tracks with no recorded source: served from cache, blocked, or finished before sources were recorded."
 	default:
 		v.Name = laneLabel(sb.Lane)
 		v.Blurb = "Completed tracks this source delivered, by result type."
