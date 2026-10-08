@@ -1,9 +1,12 @@
 package lyrics
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -164,5 +167,26 @@ func TestLazyBackupFileRefusesSymlinkWithFollowingOpen(t *testing.T) {
 	}
 	if msg := err.Error(); strings.Contains(msg, dir) {
 		t.Errorf("error leaks the path: %s", msg)
+	}
+}
+
+// TestPathlessStripsPathKeepsCause: the helper drops the path from a
+// *os.PathError, keeps the errno reachable, and leaves nil and other errors alone.
+func TestPathlessStripsPathKeepsCause(t *testing.T) {
+	const secret = "/library/Private Artist/secret.jsonl"
+	pe := &os.PathError{Op: "chmod", Path: secret, Err: syscall.EACCES}
+	got := pathless(fmt.Errorf("wrapped: %w", pe))
+	if strings.Contains(got.Error(), secret) || strings.Contains(got.Error(), "Private") {
+		t.Errorf("result leaks the path: %s", got)
+	}
+	if !errors.Is(got, syscall.EACCES) {
+		t.Errorf("errno lost: %v", got)
+	}
+	if pathless(nil) != nil {
+		t.Error("nil did not stay nil")
+	}
+	plain := errors.New("plain")
+	if pathless(plain) != plain {
+		t.Error("non-path error not passed through unchanged")
 	}
 }

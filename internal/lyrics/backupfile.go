@@ -32,12 +32,7 @@ func (b *LazyBackupFile) File() (*os.File, error) {
 	}
 	f, err := openBackup(b.Path)
 	if err != nil {
-		// The PathError text carries the path; surface only the cause.
-		var pe *os.PathError
-		if errors.As(err, &pe) {
-			err = pe.Err
-		}
-		return nil, fmt.Errorf("open %s: %w", b.What, err)
+		return nil, fmt.Errorf("open %s: %w", b.What, pathless(err))
 	}
 	if err := checkBackupHandle(f, b.Path); err != nil {
 		_ = f.Close()
@@ -46,11 +41,23 @@ func (b *LazyBackupFile) File() (*os.File, error) {
 	// O_CREATE's mode only applies to a new file; tighten an existing one before any write.
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("tighten %s mode: %w", b.What, err)
+		return nil, fmt.Errorf("tighten %s mode: %w", b.What, pathless(err))
 	}
 	b.f = f
 	FsyncDir(filepath.Dir(b.Path))
 	return f, nil
+}
+
+// pathless strips the *os.PathError wrapper (whose text carries the file path)
+// and keeps the underlying cause, so errors.Is against the errno still works.
+// os.OpenFile and (*os.File).Chmod return only *os.PathError; no LinkError or
+// SyscallError can arise from them. Other errors pass through unchanged.
+func pathless(err error) error {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }
 
 // Opened reports whether a backup file was opened (something was reported).
