@@ -844,16 +844,41 @@ func (w *LRCWriter) resolveOutdir(outdir string) (string, error) {
 	resolved, ok := pathutil.ResolveWithinRoot(root, outdir)
 	if !ok {
 		// ResolveWithinRoot fails (EvalSymlinks) both when the dir does not
-		// exist and when it escapes the root via a symlink. Distinguish the
-		// two so the error is not misleading: a missing dir is a plain setup
-		// error, not a confinement violation. (No MkdirAll here -- behavior is
-		// unchanged; os.CreateTemp already requires the dir to exist.)
-		if _, statErr := os.Stat(outdir); os.IsNotExist(statErr) {
+		// exist and when it escapes the root via a symlink. Only a path that
+		// is absent with no symlink on the way is "missing" (the worker acts
+		// on that); a dangling or escaping symlink stays a confinement
+		// refusal. (No MkdirAll here -- os.CreateTemp requires the dir.)
+		if absentWithoutSymlink(root, outdir) {
 			return "", ErrOutputDirMissing
 		}
 		return "", errors.New("refusing to write: output dir escapes the confinement root or is unresolvable")
 	}
 	return resolved, nil
+}
+
+// absentWithoutSymlink reports whether outdir (under root) is genuinely
+// missing: walking the components below root with Lstat (no symlink followed,
+// no directory listing), the first component that does not exist ends the walk
+// as missing. Any symlink on the way, even a dangling one whose target would be
+// inside root, or any other Lstat failure, yields false so the caller keeps the
+// confinement refusal. The walk is bounded by the path depth.
+func absentWithoutSymlink(root, outdir string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(outdir))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	cur := filepath.Clean(root)
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return os.IsNotExist(err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+	}
+	return false
 }
 
 // writeAtomic writes tags then writeContent to outdir/fn through a temp file in
