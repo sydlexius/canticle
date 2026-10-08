@@ -97,6 +97,22 @@ func (s *Store) Remove(ctx context.Context, ex Execer, id int64) (bool, error) {
 	return n > 0, nil
 }
 
+// DeleteByIdentityTx deletes every block whose keys equal (artistKey, titleKey)
+// exactly and returns how many it removed. Unlike List, an empty key is a value
+// to match, not a wildcard, so it can never reach another identity.
+func (s *Store) DeleteByIdentityTx(ctx context.Context, tx *sql.Tx, artistKey, titleKey string) (int, error) {
+	res, err := tx.ExecContext(ctx, `DELETE FROM lyric_blocks WHERE artist_key = ? AND title_key = ?`,
+		normalize.NormalizeKey(artistKey), normalize.NormalizeKey(titleKey))
+	if err != nil {
+		return 0, fmt.Errorf("lyricblock: delete by identity: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("lyricblock: delete by identity rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
 // List returns blocks matching f, oldest first.
 func (s *Store) List(ctx context.Context, f ListFilter) ([]Block, error) {
 	q := `SELECT b.id, b.artist_key, b.title_key, b.fingerprint, COALESCE(b.work_queue_id, 0), b.lane, b.upstream, b.created_at
