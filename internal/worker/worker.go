@@ -1823,14 +1823,16 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// a failure must never settle an upgrade trip back onto the OLD file
 	// record (R2-M1), so it takes the ordinary fail/retry instead.
 	landed := false
-	for _, p := range paths {
+	for i, p := range paths {
 		err := write(song, p.Filename, p.Outdir)
-		if errors.Is(err, lyrics.ErrBlocked) && !landed && len(kept) == 0 {
+		if errors.Is(err, lyrics.ErrBlocked) && !landed && len(kept) == 0 && !heldByLaterPath(song, paths[i+1:]) {
 			// The backstop caught a block marked mid-pass: settle as for an
 			// all-blocked dispatch (an upgrade trip keeps its file record; #1395).
 			// Only while NO output path holds a file from this pass, landed or
 			// kept: a blocked row has no file, so with one it takes the ordinary
-			// failure path below instead.
+			// failure path below instead. The writer refuses on the block BEFORE
+			// its no-downgrade guard, so a later path's file is never reported as
+			// kept here; heldByLaterPath reads the disk for it.
 			return w.settleBlocked(ctx, item)
 		}
 		if errors.Is(err, lyrics.ErrKeptBetter) {

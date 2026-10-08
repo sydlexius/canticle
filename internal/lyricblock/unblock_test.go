@@ -3,6 +3,8 @@ package lyricblock
 import (
 	"errors"
 	"testing"
+
+	"github.com/sydlexius/canticle/internal/queue"
 )
 
 func TestUnblock(t *testing.T) {
@@ -113,5 +115,37 @@ func TestUnblockEmptyArtistKeyDoesNotSweepOtherArtists(t *testing.T) {
 	}
 	if f.count(t, `SELECT COUNT(*) FROM lyric_blocks WHERE id = ?`, own) != 0 {
 		t.Error("the empty-key block was not removed")
+	}
+}
+
+// The race the review found, driven in the racing order by hand: the worker holds
+// the row in processing and has observed the block; the unblock commits first;
+// the worker's settle then runs. It must NOT leave a done/blocked row with no
+// block (nothing could reopen it by block id), and a work-item unblock with no
+// blocks left still reopens a row stranded that way.
+func TestUnblockRacingAWorkerSettleNeverStrandsABlockedRow(t *testing.T) {
+	f := newFx(t)
+	f.write(t, "song.lrc", lrcBody)
+	if _, err := f.svc.Mark(f.ctx, f.req(nil)); err != nil {
+		t.Fatal(err)
+	}
+	f.mustExec(t, `UPDATE work_queue SET status = 'processing', outcome_type = NULL`)
+	if res, err := f.svc.Unblock(f.ctx, UnblockRequest{WorkItemID: f.id}); err != nil || res.Removed != 1 || res.Reopened != 0 {
+		t.Fatalf("Unblock = %+v, %v; want one block removed, no row to reopen", res, err)
+	}
+	outcome, err := queue.NewDBQueue(f.db).SettleBlocked(f.ctx, f.id)
+	if err != nil || outcome == queue.Settled {
+		t.Fatalf("SettleBlocked after the unblock = (%v, %v); want a refusal", outcome, err)
+	}
+	if n := f.count(t, `SELECT COUNT(*) FROM work_queue WHERE outcome_type = 'blocked'`); n != 0 {
+		t.Fatalf("%d row(s) settled blocked with no block left", n)
+	}
+
+	// A row stranded before this fix (done/blocked, no block): the work-item
+	// unblock removes 0 blocks and still reopens it.
+	f.mustExec(t, `UPDATE work_queue SET status = 'done', outcome_type = 'blocked'`)
+	res, err := f.svc.Unblock(f.ctx, UnblockRequest{WorkItemID: f.id})
+	if err != nil || res.Removed != 0 || res.Reopened != 1 {
+		t.Fatalf("recovery Unblock = %+v, %v; want 0 removed, 1 reopened", res, err)
 	}
 }

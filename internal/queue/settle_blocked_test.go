@@ -35,6 +35,10 @@ func blockedRow(t *testing.T) (*DBQueue, int64, models.Inputs) {
 	if _, err := q.Dequeue(ctx); err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
+	a, ti := IdentityKeys(in.Track)
+	if _, err := q.db.ExecContext(ctx, `INSERT INTO lyric_blocks (artist_key, title_key, fingerprint) VALUES (?, ?, 'fp')`, a, ti); err != nil {
+		t.Fatalf("seed block: %v", err)
+	}
 	return q, item.ID, in
 }
 
@@ -254,5 +258,23 @@ func TestDBQueue_SettleBlocked_ClearsLaneTierAndVerdicts(t *testing.T) {
 	var detail string
 	if err := q.db.QueryRowContext(ctx, `SELECT outcome_detail FROM work_queue WHERE id = ?`, id).Scan(&detail); err != nil || detail != OutcomeDetailBlocked {
 		t.Fatalf("outcome_detail = %q (%v); want %q", detail, err, OutcomeDetailBlocked)
+	}
+}
+
+// The settle is conditional on a block still existing: with the block gone (an
+// unblock committed after the worker observed it) the row stays processing and
+// the outcome is SettleNoBlock, so the caller can release it (#1395 review).
+func TestDBQueue_SettleBlocked_NoBlockLeftDoesNotSettle(t *testing.T) {
+	ctx := context.Background()
+	q, id, _ := blockedRow(t)
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM lyric_blocks`); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := q.SettleBlocked(ctx, id)
+	if err != nil || outcome != SettleNoBlock {
+		t.Fatalf("SettleBlocked = (%v, %v); want SettleNoBlock", outcome, err)
+	}
+	if c := readCounters(t, q, id); c.status != StatusProcessing || c.outcome != "" {
+		t.Fatalf("row = %+v; want still processing and unlabeled", c)
 	}
 }

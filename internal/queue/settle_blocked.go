@@ -28,6 +28,9 @@ const OutcomeDetailBlocked = "blocked by operator"
 // The lanes answered with a result, they did not miss, so miss_count, attempts
 // and lane_attempts are deliberately untouched. last_error is cleared (a policy
 // outcome is not a failure) and refused_waits reset, as on every settle.
+// The settle is conditional on a lyric_blocks row still existing for the row's
+// identity, in the same statement (SettleNoBlock otherwise), so it cannot race
+// an unblock: that either commits first (no settle) or reopens the row after.
 // Nothing here schedules a retry: only ReopenBlockedTx brings the row back.
 //
 // A blocked row has no file, so the same statement clears every column that
@@ -73,7 +76,9 @@ func (q *DBQueue) settleBlockedOnce(ctx context.Context, id int64) (SettleOutcom
              word_timing_checked_at = CASE WHEN word_timing_state IN ('served', 'absent') THEN NULL ELSE word_timing_checked_at END,
              word_timing_state = CASE WHEN word_timing_state IN ('served', 'absent') THEN NULL ELSE word_timing_state END
          WHERE id = ?
-           AND status = ?`,
+           AND status = ?
+           AND EXISTS (SELECT 1 FROM lyric_blocks b
+                       WHERE b.artist_key = work_queue.artist_key AND b.title_key = work_queue.title_key)`,
 		OutcomeBlocked, OutcomeDetailBlocked, now, id, StatusProcessing,
 	)
 	if err != nil {
@@ -84,6 +89,17 @@ func (q *DBQueue) settleBlockedOnce(ctx context.Context, id int64) (SettleOutcom
 		return SettleFailed, fmt.Errorf("queue: settle blocked rows affected: %w", err)
 	}
 	if n == 0 {
+		// Still processing means the only unmet condition was the block: an
+		// unblock committed after the worker observed it, and settling now would
+		// strand a blocked row that no later unblock could reopen by block id.
+		var status string
+		serr := tx.QueryRowContext(ctx, `SELECT status FROM work_queue WHERE id = ?`, id).Scan(&status)
+		if serr != nil && !errors.Is(serr, sql.ErrNoRows) {
+			return SettleFailed, fmt.Errorf("queue: settle blocked status read: %w", serr)
+		}
+		if serr == nil && status == StatusProcessing {
+			return SettleNoBlock, nil
+		}
 		return q.classifyNoSettle(ctx, tx, id)
 	}
 	if err := writeBackScanResultsDone(ctx, tx, id); err != nil {

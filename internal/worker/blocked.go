@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
+	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/sidecar"
 )
 
 // settleBlocked finishes a row whose every available result is blocked for its
@@ -37,14 +41,42 @@ func (w *Worker) settleBlocked(ctx context.Context, item queue.WorkItem) error {
 	if err != nil {
 		return w.fail(ctx, item, fmt.Errorf("worker: settle blocked item %d: %w", item.ID, err))
 	}
-	if outcome != queue.Settled {
+	if outcome == queue.SettleNoBlock {
+		// An unblock removed the block after this pass observed it: the row must
+		// retry the fetch rather than settle blocked with nothing to reopen it.
+		slog.Info("worker: block was cleared mid-pass; releasing to retry", "id", item.ID)
+	} else if outcome != queue.Settled {
 		// The worker holds the row, so a non-Settled outcome means it was pruned
 		// or moved underneath us: release rather than fail a row that may be gone.
 		slog.Warn("worker blocked settle did not settle; releasing", "id", item.ID, "outcome", outcome)
+	}
+	if outcome != queue.Settled {
 		if relErr := w.queue.Release(noCancel, item.ID); relErr != nil {
 			return fmt.Errorf("worker: release unsettled blocked item %d: %w", item.ID, relErr)
 		}
 	}
 	w.consecutiveFailures = 0
 	return nil
+}
+
+// heldByLaterPath reports whether any of the output paths not yet visited already
+// holds a sidecar. The writer refuses a blocked result before its no-downgrade
+// guard, so it never says "kept" for a path it refuses; without this read a
+// multi-path row whose first path is blocked would settle blocked beside a file
+// on a later path. It uses lyrics.RungOnDisk, the same judgment the no-downgrade
+// guard makes. A path whose name cannot be derived is skipped: the write loop
+// would refuse it the same way. The outdir is read as given (no root
+// re-confinement), so a symlinked outdir is judged at its configured spelling.
+func heldByLaterPath(song models.Song, later []models.OutputPath) bool {
+	for _, p := range later {
+		fn, err := lyrics.SidecarName(song.Track.ArtistName, song.Track.TrackName, p.Filename, true)
+		if err != nil {
+			continue
+		}
+		fp := filepath.Join(p.Outdir, fn)
+		if lyrics.RungOnDisk(fp, sidecar.List(p.Outdir)) > lyrics.RungNone {
+			return true
+		}
+	}
+	return false
 }

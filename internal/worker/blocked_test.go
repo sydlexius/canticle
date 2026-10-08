@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -570,5 +571,28 @@ func TestBlocked_Settle_StampsDetectorMissTelemetry(t *testing.T) {
 	}
 	if len(q.instrumentalStamps) != 1 || q.instrumentalStamps[0].Tel.DetectorVersion != "v1" {
 		t.Fatalf("instrumentalStamps = %+v; want the v1 telemetry stamped on the blocked settle", q.instrumentalStamps)
+	}
+}
+
+// The writer refuses a blocked result before its no-downgrade guard, so it never
+// reports a LATER path's file as kept. Path 1 is blocked and path 2 already holds
+// a sidecar: the row has a file, so it must not settle blocked (#1395 review).
+func TestBlocked_WriterBackstop_LaterPathHoldingAFileFailsOrdinarily(t *testing.T) {
+	q := &fakeQueue{}
+	wr := &scriptedWriter{errs: []error{lyrics.ErrBlocked, lyrics.ErrBlocked}}
+	w := twoPathWorker(q, wr)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "b.lrc"), []byte("[00:01.00]held\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q.items[0].Inputs.OutputPaths[1].Outdir = dir
+	if err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce = %v", err)
+	}
+	if q.outcomeTypes[77] == queue.OutcomeBlocked || len(q.completed) != 0 {
+		t.Fatalf("outcomes %v completed %v; a row with a file on a later path must not settle blocked", q.outcomeTypes, q.completed)
+	}
+	if len(q.failed) != 1 || q.failed[0] != 77 {
+		t.Fatalf("failed = %v; want the ordinary failure path", q.failed)
 	}
 }
