@@ -320,6 +320,7 @@ templ attentionTable(rows []AttentionRow, emptyMsg string) {
 						<th scope="col">State</th>
 						<th scope="col">Reason</th>
 						<th scope="col">Last attempt</th>
+						<th scope="col">Actions</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -331,6 +332,11 @@ templ attentionTable(rows []AttentionRow, emptyMsg string) {
 							<td><span class={ r.StateClass }>{ r.State }</span></td>
 							<td class="mx-attention-reason">{ r.Reason }</td>
 							<td class="mx-table-mono">{ r.LastAttempt }</td>
+							<td class="mx-row-hit-td">
+								@RowActionsCellWrap() {
+									@RowActionsCell(r.Actions)
+								}
+							</td>
 						</tr>
 					}
 				</tbody>
@@ -366,6 +372,7 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 							<th>Title</th>
 							<th>Tier</th>
 							<th class="mx-upnext-waited">Waited</th>
+							<th>Actions</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -382,6 +389,9 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 									}
 								</td>
 								<td class="mx-cell-mono mx-upnext-waited" title="Time since the worker claimed this row">{ f.Elapsed }</td>
+								<td class="mx-row-hit-td">
+									@RowActionsCellWrap()
+								</td>
 							</tr>
 						}
 						for _, row := range rows {
@@ -392,6 +402,11 @@ templ dashUpNext(inFlight []InFlightRow, rows []UpNextRow, header, empty string)
 								<td>{ row.Title }</td>
 								<td><span class={ dashUpNextTierClass(row.Tier) }>{ row.Tier }</span></td>
 								<td class="mx-cell-mono mx-upnext-waited">{ row.Waited }</td>
+								<td class="mx-row-hit-td">
+									@RowActionsCellWrap() {
+										@RowActionsCell(row.Actions)
+									}
+								</td>
 							</tr>
 						}
 					</tbody>

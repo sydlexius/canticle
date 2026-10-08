@@ -260,6 +260,39 @@ func stampRecentActions(rows []templates.RecentOutcomeRow, recent []reports.Rece
 	}
 }
 
+// stampAttentionActions fills the Actions of rows built by buildAttentionRows
+// from the same-index items (#1434). Only the instrumental icon can show: the
+// rows hold no recorded lyric, so HasLyric and Blocked stay false and the flag
+// never renders. A failed or deferred row is never in flight (the query
+// excludes processing), so InFlight stays false. ret "" leaves the zero
+// RowActions, which renders no icons.
+func stampAttentionActions(rows []templates.AttentionRow, items []reports.FailureItem, ret string) {
+	if ret == "" {
+		return
+	}
+	for i := range rows {
+		if i >= len(items) {
+			break
+		}
+		rows[i].Actions = templates.RowActions{ID: items[i].ID, Return: ret, Manual: items[i].ManualInstrumental}
+	}
+}
+
+// stampUpNextActions is stampAttentionActions for the buffered Up Next rows
+// (#1434). The claimed rows above them are a separate InFlightRow list and carry
+// no actions at all.
+func stampUpNextActions(rows []templates.UpNextRow, items []reports.UpNextItem, ret string) {
+	if ret == "" {
+		return
+	}
+	for i := range rows {
+		if i >= len(items) {
+			break
+		}
+		rows[i].Actions = templates.RowActions{ID: items[i].ID, Return: ret, Manual: items[i].ManualInstrumental}
+	}
+}
+
 // markEntry is the shared front of both handlers: the 404 gates and the id.
 func (u *UI) markEntry(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	w.Header().Set("Cache-Control", "no-store")

@@ -66,6 +66,8 @@ type DashboardView struct {
 // UpNextRow is one buffered work item in the dashboard "Up next" panel (#572).
 // Every field is pre-formatted by the handler; the template only renders strings.
 type UpNextRow struct {
+	// Actions is the row's mark icon (#1434); the zero value (ID 0) renders none.
+	Actions RowActions
 	// Position is the 1-based rank in claim order (the buffer sequence), as a
 	// pre-formatted string.
 	Position string

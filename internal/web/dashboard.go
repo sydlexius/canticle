@@ -131,6 +131,7 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		return templates.DashboardView{}, fmt.Errorf("dashboard: needs attention: %w", err)
 	}
 	view.AttentionRows = buildAttentionRows(attention, serverLoc)
+	stampAttentionActions(view.AttentionRows, attention, u.markReturnTo(dashboardPath))
 	view.AttentionLimit = dashboardAttentionLimit
 
 	inFlight, err := u.reports.InFlight(ctx)
@@ -148,6 +149,7 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 		return templates.DashboardView{}, fmt.Errorf("dashboard: queue eligibility: %w", err)
 	}
 	view.UpNextRows = buildUpNextRows(upNext, time.Now())
+	stampUpNextActions(view.UpNextRows, upNext, u.markReturnTo(dashboardPath))
 	// Header count is the TRUE buffered total from the DB, not len(rows): the
 	// displayed list is capped at dashboardUpNextLimit, so a larger buffer
 	// (queue.batch_size > cap) must still report its real size (#572 CR).

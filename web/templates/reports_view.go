@@ -101,6 +101,8 @@ type RecentOutcomeRow struct {
 // last_error. LastAttempt is updated_at, the row's last write: never labeled a
 // completion, since nothing completed.
 type AttentionRow struct {
+	// Actions is the row's mark icon (#1434); the zero value (ID 0) renders none.
+	Actions     RowActions
 	Artist      string
 	Album       string
 	Title       string
