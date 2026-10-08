@@ -93,7 +93,7 @@ func TestMarkStatus(t *testing.T) {
 		t.Errorf("status = %q", got)
 	}
 	for _, bad := range []string{"-5", "1001", "99999999999999999999", "x"} {
-		if got := MarkStatusFromQuery(url.Values{"mark": {MarkWrongDone}, "files": {bad}}); !strings.Contains(got, "0 lyric files removed") {
+		if got := MarkStatusFromQuery(url.Values{"mark": {MarkWrongDone}, "files": {bad}}); got != "Lyrics marked wrong. The track will be looked up again." {
 			t.Errorf("files=%s: status = %q, want the count treated as absent", bad, got)
 		}
 	}
@@ -114,6 +114,64 @@ func TestMarkStatus(t *testing.T) {
 	var b bytes.Buffer
 	if err := MarkStatusLine("").Render(context.Background(), &b); err != nil || b.Len() != 0 {
 		t.Error("empty status rendered markup")
+	}
+}
+
+func TestMarkStatusTextCounts(t *testing.T) {
+	cases := []struct {
+		code  string
+		files int
+		want  string
+	}{
+		{MarkInstrumentalDone, 0, "Marked instrumental."},
+		{MarkInstrumentalDone, 1, "Marked instrumental. 1 lyric file removed and saved to a backup file."},
+		{MarkInstrumentalDone, 2, "Marked instrumental. 2 lyric files removed and saved to a backup file."},
+		{MarkInstrumentalDone, -1, "Marked instrumental."},
+		{MarkInstrumentalDone, maxMarkFiles + 1, "Marked instrumental."},
+		{MarkInstrumentalDone, maxMarkFiles, "Marked instrumental. 1000 lyric files removed and saved to a backup file."},
+		{MarkWrongDone, 0, "Lyrics marked wrong. The track will be looked up again."},
+		{MarkWrongDone, 1, "Lyrics marked wrong. 1 lyric file removed and saved to a backup file; the track will be looked up again."},
+		{MarkWrongDone, 2, "Lyrics marked wrong. 2 lyric files removed and saved to a backup file; the track will be looked up again."},
+		{MarkWrongDone, -7, "Lyrics marked wrong. The track will be looked up again."},
+		{MarkWrongDone, 1 << 30, "Lyrics marked wrong. The track will be looked up again."},
+	}
+	for _, c := range cases {
+		if got := MarkStatusText(c.code, c.files); got != c.want {
+			t.Errorf("MarkStatusText(%s, %d) = %q, want %q", c.code, c.files, got, c.want)
+		}
+	}
+}
+
+func TestMarkConfirmPageReturnIsLocal(t *testing.T) {
+	render := func(ret string, alert string) string {
+		var b bytes.Buffer
+		v := MarkConfirmView{Title: "T", Track: "A - B", Confirm: "Go", Return: ret, Action: "/queue/1/wrong", CSRFToken: "tok", Alert: alert}
+		if err := MarkConfirmPage("v", v, nil, false, false).Render(context.Background(), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+	if out := render("/queue?page=2", "refused"); !strings.Contains(out, `href="/queue?page=2">Back</a>`) {
+		t.Errorf("alert Back link did not render the local return: %q", out)
+	}
+	if out := render("/library/3?x=1", ""); !strings.Contains(out, `name="return" value="/library/3?x=1"`) || !strings.Contains(out, `href="/library/3?x=1">Cancel</a>`) {
+		t.Errorf("form did not render the local return: %q", out)
+	}
+	for _, bad := range []string{"https://evil.example/x", "//evil.example", `/\evil`, "javascript:alert(1)", "", "/a\nb", "/a\x00b"} {
+		out := render(bad, "refused")
+		if !strings.Contains(out, `href="/queue">Back</a>`) {
+			t.Errorf("return %q: Back link = %q, want the fallback", bad, out)
+		}
+		if strings.Contains(out, "evil") {
+			t.Errorf("return %q leaked into the alert page", bad)
+		}
+		out = render(bad, "")
+		if !strings.Contains(out, `name="return" value="/queue"`) || !strings.Contains(out, `href="/queue">Cancel</a>`) {
+			t.Errorf("return %q: form = %q, want the fallback", bad, out)
+		}
+		if strings.Contains(out, "evil") || strings.Contains(out, "javascript") {
+			t.Errorf("return %q leaked into the form page", bad)
+		}
 	}
 }
 

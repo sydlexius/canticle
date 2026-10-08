@@ -79,7 +79,7 @@ templ MarkConfirmPage(version string, view MarkConfirmView, reports []RailItem, 
 		<p class="mx-page-subtitle">{ view.Track }</p>
 		if view.Alert != "" {
 			<p class="mx-revive-error mx-status-error" role="alert">{ view.Alert }</p>
-			<p class="mx-revive-confirm"><a class="mx-run-link" href={ templ.SafeURL(view.Return) }>Back</a></p>
+			<p class="mx-revive-confirm"><a class="mx-run-link" href={ templ.SafeURL(safeMarkReturn(view.Return)) }>Back</a></p>
 		} else {
 			for _, n := range view.Notes {
 				<p class="mx-revive-note">{ n }</p>
@@ -89,9 +89,9 @@ templ MarkConfirmPage(version string, view MarkConfirmView, reports []RailItem, 
 			}
 			<form class="mx-revive-confirm" method="post" action={ templ.SafeURL(view.Action) }>
 				<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
-				<input type="hidden" name="return" value={ view.Return }/>
+				<input type="hidden" name="return" value={ safeMarkReturn(view.Return) }/>
 				<button type="submit" class="mx-run-button">{ view.Confirm }</button>
-				<a class="mx-run-link" href={ templ.SafeURL(view.Return) }>Cancel</a>
+				<a class="mx-run-link" href={ templ.SafeURL(safeMarkReturn(view.Return)) }>Cancel</a>
 			</form>
 		}
 	}

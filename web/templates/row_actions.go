@@ -3,6 +3,7 @@ package templates
 import (
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // Mark status codes (#1249). A mark action redirects back to the page it came
@@ -36,20 +37,28 @@ func MarkIsSuccess(code string) bool {
 
 // MarkStatusText is the one-line status for a code ("" for an unknown code).
 // files is the lyric-file count the action reported. No sentence names a path.
+// A count outside 0..maxMarkFiles is treated as no count, as is zero: with no
+// file the sentence says only what happened, never that files were removed.
 func MarkStatusText(code string, files int) string {
-	plural := func(n int) string {
-		if n == 1 {
-			return "1 lyric file"
+	removed := func() string {
+		switch {
+		case files < 1 || files > maxMarkFiles:
+			return ""
+		case files == 1:
+			return " 1 lyric file removed and saved to a backup file."
 		}
-		return strconv.Itoa(n) + " lyric files"
+		return " " + strconv.Itoa(files) + " lyric files removed and saved to a backup file."
 	}
 	switch code {
 	case MarkInstrumentalDone:
-		return "Marked instrumental. " + plural(files) + " removed and saved to a backup file."
+		return "Marked instrumental." + removed()
 	case MarkInstrumentalUndone:
 		return "Instrumental mark removed. The track will be looked up again."
 	case MarkWrongDone:
-		return "Lyrics marked wrong. " + plural(files) + " removed and saved to a backup file; the track will be looked up again."
+		if r := removed(); r != "" {
+			return "Lyrics marked wrong." + strings.TrimSuffix(r, ".") + "; the track will be looked up again."
+		}
+		return "Lyrics marked wrong. The track will be looked up again."
 	case MarkUnblocked:
 		return "Unblocked. The track will be looked up again."
 	case MarkNothingToDo:
@@ -75,18 +84,44 @@ func MarkStatusText(code string, files int) string {
 func MarkStatusFromQuery(q url.Values) string {
 	code := q.Get(MarkStatusParam)
 	files := 0
-	// Only the two codes that report a file count read it, and only a sane
-	// value: a crafted link cannot put a negative or absurd number on the page.
+	// Only the two codes that report a file count read it; MarkStatusText
+	// enforces the bound itself, so this parse is not the only guard.
 	if code == MarkInstrumentalDone || code == MarkWrongDone {
-		if n, err := strconv.Atoi(q.Get(MarkFilesParam)); err == nil && n >= 0 && n <= maxMarkFiles {
+		if n, err := strconv.Atoi(q.Get(MarkFilesParam)); err == nil {
 			files = n
 		}
 	}
 	return MarkStatusText(code, files)
 }
 
-// maxMarkFiles bounds the file count a status link may display.
+// maxMarkFiles bounds the file count a status line may display; a count outside
+// 0..maxMarkFiles is treated as no count.
 const maxMarkFiles = 1000
+
+// localReturn is the template layer's own copy of the handler's return-path
+// check (internal/web safeReturn, which templates must not import): only a
+// local absolute path survives, anything else is the fallback, so a template
+// never renders an off-site link even if a caller passes one.
+func localReturn(s, fallback string) string {
+	if s == "" || s[0] != '/' || strings.HasPrefix(s, "//") || strings.ContainsAny(s, "\\") {
+		return fallback
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return fallback
+		}
+	}
+	if p, err := url.Parse(s); err != nil || p.Scheme != "" || p.Host != "" {
+		return fallback
+	}
+	return s
+}
+
+// markReturnFallback is the landing page used when a return value is not local.
+const markReturnFallback = "/queue"
+
+// safeMarkReturn is localReturn with the queue page as the fallback.
+func safeMarkReturn(s string) string { return localReturn(s, markReturnFallback) }
 
 // RowActions is the per-row action model: which pills and links a table row
 // shows. ID zero (marking unavailable) renders nothing.
