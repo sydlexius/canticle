@@ -409,3 +409,27 @@ func (s *Service) load(ctx context.Context, id int64) (target, error) {
 	}
 	return t, nil
 }
+
+// Refusal maps Mark's refusal errors to a short path-free outcome phrase, or ""
+// when err is nil or not a refusal. A refusal changes nothing, so a non-zero res
+// means the error came after Mark began changing things: a failure, whatever
+// sentinel it wraps. The CLI prints the phrase; the web UI keys its status text
+// on it.
+func Refusal(err error, res MarkResult) string {
+	if res != (MarkResult{}) {
+		return ""
+	}
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return "not found"
+	case errors.Is(err, ErrBusy):
+		return "in flight"
+	case errors.Is(err, ErrNoSidecar):
+		return "no lyric file on disk"
+	case errors.Is(err, ErrManualInstrumental):
+		return "marked instrumental by hand"
+	case errors.Is(err, ErrNotMarkable):
+		return "failed or unavailable"
+	}
+	return ""
+}

@@ -1,6 +1,6 @@
 //go:build unix
 
-package commands
+package lyrics
 
 import (
 	"os"

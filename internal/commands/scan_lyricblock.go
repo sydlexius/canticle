@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyricblock"
+	"github.com/sydlexius/canticle/internal/lyrics"
 )
 
 // ScanMarkWrongCmd marks one track's current lyrics as wrong (#1398): the files
@@ -91,14 +91,13 @@ func runMarkWrong(ctx context.Context, out io.Writer, args ScanMarkWrongCmd) int
 	}
 	backupPath := args.Backup
 	if backupPath == "" {
-		backupPath = filepath.Join(filepath.Dir(cfg.DB.Path),
-			fmt.Sprintf("mark-wrong-backup-%s.jsonl", time.Now().UTC().Format("20060102-150405")))
+		backupPath = lyrics.DefaultBackupPath(cfg.DB.Path, "mark-wrong", time.Now())
 	}
-	bk := &lazyBackupFile{path: backupPath, what: "mark-wrong backup"}
-	defer bk.close()
+	bk := &lyrics.LazyBackupFile{Path: backupPath, What: "mark-wrong backup"}
+	defer bk.Close()
 	var tailPaths []string
 	report := func(b lyricblock.Backup) error {
-		f, ferr := bk.file()
+		f, ferr := bk.File()
 		if ferr != nil {
 			return ferr
 		}
@@ -112,10 +111,10 @@ func runMarkWrong(ctx context.Context, out io.Writer, args ScanMarkWrongCmd) int
 	svc := lyricblock.New(sqlDB, slog.Default(), nil)
 	res, merr := svc.Mark(ctx, lyricblock.MarkRequest{WorkItemID: args.ID, Roots: roots, DryRun: !args.Yes, Report: report})
 	_, _ = fmt.Fprintf(out, "work item: %d\n", args.ID)
-	if args.Yes && bk.f != nil {
+	if args.Yes && bk.Opened() {
 		_, _ = fmt.Fprintf(out, "backup: %s\n", backupPath)
 	}
-	if word := markWrongRefusal(merr, res); word != "" {
+	if word := lyricblock.Refusal(merr, res); word != "" {
 		_, _ = fmt.Fprintf(out, "refused: %s\n", word)
 		return 1
 	}
@@ -146,29 +145,6 @@ func runMarkWrong(ctx context.Context, out io.Writer, args ScanMarkWrongCmd) int
 		}
 	}
 	return 0
-}
-
-// markWrongRefusal maps the service's refusal errors to a path-free outcome
-// word, or "" when err is nil or not a refusal. A refusal changes nothing, so a
-// non-zero res means the error came after Mark began changing things: a failure,
-// whatever sentinel it wraps.
-func markWrongRefusal(err error, res lyricblock.MarkResult) string {
-	if res != (lyricblock.MarkResult{}) {
-		return ""
-	}
-	switch {
-	case errors.Is(err, lyricblock.ErrNotFound):
-		return "not found"
-	case errors.Is(err, lyricblock.ErrBusy):
-		return "in flight"
-	case errors.Is(err, lyricblock.ErrNoSidecar):
-		return "no lyric file on disk"
-	case errors.Is(err, lyricblock.ErrManualInstrumental):
-		return "marked instrumental by hand"
-	case errors.Is(err, lyricblock.ErrNotMarkable):
-		return "failed or unavailable"
-	}
-	return ""
 }
 
 func runListBlocks(ctx context.Context, out io.Writer, args ScanListBlocksCmd) int {
