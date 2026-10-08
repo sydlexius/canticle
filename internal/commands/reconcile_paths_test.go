@@ -881,3 +881,67 @@ func TestRunSweeperBreakerAndItsAdvice(t *testing.T) {
 		t.Fatalf("the sweep after it did not log its skipped delete as a count; log:\n%s", logBuf.String())
 	}
 }
+
+// A retained source whose queue row is still dequeue-eligible is counted in one
+// aggregate line (#1430): suffixed in a dry run, bare under --yes, absent when
+// nothing is held, and never naming a path, artist or title.
+func TestReconcilePaths_ReportsRetainedSourcesHoldingWork(t *testing.T) {
+	const heldLine = "reconcile-paths: 1 retained source(s) still hold dequeue-eligible work, which the worker keeps attempting"
+	for _, tc := range []struct {
+		name      string
+		ambiguous bool
+		yes       bool
+		wantLine  bool
+	}{
+		{"dry run", true, false, true},
+		{"applied", true, true, true},
+		{"nothing held", false, false, false},
+	} {
+		ctx, cfgPath, dbPath, root := setupReconcilePaths(t)
+		gone := filepath.Join(root, "ArtistA", "01. gone.flac")
+		seedReconcilePathsRow(t, ctx, dbPath, gone)
+		if tc.ambiguous {
+			// Two present files share the gone row's identity: it is retained, not pruned.
+			for _, name := range []string{"D1", "D2"} {
+				seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistA", name, "02. "+name+".flac"))
+			}
+			sqlDB, err := db.Open(ctx, dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = sqlDB.ExecContext(ctx, `UPDATE scan_results SET recording_mbid = ? WHERE file_path <> ?`, "mbid-nomatch-"+gone, gone)
+			if err := errors.Join(err, sqlDB.Close()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Remove(gone); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if code := runReconcilePaths(ctx, &buf, ScanReconcilePathsCmd{ConfigPath: cfgPath, Yes: tc.yes, Backup: filepath.Join(filepath.Dir(dbPath), "held.jsonl")}); code != 0 {
+			t.Fatalf("%s: exit=%d out=%s", tc.name, code, buf.String())
+		}
+		out := buf.String()
+		want := heldLine
+		if !tc.yes {
+			want += suffixDryRun(false)
+		}
+		var line string
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, "still hold dequeue-eligible work") {
+				line = l
+			}
+		}
+		if tc.wantLine && line != want {
+			t.Errorf("%s: held line = %q, want %q\nfull output:\n%s", tc.name, line, want, out)
+		}
+		if !tc.wantLine && line != "" {
+			t.Errorf("%s: unexpected held line %q", tc.name, line)
+		}
+		for _, leak := range []string{"ArtistA", "Artist", "Title", "gone.flac", root} {
+			if strings.Contains(line, leak) {
+				t.Errorf("%s: held line leaks %q: %s", tc.name, leak, line)
+			}
+		}
+	}
+}
