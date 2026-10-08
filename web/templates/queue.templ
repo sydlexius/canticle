@@ -8,6 +8,7 @@ templ QueuePage(version string, view QueueView, reports []RailItem, musixmatchIn
 	@Layout(view.Title+" queue", "/queue", version, reports, "/static/css/queue.css", musixmatchInactive, musixmatchServing) {
 		// queue.js restores focus after a "Show more" swap replaces its own row.
 		<script src="/static/js/queue.js" defer></script>
+		@MarkStatusLine(view.Status)
 		<h1 class="mx-page-title">{ view.Title }</h1>
 		<p class="mx-page-subtitle">{ view.Blurb }</p>
 		<p class="mx-queue-nav">

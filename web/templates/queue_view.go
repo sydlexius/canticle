@@ -11,6 +11,9 @@ type QueueView struct {
 	Key   string
 	Title string
 	Blurb string
+	// Status is the one-line result of a mark action the operator just made
+	// (from a fixed code, never the raw query); empty renders nothing.
+	Status string
 	// Rows is one page of rows, already in id order.
 	Rows []QueueRow
 	// NextCursor is the keyset cursor for "Show more" (the last row's ID), or
