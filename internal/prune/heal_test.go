@@ -106,7 +106,7 @@ func TestHealOutputPaths_MultiEntryUntouched(t *testing.T) {
 // path. The heal rewrites only an entry under the same root as the row's source.
 func TestHealOutputPaths_EntryInAnotherLibraryIsNotHealed(t *testing.T) {
 	ctx, sqlDB, libID, root := openSeeded(t)
-	b := addLibraryB(t, ctx, sqlDB, root)
+	b, _ := addLibraryB(t, ctx, sqlDB, root)
 	src := filepath.Join(root, "amb", "New", "01.flac")
 	paths := []models.OutputPath{{Outdir: filepath.Join(b, "amb", "Old"), Filename: "01.flac"}}
 	id := seedRowWithOutputPaths(t, ctx, sqlDB, libID, src, "amb", paths)
