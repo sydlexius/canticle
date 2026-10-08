@@ -199,9 +199,19 @@ func (b *lazyBackupFile) file() (*os.File, error) {
 	if b.f != nil {
 		return b.f, nil
 	}
-	f, err := os.OpenFile(b.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: G304 -- path is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
+	f, err := openBackupAppend(b.path)
 	if err != nil {
+		// The PathError text carries the path; surface only the cause.
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
 		return nil, fmt.Errorf("open %s: %w", b.what, err)
+	}
+	// The no-follow open refuses a symlink; a FIFO or device is refused here.
+	if fi, serr := f.Stat(); serr != nil || !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("open %s: not a regular file", b.what)
 	}
 	// O_CREATE's mode only applies to a new file; tighten an existing one before any write.
 	if err := f.Chmod(0o600); err != nil {
