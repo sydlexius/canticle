@@ -2748,7 +2748,7 @@ type OutputHealer interface {
 	RootOnline(root string) bool
 }
 
-// SetOutputHealer installs the healer; nil disables the guard and preflight.
+// SetOutputHealer installs the healer; nil disables the offline-library guard.
 func (w *Worker) SetOutputHealer(h OutputHealer) { w.healer = h }
 
 const (
