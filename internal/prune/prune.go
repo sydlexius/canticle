@@ -204,6 +204,28 @@ type RetainedRow struct {
 	// identically whether or not the sweep is a dry run -- which is what makes a
 	// dry run's report a truthful preview of a real one.
 	WouldRetire bool
+	// HoldsWork reports that the row's source is gone yet a linked work_queue row
+	// is still dequeue-eligible AFTER this pass (not retired, a dry run included),
+	// so the worker keeps attempting it (#1430).
+	HoldsWork bool
+}
+
+// holdsWork reports that a retained candidate still has dequeue-eligible work
+// after this pass: it was not actually retired, is not settled, and has linked
+// queue rows. retired is COMMITTED state, so a dry run passes false (#1430).
+func holdsWork(c *candidate, retired bool) bool {
+	return !retired && !c.settled && len(c.workItems) > 0
+}
+
+// countHoldingWork counts the rows with HoldsWork set.
+func countHoldingWork(rows []RetainedRow) int {
+	n := 0
+	for _, r := range rows {
+		if r.HoldsWork {
+			n++
+		}
+	}
+	return n
 }
 
 // unresolvableGoneError is the last_error value written when a row is retired as
@@ -225,6 +247,8 @@ type Result struct {
 	Pruned      []PrunedRow
 	Relinked    []RelinkedRow
 	Retained    []RetainedRow
+	// RetainedHoldingWork counts Retained rows with HoldsWork set.
+	RetainedHoldingWork int
 	// EditHeld counts relinked work_queue rows a resurrect would have reopened
 	// to 'pending' but that carry the hand-edit mark (#1228): their path moved,
 	// their status did not. Applied runs only; a dry run leaves it 0.
@@ -888,6 +912,9 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 				// database declined to make.
 				cg.retained.Retired = retired
 			}
+			if cg.retained.HoldsWork = holdsWork(c, cg.retained.Retired); cg.retained.HoldsWork {
+				res.RetainedHoldingWork++
+			}
 			res.Retained = append(res.Retained, cg.retained)
 			if hooks.Retained != nil {
 				if err := hooks.Retained(cg.retained); err != nil {
@@ -904,6 +931,12 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 			if shared {
 				// #1293: the row is linked to a present file in another library; keep it.
 				rr := RetainedRow{SourcePath: src, Reason: "the queue row is also linked to a present file in another library; never deleted from under it", MBID: c.mbid, ISRC: c.isrc}
+				// Never retired here, and the worker runs the row's own (gone)
+				// source_path, not the other library's file, so unsettled work
+				// keeps failing: it holds work (#1430).
+				if rr.HoldsWork = holdsWork(c, false); rr.HoldsWork {
+					res.RetainedHoldingWork++
+				}
 				res.Retained = append(res.Retained, rr)
 				if hooks.Retained != nil {
 					if err := hooks.Retained(rr); err != nil {
@@ -958,6 +991,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		}
 		res.Relinked, res.RelinkOwned = planned, owned
 		res.Retained = append(res.Retained, declined...)
+		res.RetainedHoldingWork += countHoldingWork(declined)
 		// Dry-run reports the intended outcome (gather-time counts), since no
 		// mutation runs to measure.
 		for _, row := range toPrune {
@@ -1007,6 +1041,7 @@ func (p *Pruner) reconcile(ctx context.Context, sc scope, libraryID *int64, ds *
 		// ambiguous identity) so pruned+relinked+retained always equals the
 		// number of gone rows considered.
 		res.Retained = append(res.Retained, retainedByConflict...)
+		res.RetainedHoldingWork += countHoldingWork(retainedByConflict)
 	}
 	if len(toPrune) == 0 {
 		return res, nil
@@ -1301,13 +1336,16 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 		idx int
 	}
 	var toRetire []retireePlan
+	// retainedC[i] is the candidate behind retained[i], so HoldsWork can be
+	// decided after the retirements settle.
+	var retainedC []*candidate
 
 	// The transaction is retried whole on SQLITE_BUSY (#978). Nothing in it has
 	// an effect outside the database (every report and retirement runs after the
 	// commit), so each attempt starts from empty accumulators and a rolled-back
 	// attempt leaves no trace.
 	if err := dbpkg.RetryBatchTx(ctx, "prune relink", func() error {
-		applied, retained, toRetire, editHeld, declines = nil, nil, nil, 0, relinkDeclines{}
+		applied, retained, toRetire, retainedC, editHeld, declines = nil, nil, nil, nil, 0, relinkDeclines{}
 		tx, err := p.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("prune: begin relink tx: %w", err)
@@ -1375,6 +1413,7 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 					toRetire = append(toRetire, retireePlan{c: cg.c, idx: len(retained)})
 				}
 				retained = append(retained, row)
+				retainedC = append(retainedC, cg.c)
 			} else {
 				applied = append(applied, cg.relinked)
 				// Counted only for a candidate that keeps its writes: a
@@ -1406,6 +1445,10 @@ func (p *Pruner) applyRelinks(ctx context.Context, targets []classifiedRelink, r
 		}
 		retained[plan.idx].WouldRetire = true
 		retained[plan.idx].Retired = retired
+	}
+	// After the retirements, before any report: a hook never sees HoldsWork change.
+	for i := range retained {
+		retained[i].HoldsWork = holdsWork(retainedC[i], retained[i].Retired)
 	}
 	if reportRelinked != nil {
 		for _, rr := range applied {
@@ -1462,6 +1505,8 @@ func (p *Pruner) planRelinks(ctx context.Context, targets []classifiedRelink) (p
 			SourcePath: cg.relinked.OldPath, Reason: reason,
 			MBID: cg.relinked.MBID, ISRC: cg.relinked.ISRC,
 			WouldRetire: cg.retireIfDeclined,
+			// A dry run retires nothing, so a would-retire row still holds work now.
+			HoldsWork: holdsWork(cg.c, false),
 		})
 	}
 	return planned, retained, owned, nil
