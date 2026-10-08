@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -525,6 +526,15 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 					return divergenceOutcome{}, fmt.Errorf("identityrepair: delete orphaned divergent work_queue %d: %w", wq.id, err)
 				}
 				outcome.deleted = 1
+				// The dead row's lyric blocks (#1122) are NOT moved. Reaching this
+				// point means no member matched wq.artistKey and len(byKey) > 1, so
+				// the unlinked members carry at least two distinct corrected keys
+				// and there is no single destination (a single-key group takes the
+				// re-key path above). The blocks stay under the old key as orphans:
+				// `scan list-blocks` shows them and `scan unblock --orphans` clears
+				// them. The members re-enqueue under their own keys without them.
+				slog.Info("identityrepair: deleted divergent work_queue row; its lyric blocks stay under the old key as orphans",
+					"work_queue_id", wq.id, "unlinked_members", len(members), "distinct_keys", len(byKey))
 				changes = append(changes, Change{
 					Op:             OpQueueDelete,
 					WorkQueueID:    wq.id,
@@ -560,6 +570,15 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 			}
 			if !survives {
 				outcome.deleted = 1
+				// The dead row's lyric blocks (#1122) are NOT moved. Reaching this
+				// point means no member matched wq.artistKey and len(byKey) > 1, so
+				// the unlinked members carry at least two distinct corrected keys
+				// and there is no single destination (a single-key group takes the
+				// re-key path above). The blocks stay under the old key as orphans:
+				// `scan list-blocks` shows them and `scan unblock --orphans` clears
+				// them. The members re-enqueue under their own keys without them.
+				slog.Info("identityrepair: deleted divergent work_queue row; its lyric blocks stay under the old key as orphans",
+					"work_queue_id", wq.id, "unlinked_members", len(members), "distinct_keys", len(byKey))
 				changes = append(changes, Change{
 					Op:             OpQueueDelete,
 					WorkQueueID:    wq.id,

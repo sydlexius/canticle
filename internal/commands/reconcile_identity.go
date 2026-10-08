@@ -33,6 +33,10 @@ import (
 // each unlinked member to pending). The pre-existing merge in
 // identityrepair.apply had the same limit before #963.
 //
+// The record also does not capture the lyric block move (#1399): blocks follow
+// the corrected identity, and a hand-restore of the identity does not move them
+// back.
+//
 // Op names which table Old*/New* describe -- see identityrepair.Op's doc
 // comment for the full list. For Op == "scan_correction" (Run's tag re-read
 // pass) they are the SCAN_RESULTS row's prior/corrected identity, keyed by
@@ -126,7 +130,7 @@ func runReconcileIdentity(ctx context.Context, out io.Writer, args ScanReconcile
 		return appendReconcileIdentityBackup(backupFile, ch)
 	}
 
-	repairer := identityrepair.New(sqlDB, scanner.ReadArtistIdentity)
+	repairer := identityrepair.New(sqlDB, scanner.ReadArtistIdentity).WithBlocks(lyricblock.NewStore(sqlDB, nil))
 
 	// The divergence pass runs FIRST and is DB-only (no file re-read): it finds
 	// scan_results/work_queue pairs that already disagree because a PRIOR scan

@@ -789,6 +789,8 @@ canticle scan unblock --orphans --yes
 
 `--orphans` removes only blocks whose track has no work item any more (for example after the file was deleted and pruned); a block on a track that is still queued is kept. It is a dry run without `--yes`, prints counts only, and cannot be combined with `--id` or `--work-item`. Add `--tail` to see each block's identity.
 
+A track whose file was pruned (for example while a share was unmounted) and comes back on a later scan loses its block if `--orphans` was applied in between, so the blocked lyrics can return. Look at the dry run first.
+
 Tracks are chosen by id only. The output is counts and outcome words; it never prints a library path, artist, title or lyric text. `--tail` is where detail appears: `mark-wrong --tail` prints each file backed up, and `list-blocks --tail` prints each block with its identity. The exit status is 1 if the track or block is not found, is being processed right now, has no lyric file on disk, is marked instrumental by hand, or is failed or unavailable (revive it first); nothing is changed in those cases.
 
 Before a real `mark-wrong` removes a file, it appends the file to a JSONL backup. The default is `<db-dir>/mark-wrong-backup-<timestamp>.jsonl`, or the file named by `--backup`, which has the same limits as `queue mark-instrumental --backup`. Each line has `op` (`mark-wrong`), `work_item_id`, `path`, `content` (the bytes, base64 encoded) and `meta`. `scan unblock` does not restore a lyric file; the next fetch decides what the track gets. To put a file back by hand:

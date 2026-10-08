@@ -28,7 +28,7 @@ func TestRun_RekeyCorrectsEditedRowWithoutReopening(t *testing.T) {
 	markEdited(t, db, wq)
 
 	reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}}
-	res, err := New(db, reader.read).Run(context.Background(), Options{})
+	res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestRun_MergeSkipsWhenARowIsEdited(t *testing.T) {
 			}
 
 			reader := fakeReader{"/m/1.mp3": {"Alpha; Bravo", ""}, "/m/2.mp3": {"Alpha; Bravo", ""}}
-			res, err := New(db, reader.read).Run(context.Background(), Options{})
+			res, err := newRepairer(db, reader.read).Run(context.Background(), Options{})
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
@@ -100,7 +100,7 @@ func TestRepairDivergence_RekeyKeepsEditedRowSettled(t *testing.T) {
 	wq := seedQueue(t, db, "AlphaBravo", "", "done", sr)
 	markEdited(t, db, wq)
 
-	res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
+	res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("RepairDivergence: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestRepairDivergence_DisagreementLeavesEditedRowWhole(t *testing.T) {
 				t.Fatalf("settle scans: %v", err)
 			}
 
-			res, err := New(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: dryRun})
+			res, err := newRepairer(db, fakeReader{}.read).RepairDivergence(context.Background(), Options{DryRun: dryRun})
 			if err != nil {
 				t.Fatalf("RepairDivergence: %v", err)
 			}
@@ -193,14 +193,14 @@ func TestRun_DryRunCountsMatchApplyForEditedRows(t *testing.T) {
 		"/m/4.mp3": {"Echo; Foxtrot", ""},
 	}
 	dryDB := seed(t)
-	dry, err := New(dryDB, reader.read).Run(context.Background(), Options{DryRun: true})
+	dry, err := newRepairer(dryDB, reader.read).Run(context.Background(), Options{DryRun: true})
 	if err != nil {
 		t.Fatalf("dry Run: %v", err)
 	}
 	if a, _, _ := scanIdentity(t, dryDB, 1); a != "AlphaBravo" {
 		t.Errorf("dry run mutated scan_results: artist = %q", a)
 	}
-	applied, err := New(seed(t), reader.read).Run(context.Background(), Options{})
+	applied, err := newRepairer(seed(t), reader.read).Run(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("apply Run: %v", err)
 	}

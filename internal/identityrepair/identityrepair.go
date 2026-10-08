@@ -176,10 +176,11 @@ func (r *Repairer) WithBlocks(m BlockMover) *Repairer {
 }
 
 // moveBlocks carries the blocks of ch's old queue identity to its corrected one.
-// It is a no-op without a BlockMover.
+// A repair that re-keys a row with no BlockMover installed is an error, not a
+// skip: a silent no-op would strand the operator's blocks under the old key.
 func moveBlocks(ctx context.Context, tx *sql.Tx, m BlockMover, ch Change, titleKey string) error {
 	if m == nil {
-		return nil
+		return fmt.Errorf("identityrepair: scan_result %d re-keyed with no lyric block mover installed (use WithBlocks)", ch.ScanResultID)
 	}
 	if _, err := m.Rekey(ctx, tx, ch.OldArtistKey, titleKey, ch.NewArtistKey, titleKey); err != nil {
 		return fmt.Errorf("identityrepair: move lyric blocks for scan_result %d: %w", ch.ScanResultID, err)
