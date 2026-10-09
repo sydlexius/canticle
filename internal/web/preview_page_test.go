@@ -111,20 +111,32 @@ func TestPreviewPageIgnoresForeignCompanion(t *testing.T) {
 
 func TestPreviewPageRefusals(t *testing.T) {
 	f := newPreviewFixture(t)
-	noSidecar := f.row(t, f.writeFile(t, f.root, "bare.flac"))
 	outsideAudio := f.writeFile(t, f.outside, "out.flac")
 	if err := os.WriteFile(filepath.Join(f.outside, "out.lrc"), []byte(pageLRC), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	outside := f.row(t, outsideAudio)
 
+	// No lyric sidecar is written for any of these rows (#1250): the page then
+	// renders only when the audio opens under a root, so each stays a bare 404.
+	escDir := filepath.Join(f.outside, "esc")
+	if err := os.MkdirAll(escDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.writeFile(t, escDir, "esc.flac")
+	if err := os.Symlink(escDir, filepath.Join(f.root, "link")); err != nil {
+		t.Fatal(err)
+	}
 	cases := map[string]string{
-		"no sidecar":     itoa(noSidecar),
-		"outside roots":  itoa(outside),
-		"unknown id":     "999999",
-		"non-numeric id": "abc",
-		"zero id":        "0",
-		"negative id":    "-4",
+		"outside roots":                       itoa(outside),
+		"no lyric, audio missing":             itoa(f.row(t, filepath.Join(f.root, "gone.flac"))),
+		"no lyric, empty source_path":         itoa(f.row(t, "")),
+		"no lyric, relative source_path":      itoa(f.row(t, "rel/song.flac")),
+		"no lyric, audio escapes via symlink": itoa(f.row(t, filepath.Join(f.root, "link", "esc.flac"))),
+		"unknown id":                          "999999",
+		"non-numeric id":                      "abc",
+		"zero id":                             "0",
+		"negative id":                         "-4",
 	}
 	for name, id := range cases {
 		rec := f.page(id)

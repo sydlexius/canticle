@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -158,8 +159,8 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 	// between leaves the page with a stale mtime and the save refuses as
 	// "changed" (the safe direction).
 	lrcMTime := previewSidecarMTime(roots, t.LRCPath)
-	lrc, lrcCut, ok := readPreviewSidecar(roots, t.LRCPath)
-	if !ok {
+	lrc, lrcCut, hasLRC := readPreviewSidecar(roots, t.LRCPath)
+	if !hasLRC && !previewAudioOpens(roots, t.AudioPath) {
 		http.NotFound(w, r)
 		return
 	}
@@ -182,26 +183,55 @@ func (u *UI) handlePreviewPage(w http.ResponseWriter, r *http.Request) {
 		Lines:       lines,
 		HasWords:    hasWords,
 		Truncated:   lrcCut,
+		NoLyric:     !hasLRC,
 	}
-	// Exactly one `from` value is accepted; a repeated parameter is ambiguous
-	// and falls back to the queue root rather than trusting the first value.
+	// The page's own path with its validated query, the mark actions' return
+	// target (#1250). Exactly one `from` value is accepted; a repeated parameter
+	// is ambiguous and falls back to the queue root rather than trusting the
+	// first value.
+	ret := "/preview/" + strconv.FormatInt(id, 10)
 	if from := r.URL.Query()["from"]; len(from) == 1 {
 		if b, err := reports.ParseBucket(from[0]); err == nil {
 			view.BackHref = queueBucketHref(b)
+			ret += "?" + url.Values{"from": {from[0]}}.Encode()
 			// Carry the list's search/sort/dir so Back returns to the same view.
 			// The values pass the list page's own validator, against the spec of the
 			// bucket named by `from` (so a sort that bucket cannot apply is dropped); a failure (or a
-			// repeated key) drops all of them rather than reflecting any.
+			// repeated key) drops all of them rather than reflecting any. The return
+			// target is built from that validated state only, never the raw query,
+			// so an unknown key or oversized value cannot ride into the mark links.
 			if st, err := parseQueueViewState(r.URL.Query(), b, u.reports.TopRung()); err == nil {
-				view.BackHref = st.backLinkState().href(string(b), "")
+				back := st.backLinkState()
+				view.BackHref = back.href(string(b), "")
+				v := back.values()
+				v.Set("from", string(b))
+				ret = "/preview/" + strconv.FormatInt(id, 10) + "?" + v.Encode()
 			}
 			view.BackLabel = "Back to " + queueBucketInfo[b][0]
 		}
 	}
-	if u.editor != nil && !lrcCut {
+	if mr := u.markReturnTo(ret); mr != "" {
+		view.Marks = templates.RowActions{ID: id, Return: mr, HasLyric: t.HasLyric,
+			Manual: t.ManualInstrumental, Blocked: t.Blocked, InFlight: t.Status == "processing"}
+		view.MarkStatus = templates.MarkStatusFromQuery(r.URL.Query())
+	}
+	if u.editor != nil && hasLRC && !lrcCut {
 		u.fillPreviewEditor(w, r, &view, t, id, roots, lrcMTime)
 	}
 	render(w, r, templates.PreviewPage(u.version, view, u.buildRail(""), u.musixmatchInactive, u.musixmatchServing))
+}
+
+// previewAudioOpens reports whether the row's audio opens through the same
+// confinement as the audio route. A row with no lyric is still previewable (it
+// can be marked instrumental, or have a mark undone) but only when its audio is
+// a regular file under a live library root, so the page never confirms a path
+// outside them.
+func previewAudioOpens(roots []string, p string) bool {
+	f, _, ok := openPreviewAudio(roots, p)
+	if ok {
+		_ = f.Close()
+	}
+	return ok
 }
 
 // previewSidecarMTime is the mtime (unix nanoseconds) of a sidecar opened

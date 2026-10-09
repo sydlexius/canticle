@@ -43,6 +43,11 @@ type PreviewTarget struct {
 	// rung (lineTierPredicate), the only rows the offset editor may rewrite
 	// (#481 Stage 2). Decided in SQL from the row's recorded state.
 	LineEditable bool
+	// ManualInstrumental, Blocked and HasLyric are the mark-action state the
+	// player shows (#1250), read from the row's recorded state exactly as the
+	// list screens do (manual_instrumental_at, a lyric_blocks row for the
+	// identity keys, and an outcome that says a lyric file was written).
+	ManualInstrumental, Blocked, HasLyric bool
 
 	// AudioPath is work_queue.source_path, whitespace-trimmed ("" when the row
 	// has none). Sidecars are probed only when it is absolute; otherwise both
@@ -101,9 +106,10 @@ func (r *Repo) PreviewSource(ctx context.Context, id int64) (PreviewTarget, erro
 	t := PreviewTarget{ID: id}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT artist, title, album, status, COALESCE(sync_tier, ''), source_path, artist_key, title_key,
-		        COALESCE(`+lineEditableSQL+`, 0)
+		        COALESCE(`+lineEditableSQL+`, 0), `+manualMarkPredicate+`, `+blockedExistsSQL+`, `+hasLyricSQL+`
 		   FROM work_queue WHERE id = ?`, id,
-	).Scan(&t.Artist, &t.Title, &t.Album, &t.Status, &t.SyncTier, &t.AudioPath, &t.ArtistKey, &t.TitleKey, &t.LineEditable)
+	).Scan(&t.Artist, &t.Title, &t.Album, &t.Status, &t.SyncTier, &t.AudioPath, &t.ArtistKey, &t.TitleKey, &t.LineEditable,
+		&t.ManualInstrumental, &t.Blocked, &t.HasLyric)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PreviewTarget{}, ErrPreviewNotFound
 	}

@@ -335,12 +335,12 @@ The Dashboard requires the web UI to be enabled and an admin session (or a trust
 
 ## Web UI: Lyric preview and offset editor
 
-A queue bucket's page (for example Settled) has a **Preview** link on rows whose lyrics file is synced. It opens a player: the track's audio on top, the lyrics below, with the current line highlighted as the audio plays.
+A queue bucket's page (for example Settled) has a **Preview** link on rows whose lyrics file is synced. It opens a player (the same page also opens by its address, or after a mark action, for a track with no synced lyric whose audio is in a library): the track's audio on top, the lyrics below, with the current line highlighted as the audio plays.
 
 ### Finding a track to edit
 
 1. Click **Queue** in the sidebar. The page lists each bucket with its track count; the counts are the same as the Dashboard's queue tiles.
-2. Open **Finished** (word-synced tracks) or **Settled (upgradable)** (line-synced and the rest). With `word_sync_mode = off` or no word-capable lane configured, line-synced tracks are in **Finished** instead. Only these two hold completed tracks, and the player is reached from them.
+2. Open **Finished** (word-synced tracks) or **Settled (upgradable)** (line-synced and the rest). With `word_sync_mode = off` or no word-capable lane configured, line-synced tracks are in **Finished** instead. These two hold the completed tracks whose rows offer the player.
 3. Click **Preview** on a row whose lyrics file is synced. The player has a link at the top that returns you to the bucket you came from. Line-synced tracks get the timing editor below; a word-synced track opens read-only. The **Line-synced (editable)** chip on the bucket that holds them lists only the editable ones.
 
 For a line-synced track the player also shows a **Timing offset** panel. Use it when a provider's lyrics are right but consistently early or late against your copy of the recording (a different release or edit than the one the lyrics were timed to).
@@ -404,6 +404,15 @@ A file with word-level timing (a Canticle-written `.elrc` companion, recognized 
 ### Edited tracks are protected
 
 A track you saved an edit on is not replaced by the automatic upgrade and word-sync recheck passes, so a hand-tuned file is not overwritten by a later fetch; moving an edited track to another folder re-attaches it to its new location without re-fetching it (move the `.lrc` with the audio). The timing-validation sweep still records its verdict for an edited track but never demotes, quarantines or purges the file, and identity repair corrects the track's details without reopening it for a new fetch. Explicit operator commands still can: `--update`, a manual re-fetch, and `canticle revalidate --apply` act on the file regardless. Use **Revert to original** first if you want the automatic passes to consider the track again.
+
+### Marking a track from the player
+
+The player has a separate **Track marks** card, apart from Save and Discard. On a track with a timing editor it sits under the timing panel (on a phone, under the lyrics and the timing bar). On a word-synced track, or one with no lyric to show, it sits under the audio player and any notice, above the lyric list if there is one, at any width. It offers the same two actions as the list screens, on the same conditions, with the same confirm page and the same undo; confirming returns you to the player, and the one-line result is the first line inside the Track marks card.
+
+- **Mark instrumental** is offered on every track that is not being processed. A track you marked shows a notice and **Undo instrumental** instead.
+- **Lyrics are wrong** is offered whenever the track has a lyric written, synced or an unsynced `.txt`, including a word-synced track (which still has no timing editor). A track whose lyric is not a readable synced `.lrc` shows a notice that there is no synced lyric to play along with; the audio still plays. A track with blocked lyrics shows a notice and **Unblock lyrics** instead.
+
+After either action the lyric list is gone, because the file was removed, and the card says what the track is now. The player still opens for a track with no synced lyric (an instrumental mark, blocked lyrics, or a plain-text lyric), as long as its audio is in a library, so you can undo from the same page. These buttons have no keyboard shortcuts, so they never collide with the editor's. See [Marking a track](#web-ui-marking-a-track) for what each action does and backs up.
 
 ## Web UI: Marking a track
 

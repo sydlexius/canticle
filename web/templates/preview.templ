@@ -27,7 +27,7 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 				// It sits above the player it explains. On a phone the editor's status line repeats the failure
 				// and stays visible in the collapsed bar once this notice has scrolled away (#1247).
 				<p id="mx-preview-audio-error" class="mx-preview-notice mx-preview-error" role="alert" hidden></p>
-				<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc } data-format={ view.AudioFormat } data-type={ view.AudioType } if view.FlacSrc != "" { data-flac-src={ view.FlacSrc } }></audio>
+				<audio id="mx-preview-audio" class="mx-preview-audio" controls preload="metadata" src={ view.AudioSrc } data-format={ view.AudioFormat } data-type={ view.AudioType } if view.FlacSrc != "" { data-flac-src={ view.FlacSrc } } if view.NoLyric { data-no-lyric="" }></audio>
 				if view.Truncated {
 					<p class="mx-preview-notice" role="status">This lyric file is larger than the preview limit; only its first lines are shown.</p>
 				}
@@ -42,6 +42,9 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 				}
 				if view.Editable {
 					@previewEditor(view)
+				}
+				if view.Marks.ID != 0 {
+					@previewMarks(view)
 				}
 			</div>
 			<div class="mx-preview-body">
@@ -58,6 +61,7 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 						</div>
 					</div>
 				}
+				if !view.NoLyric {
 				<ol id="mx-preview-lyrics" class="mx-preview-lyrics" data-has-words?={ view.HasWords }>
 					for _, l := range view.Lines {
 						if l.Decorative {
@@ -71,6 +75,7 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 						}
 					}
 				</ol>
+				}
 			</div>
 		</div>
 		if view.Editable {
@@ -78,6 +83,8 @@ templ PreviewPage(version string, view PreviewView, reports []RailItem, musixmat
 			<script src="/static/js/keyboard.js" defer></script>
 		}
 		// preview.js (#481) adds the sync; served from /static under script-src 'self'.
+		// A track with no lyric has no lyric list: the audio carries data-no-lyric so preview.js runs only
+		// its audio error path (a missing list on any other page is still reported loudly).
 		<script src="/static/js/preview.js" defer></script>
 	}
 }
@@ -165,5 +172,43 @@ templ previewEditor(view PreviewView) {
 				<button type="button" id="mx-edit-confirm-ok" class="mx-edit-btn is-primary">Save</button>
 			</div>
 		</dialog>
+	</section>
+}
+
+// previewMarks is the "a person overrules canticle" section (#1250): mark
+// instrumental and lyrics-are-wrong, with the matching undo. It is its own card,
+// apart from the offset editor, and its controls are plain links to the same
+// confirm pages the list screens use (the confirm step, CSRF token and same-origin
+// guard live on those POST routes), returning to this page. No JS, no shortcuts.
+templ previewMarks(view PreviewView) {
+	<section id="mx-marks" class="mx-marks" aria-labelledby="mx-marks-h">
+		<h2 id="mx-marks-h" class="mx-marks-title">Track marks</h2>
+		@MarkStatusLine(view.MarkStatus)
+		if view.Marks.Manual {
+			<p class="mx-marks-note" role="note">Marked instrumental by hand. The track is protected and will not be looked up again until you undo this.</p>
+		} else if view.Marks.Blocked {
+			<p class="mx-marks-note" role="note">These lyrics are blocked. The exact words will not be written for this track again.</p>
+		} else if view.NoLyric && view.Marks.HasLyric {
+			<p class="mx-marks-note" role="note">There is no synced lyric to play along with for this track.</p>
+		} else if view.NoLyric {
+			<p class="mx-marks-note" role="note">No lyric is written for this track.</p>
+		}
+		<div class="mx-marks-actions">
+			if view.Marks.ShowInstrumental() {
+				if view.Marks.Manual {
+					<a id="mx-mark-instrumental-undo" class="mx-marks-btn" href={ templ.SafeURL(view.Marks.Href("instrumental/undo")) }>Undo instrumental</a>
+				} else {
+					<a id="mx-mark-instrumental" class="mx-marks-btn" href={ templ.SafeURL(view.Marks.Href("instrumental")) }>Mark instrumental</a>
+				}
+			}
+			if view.Marks.ShowUnblock() {
+				<a id="mx-mark-unblock" class="mx-marks-btn" href={ templ.SafeURL(view.Marks.Href("unblock")) }>Unblock lyrics</a>
+			} else if view.Marks.ShowWrong() {
+				<a id="mx-mark-wrong" class="mx-marks-btn" href={ templ.SafeURL(view.Marks.Href("wrong")) }>Lyrics are wrong</a>
+			}
+		</div>
+		if view.Marks.InFlight {
+			<p class="mx-marks-note" role="note">A worker is on this track right now; the marks are unavailable until it finishes.</p>
+		}
 	</section>
 }

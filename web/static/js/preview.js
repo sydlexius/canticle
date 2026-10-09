@@ -1091,17 +1091,22 @@
     if (code === 2) {
       return "The audio could not be loaded (network error, " + what + "). Reload the page to try again.";
     }
-    return "This browser cannot play this track's audio (" + what + "), or the file could not be read. Try another browser, or play the file in a desktop player. The lyrics are shown, and an offset can still be typed.";
+    return "This browser cannot play this track's audio (" + what + "), or the file could not be read. Try another browser, or play the file in a desktop player." +
+      (audio.hasAttribute("data-no-lyric") ? "" : " The lyrics are shown, and an offset can still be typed.");
   }
 
   function init() {
     var audio = document.getElementById("mx-preview-audio");
     var list = document.getElementById("mx-preview-lyrics");
-    if (!audio || !list) {
+    // The template declares data-no-lyric on a page for a track with no readable
+    // lyric: there the lyric list is expected to be absent and only the audio
+    // error path runs. A page without the marker still fails loudly.
+    var noLyric = !!audio && audio.hasAttribute("data-no-lyric");
+    if (!audio || (!list && !noLyric)) {
       console.error("preview.js: missing #mx-preview-audio or #mx-preview-lyrics");
       return;
     }
-    var lines = Array.prototype.slice.call(list.querySelectorAll(".mx-preview-line"));
+    var lines = list ? Array.prototype.slice.call(list.querySelectorAll(".mx-preview-line")) : [];
     // A stream the browser cannot decode (ALAC outside Safari, WMA, APE, ...)
     // otherwise just sits silent, so say so in the player and in the console
     // (#1243). The error may already have fired before this script ran. This is
@@ -1266,6 +1271,9 @@
       audioFailed();
     }
 
+    if (noLyric) {
+      return; // audio error handling is wired; there is nothing to sync or edit
+    }
     if (lines.length === 0) {
       console.error("preview.js: no .mx-preview-line elements to sync");
       return;
