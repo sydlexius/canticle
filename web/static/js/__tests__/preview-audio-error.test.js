@@ -567,3 +567,24 @@ describe("preview.js audio failure check (#1261)", () => {
     }
   });
 });
+
+describe("no-lyric mode (#1250)", () => {
+  const NO_LYRIC = `<body>
+    <audio id="mx-preview-audio" src="/preview/7/audio" data-format="M4A" data-type="audio/mp4" data-no-lyric=""></audio>
+    <p id="mx-preview-audio-error" role="alert" hidden></p></body>`;
+
+  it("shows the audio error without the lyric sentence and logs no missing-list error", () => {
+    const { win, errors } = load({ page: NO_LYRIC, preError: { code: 3 } });
+    const box = win.document.getElementById("mx-preview-audio-error");
+    expect(box.hidden).toBe(false);
+    expect(box.textContent).toContain("This browser cannot play this track's audio");
+    expect(box.textContent).not.toContain("lyrics are shown");
+    expect(errors.some((e) => e.includes("missing #mx-preview-lyrics"))).toBe(false);
+    expect(errors.some((e) => e.includes("no .mx-preview-line"))).toBe(false);
+  });
+
+  it("still logs a missing lyric list on a page without the marker", () => {
+    const { errors } = load({ page: NO_LYRIC.replace(' data-no-lyric=""', "") });
+    expect(errors.some((e) => e.includes("missing #mx-preview-audio or #mx-preview-lyrics"))).toBe(true);
+  });
+});

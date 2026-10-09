@@ -59,6 +59,14 @@ type PreviewView struct {
 	// are only its leading complete cues; the page says so.
 	Truncated bool
 
+	// NoLyric reports that no lyric file is written: the page has no lyric panel
+	// (#1250). Marks is the mark-actions model (ID zero when the mark routes are
+	// not wired, which renders no marks section) and MarkStatus the one-shot
+	// result line of the action just taken.
+	NoLyric    bool
+	Marks      RowActions
+	MarkStatus string
+
 	// Lyric offset editor (#1211). Editable renders the editor panel (only for
 	// a line-synced, settled row with the editor wired); a non-empty
 	// ReadOnlyReason renders the read-only card instead.

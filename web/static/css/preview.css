@@ -360,6 +360,42 @@
   clip: rect(0 0 0 0);
 }
 
+/* Track marks (#1250): its own card beside the offset editor, plain links with
+ * a 44px hit area, never the editor's Save/Discard buttons. Tokens only. */
+.mx-marks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding: 1.25rem;
+  max-width: 40rem;
+  box-sizing: border-box;
+  background: var(--mx-surface-bg);
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-lg);
+}
+
+.mx-marks-title { margin: 0; font-size: 1rem; }
+.mx-marks .mx-row-status { margin: 0; }
+.mx-marks-note { margin: 0; font-size: 0.875rem; color: var(--mx-content-text-secondary); }
+.mx-marks-actions { display: flex; flex-wrap: wrap; gap: 0.625rem; }
+
+.mx-marks-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 1rem;
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+  color: var(--mx-content-text);
+  font: 500 0.875rem var(--mx-font-sans);
+  text-decoration: none;
+}
+
+.mx-marks-btn:hover { border-color: var(--mx-content-text-secondary); }
+.mx-marks-btn:focus-visible { outline: 2px solid var(--mx-accent); outline-offset: 2px; }
+
 /* The expand control exists only at phone width. */
 .mx-edit-more { display: none; }
 
@@ -376,6 +412,9 @@
 
   .mx-preview-layout[data-editor] .mx-preview-audio { order: 0; }
   .mx-preview-layout[data-editor] .mx-preview-body { order: 1; width: 100%; }
+  /* The marks card sorts with the editor bar, after the lyrics, and below it in
+   * the flow, so the sticky bar never covers it at the end of the page. */
+  .mx-preview-layout[data-editor] .mx-marks { order: 2; width: 100%; }
 
   /* The editable panel is a compact bar pinned to the viewport bottom (#1247).
    * Collapsed it keeps the offset, the fine nudges, Save and Discard (about
