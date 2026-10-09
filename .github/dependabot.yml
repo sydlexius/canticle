@@ -141,3 +141,23 @@ updates:
     # bump from here needs no code change (torchaudio 2.11 is stable-ABI and
     # the Dockerfile's build-time forced_align call proves the pairing), only
     # the usual lock regeneration follow-up described above.
+
+  # The JS test tooling (vitest, jsdom and their transitive tree). Nothing here
+  # ships: package-lock.json feeds only `npm ci` + `npm test`. This ecosystem
+  # had no entry, so an advisory on a transitive package raised an alert that
+  # no update PR ever followed (alert 28, source-map-js). One grouped PR per
+  # week, since every package in the tree is development-only.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+    groups:
+      js-test-deps:
+        patterns:
+          - "*"
