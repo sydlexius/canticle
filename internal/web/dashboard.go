@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 
@@ -97,16 +98,18 @@ func (u *UI) buildDashboardView(r *http.Request) (templates.DashboardView, error
 	if err != nil {
 		return templates.DashboardView{}, fmt.Errorf("dashboard: provider effectiveness: %w", err)
 	}
-	if u.laneHealth != nil {
-		view.ProviderTiles = providerTilesWithHealth(pe, u.laneHealth(), u.musixmatchInactive, time.Now())
-	} else {
-		view.ProviderTiles = buildProviderTiles(pe)
-	}
-
-	unattributed, err := u.reports.UnattributedDoneCount(ctx)
+	// The tile's headline number is done rows by provider_lane, the Results
+	// row's unit (#1439); the lookup hit rate from pe rides beside it.
+	done, err := u.reports.DoneByLane(ctx)
 	if err != nil {
-		return templates.DashboardView{}, fmt.Errorf("dashboard: unattributed count: %w", err)
+		return templates.DashboardView{}, fmt.Errorf("dashboard: done by lane: %w", err)
 	}
+	if u.laneHealth != nil {
+		view.ProviderTiles = providerTilesWithHealth(pe, u.laneHealth(), u.musixmatchInactive, time.Now(), done.ByLane)
+	} else {
+		view.ProviderTiles = buildProviderTiles(pe, done.ByLane)
+	}
+	unattributed := done.Unattributed
 	if t, ok := buildUnattributedTile(unattributed); ok {
 		view.ProviderTiles = append(view.ProviderTiles, t)
 	}
@@ -386,45 +389,78 @@ func hitRateBarFields(rate float64) (sub, barPct, barLabel string) {
 }
 
 // buildProviderTiles shapes per-provider effectiveness rows into stat tiles,
-// each carrying its hit rate as an inline mini bar (#318).
-func buildProviderTiles(pe []reports.ProviderEffectiveness) []templates.StatTile {
+// each carrying its hit rate as an inline mini bar (#318). done is the done-row
+// count per persisted lane (reports.DoneByLane); a lane with done rows but no
+// recorded attempts still gets a tile, so the tiles plus Unattributed always
+// total the done rows (#1439).
+func buildProviderTiles(pe []reports.ProviderEffectiveness, done map[string]int64) []templates.StatTile {
+	seen := make(map[string]bool, len(pe))
 	tiles := make([]templates.StatTile, 0, len(pe))
 	for _, p := range pe {
-		tiles = append(tiles, buildProviderTile(p))
+		seen[p.Lane] = true
+		tiles = append(tiles, buildProviderTile(p, done[p.Lane]))
+	}
+	for _, lane := range doneOnlyLanes(seen, done) {
+		tiles = append(tiles, buildProviderTile(reports.ProviderEffectiveness{Lane: lane}, done[lane]))
 	}
 	return tiles
 }
 
-// buildProviderTile shapes one lane's effectiveness row into its stat tile.
-func buildProviderTile(p reports.ProviderEffectiveness) templates.StatTile {
-	sub, barPct, barLabel := hitRateBarFields(p.HitRate)
-	return templates.StatTile{
+// doneOnlyLanes are the lanes that have done rows but no tile yet (a row
+// finished before lane_attempts existed, or by a lane no longer configured),
+// largest first. Without a tile each the row would sum to less than the done total.
+func doneOnlyLanes(seen map[string]bool, done map[string]int64) []string {
+	var extra []string
+	for lane := range done {
+		if !seen[lane] {
+			extra = append(extra, lane)
+		}
+	}
+	sort.Slice(extra, func(i, j int) bool {
+		if done[extra[i]] != done[extra[j]] {
+			return done[extra[i]] > done[extra[j]]
+		}
+		return extra[i] < extra[j]
+	})
+	return extra
+}
+
+// buildProviderTile shapes one lane's tile. Value is the lane's done rows (the
+// Results row's unit, #1439); Sub states the lookup hit rate in words so it can
+// never be read as a result count. The bar shows only when the lane has lookups.
+func buildProviderTile(p reports.ProviderEffectiveness, doneRows int64) templates.StatTile {
+	t := templates.StatTile{
 		Label:     laneLabel(p.Lane),
 		LabelMark: laneMark(p.Lane),
-		Value:     fmt.Sprintf("%d/%d", p.Hits, p.Hits+p.Misses),
-		Sub:       sub,
-		ShowBar:   true,
-		BarPct:    barPct,
-		BarLabel:  barLabel,
+		Value:     strconv.FormatInt(doneRows, 10),
+		Sub:       "No lookups recorded",
 		Href:      sourceHref(p.Lane),
 	}
+	if tried := p.Hits + p.Misses; tried > 0 {
+		_, t.BarPct, t.BarLabel = hitRateBarFields(p.HitRate)
+		t.Sub = fmt.Sprintf("Hit rate %d%% (%d of %d lookups)", hitRatePct(p.HitRate), p.Hits, tried)
+		t.ShowBar = true
+	}
+	return t
 }
 
 // buildUnattributedTile is the Lyrics Sources tile for done results with no
 // recorded source (#1422): a cache hit, a blocked track, or a row finished
-// before sources were recorded. n is reports.UnattributedDoneCount, which shares
-// its predicate with the SourceBreakdown group the /sources/-/unattributed page
-// totals, so the two counts cannot differ. It is absent at zero, as a lane with
-// no recorded attempts and no configured health gets no tile; it carries no hit
-// rate, bar or status, which only a lane has.
+// before sources were recorded. n is reports.DoneByLane's Unattributed, which
+// shares its predicate with the SourceBreakdown group the /sources/-/unattributed
+// page totals, and the tile links to the done list filtered to the same
+// predicate (#1439), so all three counts are one population. It is absent at
+// zero, as a lane with no done rows and no configured health gets no tile; it
+// carries no hit rate, bar or status, which only a lane has.
 func buildUnattributedTile(n int64) (templates.StatTile, bool) {
 	if n <= 0 {
 		return templates.StatTile{}, false
 	}
 	return templates.StatTile{
-		Label: "Unattributed",
-		Value: strconv.FormatInt(n, 10),
-		Href:  unattributedPath,
+		Label:   "Unattributed",
+		Value:   strconv.FormatInt(n, 10),
+		Tooltip: "Open the finished tracks with no recorded source",
+		Href:    resultsHref(reports.BucketDone, queueViewState{Lane: reports.LaneUnattributed}),
 	}, true
 }
 
@@ -454,7 +490,7 @@ const (
 // musixmatchInactive is set (no token: the worker never starts, the banner
 // shows) the musixmatch tile reads inactive instead of its breaker state,
 // which would otherwise say "Ready" for a lane that cannot run.
-func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, musixmatchInactive bool, now time.Time) []templates.StatTile {
+func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orchestrator.LaneState, musixmatchInactive bool, now time.Time, done map[string]int64) []templates.StatTile {
 	byLane := make(map[string]reports.ProviderEffectiveness, len(pe))
 	for _, p := range pe {
 		byLane[p.Lane] = p
@@ -470,7 +506,7 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 		if !recorded {
 			p = reports.ProviderEffectiveness{Lane: h.Provider}
 		}
-		t := buildProviderTile(p)
+		t := buildProviderTile(p, done[p.Lane])
 		switch {
 		case h.Local:
 		case musixmatchInactive && h.Provider == markMusixmatch:
@@ -485,8 +521,16 @@ func providerTilesWithHealth(pe []reports.ProviderEffectiveness, health []orches
 			continue
 		}
 		seen[p.Lane] = true
-		t := buildProviderTile(p)
+		t := buildProviderTile(p, done[p.Lane])
 		if p.Lane != detectorbackfill.LaneName {
+			t.Status, t.StatusText = laneStatusInactive, "Not active"
+		}
+		tiles = append(tiles, t)
+	}
+	// A lane with done rows but neither configured nor with recorded attempts.
+	for _, lane := range doneOnlyLanes(seen, done) {
+		t := buildProviderTile(reports.ProviderEffectiveness{Lane: lane}, done[lane])
+		if lane != detectorbackfill.LaneName {
 			t.Status, t.StatusText = laneStatusInactive, "Not active"
 		}
 		tiles = append(tiles, t)

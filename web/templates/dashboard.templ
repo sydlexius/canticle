@@ -142,8 +142,9 @@ templ dashResultsTiles(tiles []StatTile) {
 }
 
 // dashProviderTiles renders the per-lyrics-source tile row. Each tile carries
-// its hit rate as an inline mini bar (#318) under the rate value, so the bar
-// aligns with its bubble by construction. The bar replaced a separate standalone
+// its done results by source (the Results row's unit, #1439) as the headline
+// number and, beneath it, its lookup hit rate in words plus an inline mini bar
+// (#318), so the bar aligns with its bubble by construction. The bar replaced a separate standalone
 // hit-rate bar chart. The fill width is applied by chart-init.js from the
 // data-hit-rate attribute -- the serve-mode CSP (style-src 'self', no
 // unsafe-inline) forbids an inline style="" width.
@@ -151,9 +152,14 @@ templ dashProviderTiles(tiles []StatTile) {
 	<section
 		class="mx-dash-section"
 		aria-labelledby="mx-dash-provider-heading"
-		title="Hit count and rate per lyrics source as tracks are processed."
+		title="Finished results per lyrics source, and each source's lookup hit rate."
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-provider-heading">Lyrics Sources</h2>
+		if len(tiles) > 0 {
+			<p class="mx-dash-section-note">
+				Big numbers are results by source and add up to Finished + Settled. The hit rate is the share of lookups that found lyrics, including ones later replaced.
+			</p>
+		}
 		<div class="mx-dash-tiles" role="list">
 			if len(tiles) == 0 {
 				<p class="mx-dash-empty">No lyrics source data yet. Data accrues as tracks are processed.</p>
@@ -161,7 +167,7 @@ templ dashProviderTiles(tiles []StatTile) {
 			for _, t := range tiles {
 				<div class="mx-dash-tile" role="listitem">
 					if t.Href != "" {
-						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title="Results by type for this source">
+						<a class="mx-dash-tile-link" href={ templ.SafeURL(t.Href) } title={ providerTileTitle(t) }>
 							@dashProviderTileBody(t)
 						</a>
 					} else {

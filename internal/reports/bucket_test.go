@@ -238,7 +238,7 @@ func TestListBucketLimitClamp(t *testing.T) {
 
 func TestListBucketUnknownBucket(t *testing.T) {
 	repo := reports.New(openTestDB(t))
-	if _, err := repo.ListBucket(context.Background(), reports.Bucket("done"), 0, 10); err == nil {
+	if _, err := repo.ListBucket(context.Background(), reports.Bucket("nonsense"), 0, 10); err == nil {
 		t.Error("ListBucket(unknown) = nil error, want error")
 	}
 	if _, err := reports.ParseBucket("nope"); err == nil {

@@ -57,6 +57,13 @@
   line-height: 1.5;
 }
 
+.mx-dash-section-note {
+  font-family: var(--mx-font-sans);
+  font-size: 0.75rem;
+  color: var(--mx-content-text-secondary);
+  margin: 0 0 0.5rem;
+}
+
 .mx-dash-empty {
   font-family: var(--mx-font-sans);
   font-size: 0.8125rem;

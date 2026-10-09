@@ -154,10 +154,11 @@ func TestLibrariesOrderAndFailure(t *testing.T) {
 // default and a text sort on a done and a failed bucket.
 func TestLibraryPredicateUsesPrefixProbe(t *testing.T) {
 	d := seedLibraryRows(t)
-	for _, bucket := range []Bucket{BucketSettled, BucketFailed} {
+	// BucketDone with the Unattributed lane filter (#1439) must keep the probe too.
+	for _, bucket := range []Bucket{BucketSettled, BucketFailed, BucketDone} {
 		for _, o := range []tablesort.Order{BucketSpec(bucket).Default, {Key: tablesort.KeyTitle}} {
 			name := string(bucket) + "/" + o.Key
-			q, args, err := bucketQuery(bucket, TopRungWord, BucketFilter{LibraryID: 1}, o, tablesort.Cursor{}, 50)
+			q, args, err := bucketQuery(bucket, TopRungWord, BucketFilter{LibraryID: 1, Lane: LaneUnattributed}, o, tablesort.Cursor{}, 50)
 			if err != nil {
 				t.Fatal(err)
 			}

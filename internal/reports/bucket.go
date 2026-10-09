@@ -35,6 +35,10 @@ const (
 	// drill-down only, so Buckets() (the Work Queue row) does not list it, but
 	// ParseBucket accepts it.
 	BucketBlocked Bucket = "blocked"
+	// BucketDone lists every done row, Finished and Settled together (#1439): the
+	// population the Lyrics Sources row counts by provider_lane, so a source's
+	// done rows can be listed whole. A drill-down only, like BucketBlocked.
+	BucketDone Bucket = "done"
 )
 
 // blockedExistsSQL is the Blocked column: whether the row's track has a block
@@ -68,6 +72,7 @@ var bucketPredicates = map[Bucket]string{
 	BucketUnavailable: `status = 'unavailable'`,
 	// A prune-retired row is Other on the dashboard, so it is not listed here.
 	BucketBlocked: `status = 'done' AND outcome_type = 'blocked' AND NOT (` + retiredPredicate + `)`,
+	BucketDone:    `status = 'done'`,
 }
 
 // lineTopBucketPredicates overrides Finished and Settled under TopRungLine
@@ -208,6 +213,11 @@ type BucketFilter struct {
 	// served or was rejected for it through a retire, an upgrade trip and a
 	// verify failure, so the column is not confined to done rows. A row that
 	// never reached a lane (NULL) or was settled by the detector never matches.
+	//
+	// LaneUnattributed is also accepted: it keeps rows with no recorded
+	// provider_lane (unattributedPredicate), the Lyrics Sources Unattributed
+	// population when paired with BucketDone (#1439). The predicate is a plain
+	// column test, so it leaves the keyset cursor and the Library probe's plan alone.
 	Lane string
 	// Reason keeps only rows in that failure-reason category (a ReasonCategory
 	// key); a value outside the keys applies no filter. The
@@ -228,6 +238,15 @@ func Lanes() []string {
 
 // ValidLane reports whether l is one of Lanes.
 func ValidLane(l string) bool { return slices.Contains(Lanes(), l) }
+
+// LaneUnattributed is the Lane filter value for rows with no recorded source. It
+// is not a lane name (providers.Known has no "-"), the same sentinel the
+// /sources/-/unattributed route uses.
+const LaneUnattributed = "-"
+
+// ValidLaneFilter reports whether l is something BucketFilter.Lane applies: a
+// lane in Lanes or LaneUnattributed.
+func ValidLaneFilter(l string) bool { return l == LaneUnattributed || ValidLane(l) }
 
 // libraryPredicate is the Library filter: an EXISTS over the junction, not a
 // JOIN, so a row linked to several files of one library cannot repeat and
@@ -416,7 +435,9 @@ func bucketQuery(bucket Bucket, top TopRung, f BucketFilter, o tablesort.Order, 
 		args = append(args, q, q)
 	}
 	search += f.chipSQL()
-	if ValidLane(f.Lane) {
+	if f.Lane == LaneUnattributed {
+		search += ` AND ` + unattributedPredicate
+	} else if ValidLane(f.Lane) {
 		search += ` AND provider_lane = ?`
 		args = append(args, f.Lane)
 	}

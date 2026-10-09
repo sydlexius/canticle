@@ -431,20 +431,23 @@ func TestHandleDashboard_ChartsOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildProviderTiles verifies provider rows map to tiles carrying the hit
-// count/attempts value and an inline mini hit-rate bar (#318) whose percent
-// matches the displayed sub-label.
+// TestBuildProviderTiles verifies provider rows map to tiles whose Value is
+// the lane's done rows (#1439) and whose Sub states the lookup hit rate in
+// words, with an inline mini hit-rate bar (#318) whose percent matches it.
 func TestBuildProviderTiles(t *testing.T) {
 	tiles := buildProviderTiles([]reports.ProviderEffectiveness{
 		{Lane: "musixmatch", Hits: 3, Misses: 1, HitRate: 0.75},
 		{Lane: "petitlyrics", Hits: 0, Misses: 2, HitRate: 0},
-	})
-	if len(tiles) != 2 {
-		t.Fatalf("buildProviderTiles len = %d, want 2", len(tiles))
+	}, map[string]int64{"musixmatch": 9, "retired-lane": 2})
+	if len(tiles) != 3 {
+		t.Fatalf("buildProviderTiles len = %d, want 3 (two lanes plus the done-only one)", len(tiles))
 	}
 	mx := tiles[0]
-	if mx.Label != "Musixmatch" || mx.Value != "3/4" || mx.Sub != "75%" {
-		t.Errorf("musixmatch tile = %+v, want label=Musixmatch value=3/4 sub=75%%", mx)
+	if mx.Label != "Musixmatch" || mx.Value != "9" || mx.Sub != "Hit rate 75% (3 of 4 lookups)" {
+		t.Errorf("musixmatch tile = %+v, want value=9 (done rows, not 3/4) and the lookup rate in Sub", mx)
+	}
+	if tiles[2].Value != "2" || tiles[2].ShowBar || tiles[2].Sub != "No lookups recorded" {
+		t.Errorf("done-only lane tile = %+v, want value 2, no bar, no lookups", tiles[2])
 	}
 	if !mx.ShowBar || mx.BarPct != "75" || mx.BarLabel != "Hit rate 75%" {
 		t.Errorf("musixmatch bar = {ShowBar:%v BarPct:%q BarLabel:%q}, want {true \"75\" \"Hit rate 75%%\"}", mx.ShowBar, mx.BarPct, mx.BarLabel)
