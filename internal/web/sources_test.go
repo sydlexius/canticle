@@ -143,9 +143,9 @@ func TestSourcePages(t *testing.T) {
 		}
 	})
 
-	t.Run("dashboard links tiles and the unattributed page", func(t *testing.T) {
+	t.Run("dashboard links tiles and the unattributed list", func(t *testing.T) {
 		_, body := getSource(t, mux, "/dashboard")
-		for _, want := range []string{`href="/sources/musixmatch"`, `href="/sources/` + detectorbackfill.LaneName + `"`, `href="` + unattributedPath + `"`} {
+		for _, want := range []string{`href="/sources/musixmatch"`, `href="/sources/` + detectorbackfill.LaneName + `"`, `href="/queue/done?lane=-"`} {
 			if !strings.Contains(body, want) {
 				t.Errorf("dashboard missing %q", want)
 			}

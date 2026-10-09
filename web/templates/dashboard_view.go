@@ -172,3 +172,13 @@ type StatTile struct {
 func attentionTooltip(limit int) string {
 	return "Up to " + strconv.Itoa(limit) + " rows: failed tracks first, then deferred ones, each newest attempt first."
 }
+
+// providerTileTitle is the hover text of a linked Lyrics Sources tile: the
+// tile's own Tooltip when set (the Unattributed tile opens a track list, not a
+// by-type source page), else the by-type source default.
+func providerTileTitle(t StatTile) string {
+	if t.Tooltip != "" {
+		return t.Tooltip
+	}
+	return "Results by type for this source"
+}

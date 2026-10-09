@@ -52,6 +52,7 @@ var queueBucketInfo = map[reports.Bucket][2]string{
 	reports.BucketFinished:    {"Finished", "Tracks with word-synced lyrics, plus tracks marked instrumental by hand: nothing further to gain."},
 	reports.BucketSettled:     {"Settled (upgradable)", "Tracks with lyrics that could still be upgraded to word sync. Also holds tracks whose every result you blocked, which wait until you unblock them."},
 	reports.BucketUnavailable: {"Given up", "Tracks given up on after repeated misses."},
+	reports.BucketDone:        {"Done", "Every track with a result: the Finished and Settled tracks together."},
 	reports.BucketBlocked:     {"Blocked", "Tracks where every lyric result found was one you marked wrong, so nothing is on disk."},
 }
 
@@ -362,6 +363,9 @@ func buildLaneOptions(selected string) []templates.QueueOption {
 	for _, l := range reports.Lanes() {
 		out = append(out, templates.QueueOption{Value: l, Label: laneLabel(l), Selected: l == selected})
 	}
+	// Rows with no recorded source: a cache hit, a blocked track, or a row
+	// finished before sources were recorded (#1439).
+	out = append(out, templates.QueueOption{Value: reports.LaneUnattributed, Label: "Unattributed", Selected: selected == reports.LaneUnattributed})
 	return out
 }
 

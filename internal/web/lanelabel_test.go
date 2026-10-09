@@ -41,7 +41,7 @@ func TestBuildProviderTilesAppliesLaneLabel(t *testing.T) {
 	tiles := buildProviderTiles([]reports.ProviderEffectiveness{
 		{Lane: "detector", Hits: 3, Misses: 1, HitRate: 0.75},
 		{Lane: "musixmatch", Hits: 1, Misses: 1, HitRate: 0.5},
-	})
+	}, nil)
 	if len(tiles) != 2 {
 		t.Fatalf("buildProviderTiles returned %d tiles; want 2", len(tiles))
 	}

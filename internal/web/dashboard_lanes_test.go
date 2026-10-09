@@ -138,8 +138,8 @@ func TestDashboard_HealthOnlyLaneGetsTile(t *testing.T) {
 	if !strings.Contains(body, statusSpan("failing", "Failing, no success this session - check token/config (retry in 10m)")) {
 		t.Error("health-only lane missing its status line")
 	}
-	if !strings.Contains(body, `mx-dash-tile-value">0/0<`) {
-		t.Error("health-only lane tile should render 0/0 counts")
+	if !strings.Contains(body, `mx-dash-tile-value">0<`) || !strings.Contains(body, "No lookups recorded") {
+		t.Error("health-only lane tile should render 0 results and no lookups")
 	}
 	if got := strings.Count(body, `class="mx-dash-tile-status `); got != 1 {
 		t.Errorf("status lines = %d, want 1 (the Local detector lane gets none)", got)

@@ -75,21 +75,50 @@ type SourceBreakdown struct {
 
 // unattributedPredicate is the ONE rule for a done row with no recorded
 // source: a NULL provider_lane (a cache hit, a blocked track, a pre-attribution
-// row). SourceBreakdown groups on it and UnattributedDoneCount filters on it,
-// so the tile count and the unattributed page total cannot drift apart.
+// row). SourceBreakdown groups on it, the queue Source filter's Unattributed
+// choice (LaneUnattributed) filters on it, and DoneByLane's NULL group is the
+// same rows, so the tile, the page total and the list cannot drift apart.
 const unattributedPredicate = `provider_lane IS NULL`
 
-// UnattributedDoneCount returns the number of done rows with no recorded
-// source: exactly SourceBreakdown's Unattributed group Counts.Total(), without
-// grouping every source. The dashboard tile uses it so a page load does not pay
-// for the full per-source, per-upstream, per-type grouping.
-func (r *Repo) UnattributedDoneCount(ctx context.Context) (int64, error) {
-	var n int64
-	if err := r.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM work_queue WHERE status = 'done' AND `+unattributedPredicate).Scan(&n); err != nil {
-		return 0, fmt.Errorf("reports: unattributed done count: %w", err)
+// DoneLanes is the done rows counted by persisted provider_lane: the unit of
+// the Results row, so ByLane's values plus Unattributed equal
+// QueueSummary.Finished + SettledUpgradable (#1439).
+type DoneLanes struct {
+	// ByLane maps a persisted lane name to its done rows.
+	ByLane map[string]int64
+	// Unattributed is the done rows with no recorded source: exactly
+	// SourceBreakdown's Unattributed group Counts.Total(), and the population
+	// BucketDone lists under LaneUnattributed.
+	Unattributed int64
+}
+
+// DoneByLane counts done rows per source in one grouped scan, without the
+// per-type, per-upstream grouping SourceBreakdown pays for, so a dashboard
+// load stays cheap. A NULL provider_lane is unattributedPredicate's population.
+func (r *Repo) DoneByLane(ctx context.Context) (DoneLanes, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT provider_lane, COUNT(*) FROM work_queue WHERE status = 'done' GROUP BY provider_lane`)
+	if err != nil {
+		return DoneLanes{}, fmt.Errorf("reports: done by lane: %w", err)
 	}
-	return n, nil
+	defer func() { _ = rows.Close() }()
+	out := DoneLanes{ByLane: map[string]int64{}}
+	for rows.Next() {
+		var lane *string
+		var n int64
+		if err := rows.Scan(&lane, &n); err != nil {
+			return DoneLanes{}, fmt.Errorf("reports: scan done by lane: %w", err)
+		}
+		if lane == nil {
+			out.Unattributed += n
+			continue
+		}
+		out.ByLane[*lane] += n
+	}
+	if err := rows.Err(); err != nil {
+		return DoneLanes{}, fmt.Errorf("reports: done by lane rows: %w", err)
+	}
+	return out, nil
 }
 
 // SourceBreakdown returns, per lyrics source, the done rows by delivered type

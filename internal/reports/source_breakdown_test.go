@@ -209,15 +209,15 @@ func TestSourceBreakdownTieBreakOrder(t *testing.T) {
 	}
 }
 
-// TestUnattributedDoneCountMatchesBreakdownGroup pins #1422: the count the
+// TestDoneByLaneMatchesBreakdown pins #1422: the count the
 // dashboard tile reads equals the SourceBreakdown unattributed group total (the
 // figure the unattributed page shows), over attributed, unattributed, blocked
 // and not-done rows, and a database with none is zero.
-func TestUnattributedDoneCountMatchesBreakdownGroup(t *testing.T) {
+func TestDoneByLaneMatchesBreakdown(t *testing.T) {
 	ctx := context.Background()
 	empty := reports.New(openTestDB(t))
-	if n, err := empty.UnattributedDoneCount(ctx); err != nil || n != 0 {
-		t.Fatalf("empty db: count = %d, err = %v, want 0", n, err)
+	if d, err := empty.DoneByLane(ctx); err != nil || d.Unattributed != 0 || len(d.ByLane) != 0 {
+		t.Fatalf("empty db: %+v, err = %v, want zero", d, err)
 	}
 
 	sqlDB := openTestDB(t)
@@ -232,14 +232,15 @@ func TestUnattributedDoneCountMatchesBreakdownGroup(t *testing.T) {
 		insertWorkItem(t, sqlDB, w)
 	}
 	repo := reports.New(sqlDB)
-	got, err := repo.UnattributedDoneCount(ctx)
+	done, err := repo.DoneByLane(ctx)
 	if err != nil {
-		t.Fatalf("UnattributedDoneCount: %v", err)
+		t.Fatalf("DoneByLane: %v", err)
 	}
+	got := done.Unattributed
 	// none-line, none-legacy and none-blocked: the pending/failed and the
 	// attributed blocked rows must not count.
 	if got != 3 {
-		t.Errorf("UnattributedDoneCount = %d, want 3", got)
+		t.Errorf("DoneByLane Unattributed = %d, want 3", got)
 	}
 	groups, err := repo.SourceBreakdown(ctx)
 	if err != nil {
@@ -247,5 +248,16 @@ func TestUnattributedDoneCountMatchesBreakdownGroup(t *testing.T) {
 	}
 	if want := findSource(t, groups, "", true).Counts.Total(); got != want {
 		t.Errorf("count %d != SourceBreakdown unattributed total %d", got, want)
+	}
+	for _, g := range groups {
+		if g.Unattributed {
+			continue
+		}
+		if done.ByLane[g.Lane] != g.Counts.Total() {
+			t.Errorf("DoneByLane[%q] = %d, SourceBreakdown total = %d", g.Lane, done.ByLane[g.Lane], g.Counts.Total())
+		}
+	}
+	if len(done.ByLane) != len(groups)-1 {
+		t.Errorf("DoneByLane has %d lanes, SourceBreakdown has %d attributed groups", len(done.ByLane), len(groups)-1)
 	}
 }

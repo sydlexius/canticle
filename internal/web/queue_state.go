@@ -43,7 +43,7 @@ type queueViewState struct {
 	// Library is the Library filter's id (0 = all libraries). Parsing keeps any
 	// positive id; the handler drops one that names no library.
 	Library int64
-	// Lane is a reports.Lanes value; anything else is ignored.
+	// Lane is a reports.Lanes value or reports.LaneUnattributed; anything else is ignored.
 	Lane string
 	// Reason is a reports reason category key the bucket offers (Retrying,
 	// Errored); anything else is ignored.
@@ -113,7 +113,7 @@ func parseQueueViewState(v url.Values, bucket reports.Bucket, top reports.TopRun
 	if n, err := strconv.ParseInt(v.Get("library"), 10, 64); err == nil && n > 0 {
 		s.Library = n
 	}
-	if l := v.Get("lane"); reports.ValidLane(l) {
+	if l := v.Get("lane"); reports.ValidLaneFilter(l) {
 		s.Lane = l
 	}
 	if k := v.Get("reason"); reports.HasReason(bucket, k) {

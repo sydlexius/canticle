@@ -72,7 +72,7 @@ func TestBuildProviderTilesAppliesLaneMark(t *testing.T) {
 		{Lane: "detector", Hits: 3, Misses: 1, HitRate: 0.75},
 		{Lane: "musixmatch", Hits: 1, Misses: 1, HitRate: 0.5},
 		{Lane: "petitlyrics", Hits: 1, Misses: 1, HitRate: 0.5},
-	})
+	}, nil)
 	if len(tiles) != 3 {
 		t.Fatalf("buildProviderTiles returned %d tiles; want 3", len(tiles))
 	}

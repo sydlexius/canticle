@@ -9,10 +9,13 @@ import (
 )
 
 var (
-	unattributedTileRE = regexp.MustCompile(`(?s)<a class="mx-dash-tile-link" href="` + regexp.QuoteMeta(unattributedPath) +
+	unattributedTileRE = regexp.MustCompile(`(?s)<a class="mx-dash-tile-link" href="` + regexp.QuoteMeta(unattributedQueueHref) +
 		`"[^>]*>\s*<span class="mx-dash-tile-label"><span class="mx-lane-cell"><span>Unattributed</span></span></span>\s*<span class="mx-dash-tile-value">(\d+)</span>`)
-	sourceTotalRE = regexp.MustCompile(`Total (\d+) completed tracks`)
-	tileValueRE   = regexp.MustCompile(`<span class="mx-dash-tile-value">(\d+)</span>`)
+	// unattributedQueueHref is where the tile leads (#1439): the done list with
+	// the Source filter on Unattributed, not the breakdown page.
+	unattributedQueueHref = "/queue/done?lane=-"
+	sourceTotalRE         = regexp.MustCompile(`Total (\d+) completed tracks`)
+	tileValueRE           = regexp.MustCompile(`<span class="mx-dash-tile-value">(\d+)</span>`)
 )
 
 // TestUnattributedTileEqualsItsPage pins #1422: the Lyrics Sources row carries
@@ -47,8 +50,8 @@ func TestUnattributedTileEqualsItsPage(t *testing.T) {
 	if n, _ := strconv.Atoi(m[1]); n != want {
 		t.Errorf("tile count %d, want %d", n, want)
 	}
-	if strings.Count(dash, `href="`+unattributedPath+`"`) != 1 {
-		t.Errorf("want exactly one link to %s on the dashboard", unattributedPath)
+	if strings.Count(dash, `href="`+unattributedQueueHref+`"`) != 1 {
+		t.Errorf("want exactly one link to %s on the dashboard", unattributedQueueHref)
 	}
 	if strings.Contains(dash, "Results with no recorded source") {
 		t.Error("the text link the tile replaces is still rendered")
