@@ -147,6 +147,12 @@ updates:
   # had no entry, so an advisory on a transitive package raised an alert that
   # no update PR ever followed (alert 28, source-map-js). One grouped PR per
   # week, since every package in the tree is development-only.
+  #
+  # The group takes minor and patch updates only. A grouped PR reports its
+  # HIGHEST semver level to fetch-metadata, so one major in the group left the
+  # whole PR unapproved by dependabot-auto-approve.yml (observed: a jsdom major
+  # riding with a vitest patch). A major now arrives as its own ungrouped PR,
+  # which stays unapproved for manual review by policy.
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -161,3 +167,6 @@ updates:
       js-test-deps:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"

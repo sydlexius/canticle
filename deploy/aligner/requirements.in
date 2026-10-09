@@ -39,9 +39,10 @@ demucs==4.0.1
 # wrapped this same library plus its own bundled pyannote VAD). transformers:
 # the Hugging Face wav2vec2 forced-alignment models for the non-torchaudio
 # languages (see app.ALIGN_MODELS / _aligner_models.FasterWhisperAligner).
-# faster-whisper is pinned at 1.2.1 and transformers at 5.18.0. They were
+# faster-whisper is pinned at 1.2.1 and transformers at 5.19.0. They were
 # first pinned at 1.2.1/5.17.0, the same versions the whisperx image's own
-# freeze carried (measured, #1016 review); 5.18.0 is a later Dependabot bump.
+# freeze carried (measured, #1016 review); 5.18.0 and then 5.19.0 are later
+# Dependabot bumps.
 # A fresh resolution of this file first picked transformers 4.57.1, which
 # carries known advisories a current release fixes (PYSEC-2026-2289, a
 # config.json-driven RCE fixed in 5.3.0; PYSEC-2026-3929, fixed in 5.10.0),
@@ -62,4 +63,4 @@ demucs==4.0.1
 # decode_audio only for a path or file object. That call shape is
 # load-bearing: passing model.transcribe a path needs `av<19` here first.
 faster-whisper==1.2.1
-transformers==5.18.0
+transformers==5.19.0
