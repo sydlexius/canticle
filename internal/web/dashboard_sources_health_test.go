@@ -94,3 +94,50 @@ func TestSourcesNoteAndUnattributedTitle(t *testing.T) {
 		t.Error("a source tile lost its by-type hover text")
 	}
 }
+
+// TestEmptyLaneTileHasLabelAndNoLink: done rows with provider_lane = ” (not
+// NULL) get a named, unlinked tile on both tile paths, and the row still sums.
+func TestEmptyLaneTileHasLabelAndNoLink(t *testing.T) {
+	for _, withHealth := range []bool{false, true} {
+		sqlDB := openReportsTestDB(t)
+		seedSourceUnits(t, sqlDB)
+		if _, err := sqlDB.ExecContext(context.Background(), `UPDATE work_queue SET provider_lane = '' WHERE title = 'u1'`); err != nil {
+			t.Fatal(err)
+		}
+		repo := reports.New(sqlDB)
+		u := NewUI(config.Config{}, "v-test", WithReports(repo))
+		if withHealth {
+			u.AttachLaneHealth(func() []orchestrator.LaneState {
+				return []orchestrator.LaneState{{Provider: providers.Musixmatch, State: orchestrator.LaneStateClosed}}
+			})
+		}
+		view, err := u.buildDashboardView(httptest.NewRequest("GET", "/dashboard", nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		qs, err := repo.QueueSummary(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum, found := 0, false
+		for _, tile := range view.ProviderTiles {
+			n, _ := strconv.Atoi(tile.Value)
+			sum += n
+			if tile.Label == emptyLaneLabel {
+				found = true
+				if tile.Href != "" {
+					t.Errorf("health=%v: empty-lane tile links to %q", withHealth, tile.Href)
+				}
+			}
+			if tile.Label == "" {
+				t.Errorf("health=%v: a tile has a blank label", withHealth)
+			}
+		}
+		if !found {
+			t.Errorf("health=%v: no %q tile", withHealth, emptyLaneLabel)
+		}
+		if want := int(qs.Finished + qs.SettledUpgradable); sum != want {
+			t.Errorf("health=%v: sum %d, want %d", withHealth, sum, want)
+		}
+	}
+}

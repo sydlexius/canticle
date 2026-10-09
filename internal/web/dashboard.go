@@ -425,6 +425,9 @@ func doneOnlyLanes(seen map[string]bool, done map[string]int64) []string {
 	return extra
 }
 
+// emptyLaneLabel names the tile for done rows whose provider_lane is the empty string.
+const emptyLaneLabel = "Unnamed source"
+
 // buildProviderTile shapes one lane's tile. Value is the lane's done rows (the
 // Results row's unit, #1439); Sub states the lookup hit rate in words so it can
 // never be read as a result count. The bar shows only when the lane has lookups.
@@ -435,6 +438,11 @@ func buildProviderTile(p reports.ProviderEffectiveness, doneRows int64) template
 		Value:     strconv.FormatInt(doneRows, 10),
 		Sub:       "No lookups recorded",
 		Href:      sourceHref(p.Lane),
+	}
+	if p.Lane == "" {
+		// A done row can carry provider_lane = '' (kept apart from NULL), which
+		// /sources/{lane} cannot serve: name it and drop the link.
+		t.Label, t.Href = emptyLaneLabel, ""
 	}
 	if tried := p.Hits + p.Misses; tried > 0 {
 		_, t.BarPct, t.BarLabel = hitRateBarFields(p.HitRate)

@@ -157,7 +157,7 @@ templ dashProviderTiles(tiles []StatTile) {
 		<h2 class="mx-dash-section-title" id="mx-dash-provider-heading">Lyrics Sources</h2>
 		if len(tiles) > 0 {
 			<p class="mx-dash-section-note">
-				Big numbers are results by source and add up to Finished + Settled. The hit rate is the share of lookups that found lyrics, including ones later replaced.
+				Big numbers are results by source and add up to Finished + Settled. The hit rate is winning lookups divided by all recorded lookups; a lookup that found lyrics but lost to a later source still counts as a miss.
 			</p>
 		}
 		<div class="mx-dash-tiles" role="list">
