@@ -62,4 +62,4 @@ demucs==4.0.1
 # decode_audio only for a path or file object. That call shape is
 # load-bearing: passing model.transcribe a path needs `av<19` here first.
 faster-whisper==1.2.1
-transformers==5.18.0
+transformers==5.19.0
