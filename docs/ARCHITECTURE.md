@@ -34,8 +34,8 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `langguard` -- Unicode-script classification/filtering of lyric text against a configured language allowlist.
 - `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`).
 - `app` -- one-shot `fetch`-mode orchestration loop over the in-memory `InputsQueue`; depends on the `Fetcher`/`Writer` interfaces.
-- `lrcbackfill` -- rewrites existing `.lrc` sidecars with compressed multi-timestamp lines into the expanded one-cue-per-line form (`Run`), backing up each original first; the backfill over `lrcnormalize`.
-- `respdrift` -- `Detector` that flags a provider answering many distinct queries with the same track identity, a fault no per-response error check can see.
+- `lrcbackfill` -- rewrites existing `.lrc` sidecars that use compressed multi-timestamp lines into the expanded one-cue-per-line form.
+- `respdrift` -- detects a provider that answers many distinct queries with the same track.
 
 ### Persistence and stateful services
 
@@ -57,11 +57,11 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `instrumentalmark` -- marks a track instrumental by hand through `LRCWriter.WriteManualMarker`.
 - `identityrepair` -- re-reads each `scan_results` file's tags (via the injected `IdentityReader` seam) to correct run-together multi-value artist rows, re-keying the coupled `work_queue` row; driven by the dry-run-by-default `scan reconcile-identity`.
 - `lyricblock` -- exact-words fingerprints of lyric bodies an operator marked wrong, in a `lyric_blocks` store keyed by normalized artist/title identity; driven by `scan mark-wrong`, `scan list-blocks` and `scan unblock`.
-- `audiometa` -- `Store` of per-file audio metadata keyed by path and validated by (mtime, size).
-- `detectorbackfill` -- attributes historical instrumental detections to the detector lane in `lane_attempts` (`Backfiller.Run`); a reporting correction only.
-- `instrumentalbackfill` -- classifies `work_queue` rows the audio detector never scored (`Backfiller.Run`), writing an instrumental marker where the detector agrees.
-- `instrumentalrecalib` -- re-decides vocal-gate rejections (`Recalibrator.Run`) from stored detector telemetry, without re-scanning audio.
-- `schedule` -- `Frequency` and `Schedule` for the periodic library scan, with time-of-day and weekday parsing.
+- `audiometa` -- store of per-file audio metadata read from the library's audio files.
+- `detectorbackfill` -- attributes historical instrumental detections to the detector lane for reporting.
+- `instrumentalbackfill` -- runs the audio detector over rows it never scored.
+- `instrumentalrecalib` -- re-decides earlier detector rejections from stored detector scores.
+- `schedule` -- the periodic library scan's schedule: frequency, time of day and weekday.
 
 ### Serve-mode HTTP surface and web UI
 
@@ -74,7 +74,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `web` -- serves the web UI from embedded templ templates and `go:embed`'d static assets; `flacfallback.go` (opt-in `server.preview_flac_fallback`) serves `/preview/{id}/audio.flac`.
 - `web/static` -- compiled CSS and self-hosted fonts embedded into the binary so the UI serves offline.
 - `web/templates` -- templ source for the UI shell; generated `*_templ.go` are built on demand and gitignored (run `make ui` after a fresh clone before `go build`).
-- `tablesort` -- table-agnostic column-sort component (`Spec`, `Resolve`, `ParseValues`): allowlisted column keys select fixed SQL expressions and a cursor codec carries the sort value; a leaf package.
+- `tablesort` -- shared column-sort component for the web UI's tables.
 
 ### Sidecars, config, cross-cutting
 
@@ -91,8 +91,8 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `version` -- build-time `Version`/`Commit`/`Date` (GoReleaser ldflags) and `VersionString()`.
 - `testutil` -- generates synthetic ID3-tagged audio for load/concurrency tests and the genlib tool.
 - `dbtest` -- test-only helper that opens fully migrated SQLite databases from a per-binary template (`Open`, `OpenAt`, `Path`) instead of re-running every migration per test.
-- `aligner` -- `HTTPClient` for the forced-alignment sidecar: forced-aligns caller lyric lines to an audio file and returns per-word timestamps plus the sidecar transcript.
-- `failsig` -- `Normalize` and `Classify` turn a `work_queue.last_error` string into a stable grouping signature, so one root cause groups as one in failure reports and metrics.
-- `identity` -- shared exact-match and name-similarity resolvers (`ResolveExact`, `NameSignal`) that re-attach a moved sidecar or row to its audio file, so `realign` and `prune` never disagree.
-- `sidecar` -- the lyric sidecar extensions canticle writes beside audio and the `Kind` each carries (`KindOf`, `Extensions`, `IsSidecar`).
-- `vocalcalib` -- pure re-thresholding of stored per-track detector scores to calibrate the sung-vocal gate (`SelectThreshold`); no audio or DB.
+- `aligner` -- client for the forced-alignment sidecar, which returns per-word timestamps for given lyric lines.
+- `failsig` -- normalizes a work item's error text into a stable signature for grouping failures.
+- `identity` -- shared matching that re-attaches a moved sidecar or row to its audio file; used by `realign` and `prune`.
+- `sidecar` -- the lyric sidecar file extensions canticle writes and the kind each carries.
+- `vocalcalib` -- computes a sung-vocal gate threshold from stored per-track detector scores.
