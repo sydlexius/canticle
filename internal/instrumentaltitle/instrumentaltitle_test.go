@@ -586,3 +586,53 @@ func TestPlaceholderArtist(t *testing.T) {
 		}
 	}
 }
+
+// TestActionable: the one answer the worker gate and the bulk repair share. A
+// bracketed Strong title needs no artist; a Strong dash-suffix needs a real
+// artist that is not the text before the separator, whether the track artist
+// or the album artist carries it. The verdict is Classify's own either way.
+func TestActionable(t *testing.T) {
+	const suffix = "Tin Lantern Band - Minus One"
+	for _, tc := range []struct {
+		name                              string
+		title, album, artist, albumArtist string
+		want                              bool
+	}{
+		{"bracket, no artist", "Glass Harbor (Instrumental)", "", "", "", true},
+		{"bracket, artist named in the title", "Glass Harbor (Instrumental)", "", "Glass Harbor", "", true},
+		{"suffix, unrelated artist", suffix, "", "Paper Kites", "", true},
+		{"suffix, unrelated artist and album artist", suffix, "", "Paper Kites", "Glass Harbor", true},
+		{"suffix, unrelated artist beside a placeholder", suffix, "", "Paper Kites", "Various Artists", true},
+		{"suffix, artist equals the prefix", suffix, "", "Tin Lantern Band", "", false},
+		{"suffix, artist holds the prefix", suffix, "", "Tin Lantern Band feat. Paper Kites", "", false},
+		{"suffix, artist inside the prefix", suffix, "", "Lantern Band", "", false},
+		{"suffix, album artist equals the prefix", suffix, "", "Paper Kites", "Tin Lantern Band", false},
+		{"suffix, album artist holds the prefix", suffix, "", "Paper Kites", "The Tin Lantern Band", false},
+		{"suffix, album artist inside the prefix", suffix, "", "Paper Kites", "Tin Lantern", false},
+		{"suffix, artist is the prefix on a compilation", suffix, "", "Tin Lantern Band", "Copper Finch Trio", false},
+		{"suffix, only the album artist, the prefix", suffix, "", "", "Tin Lantern Band", false},
+		{"suffix, only the album artist, unrelated", suffix, "", "", "Paper Kites", true},
+		{"suffix, no artist", suffix, "", "", "", false},
+		{"suffix, placeholders only", suffix, "", "Unknown Artist", "Various Artists", false},
+		{"weak", "Glass Harbor", "Glass Harbor (Instrumentals)", "Paper Kites", "", false},
+		{"a cappella", "Glass Harbor (A Cappella Instrumental)", "", "Paper Kites", "", false},
+		{"karaoke title", "Glass Harbor (Karaoke Instrumental)", "", "Paper Kites", "", false},
+		{"karaoke album", "Glass Harbor (Instrumental)", "Karaoke Hits", "Paper Kites", "", false},
+	} {
+		v, ok := Actionable(tc.title, tc.album, tc.artist, tc.albumArtist)
+		if ok != tc.want {
+			t.Errorf("%s: Actionable(%q, %q, %q, %q) ok = %v, want %v", tc.name, tc.title, tc.album, tc.artist, tc.albumArtist, ok, tc.want)
+		}
+		if want := Classify(tc.title, tc.album); v != want {
+			t.Errorf("%s: Actionable verdict = %+v, want Classify's %+v", tc.name, v, want)
+		}
+	}
+	// The shapes the table rests on are pinned: a row that stopped being a
+	// Strong suffix (or Weak) would be false for the wrong reason.
+	if v, _ := Actionable(suffix, "", "", ""); v.Tier != Strong || v.Position != PositionSuffix {
+		t.Fatalf("Actionable(%q) verdict = %+v, want a Strong suffix", suffix, v)
+	}
+	if v, _ := Actionable("Glass Harbor", "Glass Harbor (Instrumentals)", "", ""); v.Tier != Weak {
+		t.Fatalf("the weak case is %+v, want Weak", v)
+	}
+}
