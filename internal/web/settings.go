@@ -83,6 +83,7 @@ var settingsSectionOrder = []struct {
 	{"enrichment", "Enrichment"},
 	{"realign", "Realign"},
 	{"timing_validation", "Timing Validation"},
+	{"instrumental_title", "Instrumental Titles"},
 	{"word_sync_recheck", "Word-Timing Re-check"},
 	{"upgrade_sweep", "Upgrade Sweep"},
 	{"guard", "Guard"},
@@ -1185,6 +1186,8 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return string(cfg.TimingValidation.OnMisSynced)
 	case "timing_validation.on_categorical":
 		return string(cfg.TimingValidation.OnCategorical)
+	case "instrumental_title.mode":
+		return string(cfg.InstrumentalTitle.Mode)
 	// [word_sync_recheck]
 	case "word_sync_recheck.enabled":
 		return strconv.FormatBool(cfg.WordSyncRecheck.Enabled)
@@ -1388,6 +1391,7 @@ var settingsLabels = map[string]string{
 	"timing_validation.revalidate_batch":              "Lyric files checked per background round",
 	"timing_validation.on_mis_synced":                 "What to do when the timing runs past the song's end",
 	"timing_validation.on_categorical":                "What to do when the lyrics belong to a different song",
+	"instrumental_title.mode":                         "Treat tracks titled Instrumental as instrumental (no effect yet)",
 	"word_sync_recheck.enabled":                       "Re-check synced tracks for word timings in the background",
 	"word_sync_recheck.batch":                         "Most tracks waiting for a word-timing re-check at once",
 	"upgrade_sweep.enabled":                           "Re-fetch tracks below line sync in the background",

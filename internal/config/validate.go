@@ -128,6 +128,18 @@ var enumValues = map[string][]string{
 	// ValidateAndSet, the loader's re-default check, and the env arm all read one
 	// list, so none of them can offer or accept a mode another rejects.
 	"output.word_sync_mode": wordSyncModeStrings(wordSyncModes()),
+	// Same single-source rule: the dropdown and ValidateAndSet read the loader's list.
+	"instrumental_title.mode": instrumentalTitleModeStrings(),
+}
+
+// instrumentalTitleModeStrings flattens the mode set to plain strings.
+func instrumentalTitleModeStrings() []string {
+	modes := instrumentalTitleModes()
+	out := make([]string, len(modes))
+	for i, m := range modes {
+		out[i] = string(m)
+	}
+	return out
 }
 
 // wordSyncModeStrings flattens a WordSyncMode set to the plain strings the
@@ -357,6 +369,9 @@ func validatorFor(f FieldSpec) Validator {
 		// regression, not a cosmetic miss. NORMALIZED because the loader
 		// lowercases and trims before validating: a verbatim comparison here
 		// would reject a value the next boot accepts.
+		return ValidateNormalizedEnum(enumValues[f.Path]...)
+	case "instrumental_title.mode":
+		// NORMALIZED like the timing enums: the loader lowercases and trims first.
 		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
 		// NORMALIZED, because the loader normalizes these two before validating
