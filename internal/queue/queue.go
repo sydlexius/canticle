@@ -159,6 +159,11 @@ type WorkItem struct {
 	DetectorSpeechMean *float64
 	DetectorVocalClass *string
 	DetectorVersion    *string
+	// DetectorGateComplete is work_queue.gate_complete (#511): true only when the
+	// stored scores came from a complete classifier response. nil (NULL) is a row
+	// stamped before migration 070; the worker's memo reuses stored scores only
+	// when this is true, so NULL and false both force a live detection.
+	DetectorGateComplete *bool
 	// WordTimingState is the #982 re-examination state (WordTiming*); empty
 	// means NULL, never examined. The worker reads it to spot a flipped row.
 	WordTimingState string
@@ -402,7 +407,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
                  ELSE NULL
              END
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`,
 		inputs.Track.ArtistName,
 		inputs.Track.TrackName,
 		inputs.Track.AlbumName,
@@ -474,7 +479,7 @@ const dequeueRandomizedSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`
 
 // dequeueDeterministicSQL claims the next ready item in stable FIFO order within
 // a priority tier (created_at, then id). Clears batch_seq for the same reason as
@@ -493,7 +498,7 @@ const dequeueDeterministicSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`
 
 // dequeueBatchedClaimSQL claims the eligible buffered row with the lowest
 // batch_seq and clears its batch_seq in the same atomic statement, so a claimed
@@ -519,7 +524,7 @@ const dequeueBatchedClaimSQL = `UPDATE work_queue
              LIMIT 1
          )
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`
 
 // refillBufferSQL stamps batch_seq = offset + 1 .. offset + N on the next N
 // eligible unbuffered rows, randomizing composition and intra-tier order while
@@ -892,6 +897,7 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
              speech_mean = ?,
              vocal_class = ?,
              detector_version = ?,
+             gate_complete = ?,
              outcome_type = 'instrumental',
              provider_lane = ?,
              upstream = NULL,
@@ -902,7 +908,7 @@ func (q *DBQueue) settleInstrumentalOnce(ctx context.Context, id int64, tel Inst
          WHERE id = ?
            AND status = ?
            AND (status = 'processing' OR COALESCE(word_timing_state, '') <> 'queued')`,
-		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, tel.GateComplete,
 		detectorbackfill.LaneName,
 		now, id, owner.status(),
 	)
@@ -1051,10 +1057,11 @@ func (q *DBQueue) StampUnclassifiedMiss(ctx context.Context, id int64, tel Instr
              vocal_peak = ?,
              speech_mean = ?,
              vocal_class = ?,
-             detector_version = ?
+             detector_version = ?,
+             gate_complete = ?
          WHERE id = ?
            AND status = 'deferred'`+notWordRecheckQueued,
-		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, id,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, tel.GateComplete, id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: stamp unclassified miss: %w", err)
@@ -1113,9 +1120,10 @@ func (q *DBQueue) StampInstrumentalTelemetry(ctx context.Context, id int64, tel 
              vocal_peak = ?,
              speech_mean = ?,
              vocal_class = ?,
-             detector_version = ?
+             detector_version = ?,
+             gate_complete = ?
          WHERE id = ? AND `+instrumentalTelemetryGuard,
-		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, id,
+		tel.MusicSum, tel.VocalPeak, tel.SpeechMean, tel.VocalClass, tel.DetectorVersion, tel.GateComplete, id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("queue: stamp instrumental telemetry: %w", err)
@@ -1358,7 +1366,7 @@ func (q *DBQueue) failOnce(ctx context.Context, id int64, cause error) (WorkItem
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`,
 		nextAttempts,
 		nextAttemptAt,
 		storedClass(lastError, FailureClassOf(cause)),
@@ -1427,7 +1435,7 @@ func (q *DBQueue) Defer(ctx context.Context, id int64, retryAfter time.Duration,
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`,
 		nextAttemptAt,
 		storedClass(lastError, FailureClassOf(cause)),
 		lastError,
@@ -1567,7 +1575,7 @@ func (q *DBQueue) RetireMiss(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'processing'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`,
 		now,
 		missLimitReachedError,
 		id,
@@ -1869,7 +1877,7 @@ type ListFilter struct {
 // optionally filtered by status and capped by limit.
 func (q *DBQueue) List(ctx context.Context, filter ListFilter) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete
                        FROM work_queue`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	const limitClause = ` LIMIT ?`
@@ -1935,7 +1943,7 @@ func (q *DBQueue) Retry(ctx context.Context, id int64) (WorkItem, error) {
          WHERE id = ?
            AND status = 'failed'
          RETURNING id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome`,
+                   miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`,
 		now,
 		id,
 	)
@@ -2286,6 +2294,15 @@ type InstrumentalTelemetry struct {
 	// or unreachable sidecar), which every consumer must treat as "do nothing
 	// destructive", never as a mismatch.
 	DetectorVersion string
+	// GateComplete reports whether the detector's vocal gate ran cleanly when
+	// these scores were produced (detector.Result.Reusable: max map present AND
+	// vocal baseline complete). It is persisted as work_queue.gate_complete, and
+	// the vocal-gate reopen requires it, because that path re-decides from the
+	// three stored scores alone and cannot reconstruct the completeness guards
+	// (#511). Every writer must set it from the detector result; the zero value
+	// records "not complete", which excludes the row from the reopen (the safe
+	// direction).
+	GateComplete bool
 }
 
 // SetInstrumentalResult stamps the audio-detection outcome and telemetry onto a
@@ -2303,7 +2320,8 @@ func (q *DBQueue) SetInstrumentalResult(ctx context.Context, id int64, result in
              vocal_peak = ?,
              speech_mean = ?,
              vocal_class = ?,
-             detector_version = ?
+             detector_version = ?,
+             gate_complete = ?
          WHERE id = ?`,
 		result,
 		tel.MusicSum,
@@ -2311,6 +2329,7 @@ func (q *DBQueue) SetInstrumentalResult(ctx context.Context, id int64, result in
 		tel.SpeechMean,
 		tel.VocalClass,
 		tel.DetectorVersion,
+		tel.GateComplete,
 		id,
 	)
 	if err != nil {
@@ -2878,7 +2897,7 @@ type TimingBacklogOptions struct {
 // stamp its own verdict and may still be writing that very sidecar. Read-only.
 func (q *DBQueue) ListTimingBacklog(ctx context.Context, opts TimingBacklogOptions) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete
                        FROM work_queue
                        WHERE timing_outcome IS NULL
                          AND outcome_type = 'synced'
@@ -2980,7 +2999,7 @@ func detectEligibleClause(globalDefault bool) (clause string, args []any) {
 // detector). Read-only.
 func (q *DBQueue) ListUnclassified(ctx context.Context, opts ListUnclassifiedOptions) (items []WorkItem, retErr error) {
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete
                        FROM work_queue
                        WHERE instrumental_result IS NULL
                          AND status = 'deferred'
@@ -3066,7 +3085,7 @@ func (q *DBQueue) ListInstrumental(ctx context.Context, opts ListInstrumentalOpt
 	// instrumental_result = 1 just before Complete, so a still-'processing' row could
 	// otherwise be picked up and cleared mid-write.
 	const baseQuery = `SELECT id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts,
-                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome
+                       miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete
                        FROM work_queue WHERE instrumental_result = 1 AND status = 'done'`
 	const orderClause = ` ORDER BY priority DESC, created_at ASC, id ASC`
 	query := baseQuery
@@ -3129,6 +3148,29 @@ type StampedRejection struct {
 	Tel        InstrumentalTelemetry
 }
 
+// vocalGateRejectionBase is the reopen selector WITHOUT the gate-complete term, so
+// ListVocalGateRejections and CountVocalGateExcluded cannot drift apart.
+const vocalGateRejectionBase = `instrumental_result = 0 AND status = 'deferred'
+	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL
+	            AND TRIM(COALESCE(vocal_class,'')) <> ''`
+
+// CountVocalGateExcluded counts the rows ListVocalGateRejections would list but
+// for the gate-complete requirement: a NULL bit (stamped before migration 070) or
+// a false one (degraded detector response). It exists so an operator whose every
+// row is NULL does not read an empty reopen as "nothing to do" (#511). Honors
+// LibraryID only; AfterID and Limit do not apply to a population count. Read-only.
+func (q *DBQueue) CountVocalGateExcluded(ctx context.Context, libraryID *int64) (int, error) {
+	query := `SELECT COUNT(*) FROM work_queue
+	          WHERE ` + vocalGateRejectionBase + ` AND (gate_complete IS NULL OR gate_complete <> 1)` + notWordRecheckQueued
+	libClause, libArgs := recheckLibraryClause(libraryID)
+	query += libClause //nolint:gosec // reason: G202 -- libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
+	var n int
+	if err := q.db.QueryRowContext(ctx, query, libArgs...).Scan(&n); err != nil { //nolint:gosec // reason: G202 -- fragments are package constants, never user-built SQL
+		return 0, fmt.Errorf("queue: count vocal-gate excluded: %w", err)
+	}
+	return n, nil
+}
+
 // ListVocalGateRejections returns deferred rows the detector previously marked
 // not-instrumental (instrumental_result=0) that carry re-decidable stored
 // telemetry (music_sum/vocal_peak/speech_mean non-NULL). Legacy rows missing
@@ -3152,19 +3194,19 @@ type StampedRejection struct {
 // re-decision anyway -- this filter is harmless to legitimate candidates. This
 // preserves the "any doubt resolves to not-instrumental" invariant.
 //
-// Residual gap: the rarer partial-baseline case (baselineComplete=false with a
-// non-empty vocal_class) is NOT fully closed by this guard. Closing it would
-// need a durable persisted "gate-complete" telemetry bit, tracked as a
-// follow-up.
+// The partial-baseline case (baselineComplete=false with a non-empty
+// vocal_class) is closed by the persisted gate_complete bit (#511): only a row
+// stamped from a complete classifier response (max map present AND baseline
+// complete) is listed. A NULL bit (a row stamped before migration 070) is
+// excluded, the same direction as every other doubt; the vocal_class guard is
+// kept as belt-and-suspenders.
 //
 // Read-only.
 func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGateRejectionsOptions) (out []StampedRejection, retErr error) {
 	query := `SELECT id, COALESCE(artist,''), COALESCE(title,''), COALESCE(source_path,''),
-	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,'')
+	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,''), COALESCE(gate_complete,0)
 	          FROM work_queue
-	          WHERE instrumental_result = 0 AND status = 'deferred'
-	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL
-	            AND TRIM(COALESCE(vocal_class,'')) <> ''` + notWordRecheckQueued
+	          WHERE ` + vocalGateRejectionBase + ` AND gate_complete = 1` + notWordRecheckQueued
 	var args []any
 	libClause, libArgs := recheckLibraryClause(opts.LibraryID)
 	query += libClause //nolint:gosec // G202: libClause is a package-constant fragment from recheckLibraryClause, never user-built SQL
@@ -3192,7 +3234,7 @@ func (q *DBQueue) ListVocalGateRejections(ctx context.Context, opts ListVocalGat
 	for rows.Next() {
 		var r StampedRejection
 		if err := rows.Scan(&r.ID, &r.Artist, &r.Title, &r.SourcePath,
-			&r.Tel.MusicSum, &r.Tel.VocalPeak, &r.Tel.SpeechMean, &r.Tel.VocalClass, &r.Tel.DetectorVersion); err != nil {
+			&r.Tel.MusicSum, &r.Tel.VocalPeak, &r.Tel.SpeechMean, &r.Tel.VocalClass, &r.Tel.DetectorVersion, &r.Tel.GateComplete); err != nil {
 			return nil, fmt.Errorf("queue: scan vocal-gate rejection: %w", err)
 		}
 		out = append(out, r)
@@ -3227,7 +3269,7 @@ type ListVocalGateConfirmationsOptions struct {
 // Read-only.
 func (q *DBQueue) ListVocalGateConfirmations(ctx context.Context, opts ListVocalGateConfirmationsOptions) (out []StampedRejection, retErr error) {
 	query := `SELECT id, COALESCE(artist,''), COALESCE(title,''), COALESCE(source_path,''),
-	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,'')
+	                 music_sum, vocal_peak, speech_mean, COALESCE(vocal_class,''), COALESCE(detector_version,''), COALESCE(gate_complete,0)
 	          FROM work_queue
 	          WHERE instrumental_result = 1 AND status = 'done'
 	            AND music_sum IS NOT NULL AND vocal_peak IS NOT NULL AND speech_mean IS NOT NULL`
@@ -3252,7 +3294,7 @@ func (q *DBQueue) ListVocalGateConfirmations(ctx context.Context, opts ListVocal
 	for rows.Next() {
 		var r StampedRejection
 		if err := rows.Scan(&r.ID, &r.Artist, &r.Title, &r.SourcePath,
-			&r.Tel.MusicSum, &r.Tel.VocalPeak, &r.Tel.SpeechMean, &r.Tel.VocalClass, &r.Tel.DetectorVersion); err != nil {
+			&r.Tel.MusicSum, &r.Tel.VocalPeak, &r.Tel.SpeechMean, &r.Tel.VocalClass, &r.Tel.DetectorVersion, &r.Tel.GateComplete); err != nil {
 			return nil, fmt.Errorf("queue: scan vocal-gate confirmation: %w", err)
 		}
 		out = append(out, r)
@@ -3374,6 +3416,7 @@ func (q *DBQueue) ResetInstrumental(ctx context.Context, id int64) (int64, error
              speech_mean = NULL,
              vocal_class = NULL,
              detector_version = NULL,
+             gate_complete = NULL,
              last_error = '',
              refused_waits = 0,
              next_attempt_at = ?,
@@ -3665,6 +3708,7 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		detectorVersion    sql.NullString
 		wordTimingState    sql.NullString
 		timingOutcome      sql.NullString
+		gateComplete       sql.NullBool
 	)
 	err := row.Scan(
 		&item.ID,
@@ -3697,9 +3741,14 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&wordTimingState,
 		&item.UpgradeQueued,
 		&timingOutcome,
+		&gateComplete,
 	)
 	if err != nil {
 		return WorkItem{}, err
+	}
+	if gateComplete.Valid {
+		b := gateComplete.Bool
+		item.DetectorGateComplete = &b
 	}
 	item.WordTimingState = wordTimingState.String
 	item.TimingOutcome = timingOutcome.String

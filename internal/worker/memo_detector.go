@@ -15,6 +15,11 @@ type storedTelemetry struct {
 	VocalPeak  float64
 	SpeechMean float64
 	VocalClass string
+	// GateComplete is the persisted work_queue.gate_complete bit (#511). Stored
+	// scores are reusable only when true: a NULL (pre-migration) or false
+	// (guard-degraded) row would otherwise be re-decided instrumental by
+	// DecideStored, which skips the completeness guards.
+	GateComplete bool
 }
 
 // storedDecider is a detector.Detector that can also re-decide already-computed
@@ -89,6 +94,8 @@ func (m *memoDetector) Detect(ctx context.Context, audioPath string) (detector.R
 			SpeechConfidence:  m.primed.SpeechMean,
 			WinningVocalClass: m.primed.VocalClass,
 			Version:           m.primed.Version,
+			// Reuse is only reached for a gate-complete row (canReuse).
+			Reusable: m.primed.GateComplete,
 		}
 		m.last = res
 		m.ranInference = false
@@ -111,12 +118,14 @@ func (m *memoDetector) Detect(ctx context.Context, audioPath string) (detector.R
 // canReuse reports whether the primed telemetry can re-decide this item without a
 // sidecar call: the wrapped detector must support re-decision, telemetry must be
 // primed, its version must be non-empty, and it must match the current model
-// version. An empty version can never key cache validity, so it always infers.
+// version. An empty version can never key cache validity, so it always infers; a
+// row whose gate_complete bit is not true (NULL or false) also always infers, so
+// a degraded stamp is never re-decided instrumental from its stored scores (#511).
 func (m *memoDetector) canReuse() bool {
 	if m.decider == nil || m.primed == nil {
 		return false
 	}
-	if m.primed.Version == "" {
+	if m.primed.Version == "" || !m.primed.GateComplete {
 		return false
 	}
 	return m.primed.Version == m.decider.ModelVersion()

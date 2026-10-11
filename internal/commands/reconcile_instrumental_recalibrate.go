@@ -200,6 +200,19 @@ func runReconcileInstrumentalRecalibrate(ctx context.Context, out io.Writer, arg
 	}
 	_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate%s: %d %s row(s) considered\n",
 		env.libLabel, res.Total, candidates)
+	// Forward direction only: rows the reopen cannot list because their
+	// gate_complete bit is not set (stamped before migration 070, or from a degraded
+	// detector response). Without this line an all-NULL database reads as "nothing
+	// to reopen" (#511). Counts only; a read failure is loud but not fatal.
+	if !args.Reverse {
+		excluded, cerr := env.queue.CountVocalGateExcluded(ctx, env.libraryID)
+		if cerr != nil {
+			slog.Error("reconcile-instrumental-recalibrate: count excluded rows failed", "error", cerr)
+		} else if excluded > 0 {
+			_, _ = fmt.Fprintf(out, "reconcile-instrumental-recalibrate%s: %d row(s) excluded: gate_complete is not set (stamped before the bit existed, or from a degraded detector response); they re-qualify after a complete detector response\n",
+				env.libLabel, excluded)
+		}
+	}
 	if !args.Yes {
 		verb := "settle/reset"
 		if args.Reverse {

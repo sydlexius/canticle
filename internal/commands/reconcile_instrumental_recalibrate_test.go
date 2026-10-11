@@ -77,7 +77,7 @@ func seedVocalGateRejection(t *testing.T, ctx context.Context, dbPath, outdir, d
 	defer func() { _ = sqlDB.Close() }()
 	q := queue.NewDBQueue(sqlDB)
 	item, err := q.Enqueue(ctx, models.Inputs{
-		Track:       models.Track{ArtistName: "Artist", TrackName: "Title"},
+		Track:       models.Track{ArtistName: "Artist", TrackName: "Title " + filepath.Base(outdir)},
 		Outdir:      outdir,
 		Filename:    "song.lrc",
 		SourcePath:  srcPath,
@@ -98,6 +98,7 @@ func seedVocalGateRejection(t *testing.T, ctx context.Context, dbPath, outdir, d
 		SpeechMean:      0.01,
 		VocalClass:      "Singing",
 		DetectorVersion: detectorVersion,
+		GateComplete:    true,
 	}
 	if err := q.SetInstrumentalResult(ctx, item.ID, 0, tel); err != nil {
 		t.Fatalf("SetInstrumentalResult: %v", err)
@@ -502,5 +503,72 @@ func TestRunReconcileInstrumentalRecalibrate_ResumeCursorPrinted(t *testing.T) {
 	want := "resume with --after-id=" + strconv.FormatInt(id, 10)
 	if !strings.Contains(buf.String(), want) {
 		t.Errorf("want %q in output; got:\n%s", want, buf.String())
+	}
+}
+
+// nullGateBit reduces a seeded row to the pre-migration-070 shape: stored scores
+// and no gate_complete bit.
+func nullGateBit(t *testing.T, ctx context.Context, dbPath string, id int64) {
+	t.Helper()
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE work_queue SET gate_complete = NULL WHERE id = ?`, id); err != nil {
+		t.Fatalf("null gate bit: %v", err)
+	}
+}
+
+// An all-NULL database must not read as "nothing to reopen": the excluded rows are
+// counted on one aggregate-only line (#511).
+func TestRunReconcileInstrumentalRecalibrate_ReportsExcludedRows(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	writeRecalibrateCfg(t, cfgPath, dbPath)
+	outA := filepath.Join(dir, "a")
+	outB := filepath.Join(dir, "b")
+	for _, d := range []string{outA, outB} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	idA := seedVocalGateRejection(t, ctx, dbPath, outA, version)
+
+	run := func() string {
+		t.Helper()
+		var buf bytes.Buffer
+		if code := runReconcileInstrumentalRecalibrate(ctx, &buf, ScanReconcileInstrumentalRecalibrateCmd{ConfigPath: cfgPath}); code != 0 {
+			t.Fatalf("exit=%d out=%s", code, buf.String())
+		}
+		return buf.String()
+	}
+
+	if out := run(); strings.Contains(out, "excluded") {
+		t.Errorf("a database with no excluded rows must not print the excluded line:\n%s", out)
+	}
+
+	nullGateBit(t, ctx, dbPath, idA)
+	out := run()
+	if !strings.Contains(out, "0 vocal-gate-rejected row(s) considered") || !strings.Contains(out, "1 row(s) excluded: gate_complete is not set") {
+		t.Errorf("all-NULL database: want 0 considered and 1 excluded; got:\n%s", out)
+	}
+
+	// Forward direction only: a --reverse run over the same all-NULL database
+	// must not print the excluded line.
+	var rev bytes.Buffer
+	if code := runReconcileInstrumentalRecalibrate(ctx, &rev, ScanReconcileInstrumentalRecalibrateCmd{ConfigPath: cfgPath, Reverse: true}); code != 0 {
+		t.Fatalf("reverse exit=%d out=%s", code, rev.String())
+	}
+	if strings.Contains(rev.String(), "excluded") {
+		t.Errorf("--reverse must not print the excluded line:\n%s", rev.String())
+	}
+
+	seedVocalGateRejection(t, ctx, dbPath, outB, version)
+	out = run()
+	if !strings.Contains(out, "1 vocal-gate-rejected row(s) considered") || !strings.Contains(out, "1 row(s) excluded: gate_complete is not set") {
+		t.Errorf("mixed database: want 1 considered and 1 excluded; got:\n%s", out)
 	}
 }

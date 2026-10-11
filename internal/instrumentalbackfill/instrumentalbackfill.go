@@ -266,6 +266,7 @@ func (b *Backfiller) Run(ctx context.Context, opts Options) (Result, error) {
 			SpeechMean:      verdict.SpeechConfidence,
 			VocalClass:      verdict.WinningVocalClass,
 			DetectorVersion: verdict.Version,
+			GateComplete:    verdict.Reusable,
 		}
 
 		// Instrumental / NotInstrumental are DETECTOR-VERDICT counts and are never
