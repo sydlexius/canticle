@@ -243,7 +243,7 @@ type DurationStore interface {
 // queue.DBQueue.Complete, so the worker has no separate ledger dependency.
 //
 // Worker is intentionally single-goroutine: per-provider concurrency is the
-// architectural model (see CLAUDE.md). RunOnce must not be invoked
+// architectural model (see docs/ARCHITECTURE.md). RunOnce must not be invoked
 // concurrently against the same Worker. The circuit-breaker state lives in the
 // concurrency-safe internal/circuit.Breaker, so it is already safe for the
 // per-provider concurrency that motivated the extraction.

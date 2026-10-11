@@ -102,7 +102,7 @@ linters:
       # NOT temporary. nolintlint's allow-unused=false flags a //nolint that
       # currently suppresses nothing, which is usually right -- but these three
       # G704 directives on httpClient.Do are the documented version-specific
-      # gosec phantom (see CLAUDE.md, "golangci-lint version policy"): CI has
+      # gosec phantom (see docs/DEVELOPER.md, "golangci-lint version policy"): CI has
       # flagged them under some analyzer versions and not others. They read as
       # unused on v2.12.2, and deleting them would re-break CI the next time
       # the analyzer shifts. Keep the directives; exempt the sites.

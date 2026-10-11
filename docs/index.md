@@ -27,6 +27,7 @@ New here? Start with the [Getting Started](GETTING_STARTED.md) guide - it picks 
 - [Instrumental Detection](instrumental-detection.md) - the optional audio-based instrumental detector: the three-gate decision model, the YAMNet sidecar setup and `{mean,max}` contract, deploy ordering, and threshold tuning.
 - [LRC Normalization](lrc-normalization.md) - why stacked-timestamp LRC renders incorrectly in simple players, the detect (startup check) vs. apply (`scan reconcile-lrc --yes`) split, and the `.lrc.orig` backup.
 - [Developer Guide](DEVELOPER.md) - development setup, make targets, the quality gate, contributing notes, and design decisions.
+- [Architecture](ARCHITECTURE.md) - the project overview, how fetch mode and serve mode fit together, and a one-line catalog of every package.
 - [Provider Attribution](provider-attribution.md) - how a lane that multiplexes several upstream lyric licensors records per-track attribution: the `[source:]` and `[upstream:]` tokens, and why reports stay grouped by lane.
 
 ## Legal
