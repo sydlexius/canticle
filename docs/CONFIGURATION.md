@@ -523,7 +523,7 @@ mode = "off"
 
 | Key | Env | Default | Meaning |
 |---|---|---|---|
-| `mode` | `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | `off`: the track title is ignored (today's behavior). `strong`: a track whose title carries a strong instrumental qualifier (a bracketed or dash-suffixed "Instrumental" or "Off Vocal") is settled with an instrumental marker without asking a lyric provider. `strong_weak`: additionally honors weaker title or album signals, only when the audio detector agrees. An unrecognized value (file, or `config set`) resets to or is rejected in favor of `off`; an invalid env value warns and keeps the current setting. |
+| `mode` | `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | `off`: the track title is ignored (today's behavior). `strong`: a track whose title carries a strong instrumental qualifier (a bracketed or dash-suffixed "Instrumental" or "Off Vocal") is settled with an instrumental marker without asking a lyric provider. `strong_weak`: additionally honors weaker title or album signals, only when the audio detector agrees. An unrecognized file value resets to `off`; `config set` rejects an unrecognized value and leaves the setting unchanged; an invalid env value warns and keeps the current setting. |
 
 ### `[word_sync_recheck]`
 
