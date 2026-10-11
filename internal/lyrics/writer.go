@@ -537,7 +537,12 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	}
 	w.at("probed")
 	if !w.force {
-		if have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion); got < have.OnDisk || (w.onlyIfAbsent && have.OnDisk != RungNone) {
+		have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion)
+		if w.onlyIfAbsent && have.OnDisk == RungNone {
+			// The removal set above is not the whole stem: see stemOccupant.
+			have = stemOccupant(fp, listing)
+		}
+		if got < have.OnDisk || (w.onlyIfAbsent && have.OnDisk != RungNone) {
 			slog.Debug("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),
 				"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 			return &have

@@ -339,3 +339,125 @@ func TestWriteLRCIfAbsent(t *testing.T) {
 		t.Errorf("empty stem: marker = %q", got)
 	}
 }
+
+// TestStemOccupant_SimulatedCaseSensitive drives the absence check through a
+// constructed listing, so it does not depend on the host filesystem: the
+// entries name an extension-case variant while the directory the paths resolve
+// in is EMPTY, which is what a case-sensitive directory looks like to an exact
+// os.Lstat (a case-insensitive host would find "song.TXT" under "song.txt" and
+// hide the difference). The variant cannot be read there, so its rung is the
+// unjudged keep-it one; what is pinned is seen-or-not. classifyOnDisk is pinned
+// beside it: the ordinary guard judges only what a write destroys, and a write
+// to song.txt does not destroy song.TXT.
+func TestStemOccupant_SimulatedCaseSensitive(t *testing.T) {
+	for name, tc := range map[string]struct {
+		onDisk, target string
+		want           Rung // stemOccupant
+		ordinary       Rung // classifyOnDisk, unchanged by #1468
+	}{
+		"same extension, txt":     {"song.TXT", "song.txt", RungUnsynced, RungNone},
+		"same extension, lrc":     {"song.LRC", "song.lrc", RungWord, RungNone},
+		"opposite extension, lrc": {"song.LRC", "song.txt", RungWord, RungWord},
+		"opposite extension, txt": {"song.Txt", "song.lrc", RungUnsynced, RungUnsynced},
+		"companion":               {"song.ELRC", "song.txt", RungWord, RungNone},
+		"another stem":            {"Song.TXT", "song.txt", RungNone, RungNone},
+		"not a sidecar":           {"song.TXT.bak", "song.txt", RungNone, RungNone},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src, dir := t.TempDir(), t.TempDir()
+			seed(t, filepath.Join(src, tc.onDisk), "words\n")
+			entries, err := os.ReadDir(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, fp := sidecar.ListEntries(dir, entries), filepath.Join(dir, tc.target)
+			if got := stemOccupant(fp, l); got.OnDisk != tc.want {
+				t.Errorf("stemOccupant = rung %d, want %d", got.OnDisk, tc.want)
+			}
+			if got := classifyOnDisk(fp, l, nil); got.OnDisk != tc.ordinary {
+				t.Errorf("classifyOnDisk = rung %d, want %d (the ordinary guard must not change)", got.OnDisk, tc.ordinary)
+			}
+		})
+	}
+}
+
+// TestWriteLRCIfAbsent_OrphanCompanion: a word-timing companion with no .lrc
+// beside it occupies the stem. The ordinary guard ranks it RungNone (an owned
+// one lifts nothing and is removed by the write, a foreign one is left alone),
+// so only the absence check keeps the write off the stem.
+func TestWriteLRCIfAbsent_OrphanCompanion(t *testing.T) {
+	if !sidecar.Active(sidecar.KindWordSynced) {
+		t.Skip("companion inactive")
+	}
+	instrumental, _, _ := rungSongs()
+	for name, body := range map[string]string{
+		"owned":   "[by:canticle]\n[00:01.00]<00:01.00>line\n",
+		"foreign": "[00:01.00]<00:01.00>line\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			elrc := filepath.Join(dir, "song.elrc")
+			seed(t, elrc, body)
+			var k *KeptError
+			if err := NewLRCWriter().WriteLRCIfAbsent(instrumental, "song.lrc", dir); !errors.As(err, &k) || k.OnDisk == RungNone {
+				t.Fatalf("err = %v, want a *KeptError above RungNone", err)
+			}
+			if got := readText(t, elrc); got != body {
+				t.Errorf("companion changed: %q", got)
+			}
+			mustNotExist(t, filepath.Join(dir, "song.txt"))
+		})
+	}
+}
+
+// TestWriteLRCIfAbsent_CaseVariant is the end-to-end form on a filesystem where
+// "song.TXT" and "song.txt" are two files (it cannot fail on a case-insensitive
+// one, hence the skip; TestStemOccupant_SimulatedCaseSensitive is the
+// host-independent half). Every extension-case variant of the stem refuses the
+// write and stays byte for byte, and no second lyric file appears beside it.
+// The last block pins the ordinary guard: WriteLRCNoDowngrade still lands a
+// marker at song.txt beside an untouched song.TXT, exactly as before #1468.
+func TestWriteLRCIfAbsent_CaseVariant(t *testing.T) {
+	if !caseSensitiveFS(t, t.TempDir()) {
+		t.Skip("filesystem is case-insensitive; song.txt and song.TXT are one file there")
+	}
+	instrumental, _, line := rungSongs()
+	for name, tc := range map[string]struct {
+		file, body string
+		song       models.Song
+		target     string // what the write would have created
+		onDisk     Rung
+	}{
+		"same extension, words":     {"song.TXT", "words\n", instrumental, "song.txt", RungUnsynced},
+		"same extension, marker":    {"song.TXT", InstrumentalMarker + "\n", instrumental, "song.txt", RungInstrumental},
+		"opposite extension, lyric": {"song.LRC", "[00:01.00]line\n", instrumental, "song.txt", RungLine},
+		"same extension, lyric":     {"song.LRC", "[00:01.00]line\n", line, "song.lrc", RungLine},
+		"opposite extension, words": {"song.TXT", "words\n", line, "song.lrc", RungUnsynced},
+		"foreign companion":         {"song.ELRC", "[00:01.00]<00:01.00>line\n", instrumental, "song.txt", RungWord},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := filepath.Join(dir, tc.file)
+			seed(t, p, tc.body)
+			var k *KeptError
+			if err := NewLRCWriter().WriteLRCIfAbsent(tc.song, "song.lrc", dir); !errors.As(err, &k) || k.OnDisk != tc.onDisk {
+				t.Fatalf("err = %v, want a *KeptError on rung %d", err, tc.onDisk)
+			}
+			if got := readText(t, p); got != tc.body {
+				t.Errorf("%s changed: %q", tc.file, got)
+			}
+			mustNotExist(t, filepath.Join(dir, tc.target))
+		})
+	}
+
+	dir := t.TempDir()
+	upper := filepath.Join(dir, "song.TXT")
+	seed(t, upper, "words\n")
+	if err := NewLRCWriter().WriteLRCNoDowngrade(instrumental, "song.lrc", dir); err != nil {
+		t.Fatalf("WriteLRCNoDowngrade beside song.TXT: %v", err)
+	}
+	if got := readText(t, upper); got != "words\n" {
+		t.Errorf("song.TXT changed: %q", got)
+	}
+	mustExist(t, filepath.Join(dir, "song.txt"))
+}
