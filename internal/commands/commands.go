@@ -991,6 +991,14 @@ func lyricPreview(song models.Song, n int) string {
 // checkpoints they record are exactly as ordered as the source is.
 var serveStartupOrderHook func(checkpoint string)
 
+// titleRuleOn reports whether the instrumental title rule is on (#1468): every
+// mode but off settles a Strong title the same way. It reads the mode through
+// the normalizing accessor, never the raw field, so an unrecognized value is
+// off and a mode written with stray case or spaces still counts.
+func titleRuleOn(cfg config.Config) bool {
+	return cfg.InstrumentalTitleMode() != config.InstrumentalTitleOff
+}
+
 func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
 	cfg, envSrc, err := config.LoadWithSources(args.ConfigPath)
 	if err != nil {
@@ -1221,6 +1229,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	cacheRepo := cache.New(sqlDB)
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
 	w.SetBlockChecker(blocks)
+	w.SetTitleRule(titleRuleOn(cfg)) // read once: a mode change needs a restart
 	// Heal stale output_paths and wait out an offline library root (#1430).
 	w.SetOutputHealer(prune.New(sqlDB))
 	w.SetDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion))

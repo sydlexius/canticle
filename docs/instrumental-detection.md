@@ -108,6 +108,95 @@ Two rules bound when it can act:
   disk, so a re-check cannot turn lyrics into a marker (only `--update` may go
   down).
 
+## Title rule
+
+Separate from the audio detector, and off by default: `instrumental_title.mode`
+(see [CONFIGURATION.md](CONFIGURATION.md)). It needs no sidecar.
+
+**The problem it solves.** A track titled `Glass Harbor (Instrumental)` is the
+instrumental cut of a sung track. Asked for it, a lyrics provider answers with
+the sung version's words: its search is fuzzy and the qualifier does not
+survive it. That answer ends the lookup before the detector is consulted (under
+the default ordering it only runs after every provider misses), and a cached
+answer never reaches a provider at all. The track ends up with lyrics for
+singing that is not in the file.
+
+**The policy.** With the mode at `strong` (or `strong_weak`), serve mode settles
+a track whose title carries a strong instrumental qualifier with an
+instrumental marker, without asking any provider, the cache, or the detector.
+The title alone decides. Requiring the detector to agree was weighed and
+declined: the rule would then silently turn back into today's behavior whenever
+the sidecar is absent, its breaker is open, or dispatch is parallel.
+
+A qualifier is strong only when it stands alone in brackets or after a dash,
+beside nothing but packaging words (`Version`, `Mix`, a year), and qualifies a
+real title: `(Instrumental)`, `- Off Vocal`, `[Backing Track]`, `(Inst)`,
+`- Minus One`, `(BGM)`, `(No Vocals)`. These are deliberately NOT acted on:
+
+- a track that is only the word (`Instrumental`), or uses it inline: that is a
+  song named with the word;
+- a dash-suffix title whose text before the dash could be the track's own
+  artist, such as `Artist - Minus One`: that is a title tag carrying the
+  artist, not a qualified title. The check is deliberately broad (see "The
+  artist check" below). A bracketed qualifier is not subject to it;
+- any a cappella title: vocals only, so its lyrics are correct;
+- any karaoke title, or any track on a karaoke album: a karaoke track is for
+  singing along, so it gets its lyrics (see "Karaoke and the detector" below);
+- weaker signals (an album named Instrumental, `Piano Version`, `Score`).
+
+**The artist check.** A dash-suffix title is acted on only when the text before
+the last dash is known not to be the artist. It is compared against the track
+artist and the album artist, ignoring case, width, diacritics, dotted initials,
+a leading `The`, track numbering, and the spelling of `&` / `and`. The rule does
+not act when the two are equal, when either contains the other (a multi-artist
+tag, or a title that credits a guest the tag does not), or when no real artist
+is known: an empty tag and a placeholder (`Various Artists`, `VA`, `Unknown
+Artist`, `Unknown`) both count as unknown. Every doubtful case resolves toward
+not acting. The cost is stated plainly: a genuine `Artist - Title -
+Instrumental` title is declined too, and that track is simply looked up like any
+other.
+
+**Karaoke and the detector.** Under `instrumental_detector.ordering = "front"`
+the detector answers before any provider, and a karaoke backing track sounds
+instrumental to it. So while the rule is on, a karaoke-titled track is not sent
+to the detector first: the providers are asked, and if none has lyrics the track
+is deferred like any other miss. It is not marked instrumental at that point.
+With the rule off, `front` behaves as it always has. Other orderings are
+unaffected either way.
+
+**What it never does.** It never replaces a file. A lyric already on disk stays
+byte for byte, on an ordinary pass and on an upgrade re-fetch alike, and so does
+any instrumental marker already there, whoever wrote it: the detector, a
+provider, or a person. The rule changes only tracks with nothing on disk yet.
+A track written to several output directories counts as one track: a lyric or
+marker in any of them means no marker is written in any.
+One-shot `fetch` ignores the rule: naming a track there is an explicit request
+for it.
+
+**Turning it on and off.** The mode is read once at startup, so a change takes
+effect on the next restart of `serve`.
+
+**Provenance and undo.** The marker carries `[source:title-rule]` and the row's
+source is `title-rule` (shown as "Title Rule"). The verdict is not cached and is
+not recorded as a detector result. To undo it in bulk, set the mode to `off`,
+restart, and run:
+
+```sh
+canticle scan purge-provenance --source title-rule        # dry run: what would go
+canticle scan purge-provenance --source title-rule --yes  # remove the markers
+```
+
+Only markers the rule wrote match, since it never restamps a marker that was
+already there. The tracks are then looked up again on the next scan.
+
+**Residual risk.** A sung recording whose title carries a strong qualifier gets
+a marker and no lyrics while the mode is on, and nothing corrects it
+automatically. The artist check cannot recognize an artist written in a
+different script from the tag (a katakana prefix against a romanized artist
+tag): such a title is treated as qualified. The mitigations are the switch
+itself, the purge above, and the fact that a file already on disk is never
+displaced. There is no per-track override.
+
 ## The decision model (the core)
 
 A track is marked instrumental only when **all three** gates pass. Any gate

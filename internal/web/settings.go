@@ -1391,7 +1391,7 @@ var settingsLabels = map[string]string{
 	"timing_validation.revalidate_batch":              "Lyric files checked per background round",
 	"timing_validation.on_mis_synced":                 "What to do when the timing runs past the song's end",
 	"timing_validation.on_categorical":                "What to do when the lyrics belong to a different song",
-	"instrumental_title.mode":                         "Treat tracks titled Instrumental as instrumental (no effect yet)",
+	"instrumental_title.mode":                         "Mark a track instrumental, without a lyric search, when its title carries a qualifier such as \"(Instrumental)\"",
 	"word_sync_recheck.enabled":                       "Re-check synced tracks for word timings in the background",
 	"word_sync_recheck.batch":                         "Most tracks waiting for a word-timing re-check at once",
 	"upgrade_sweep.enabled":                           "Re-fetch tracks below line sync in the background",

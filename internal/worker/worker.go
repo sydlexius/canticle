@@ -396,6 +396,8 @@ type Worker struct {
 	// detector lane is inserted regardless of this value - the detector stays
 	// opt-in.
 	detectorOrdering string
+	// titleRule is the instrumental title rule's switch (SetTitleRule, #1468).
+	titleRule bool
 	// detectorLane is the detector lane actually installed by the most recent
 	// rebuildOrchestrator, or nil when none was (no audioDetector, or parallel
 	// mode). It is kept here ONLY so the pre-dequeue availability gate can
@@ -1510,6 +1512,11 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// and the cache store all see the same values. Any later position would break
 	// the read/write key agreement the comment above promises.
 	resolvedTrack = w.refreshRecordingIdentity(ctx, item, resolvedTrack)
+	// The title rule (#1468) answers first, so ordinary rows, recheck rows and
+	// upgrade trips with a Strong instrumental title all skip the lanes.
+	if handled, gateErr := w.titleRuleGate(ctx, item, resolvedTrack); handled {
+		return gateErr
+	}
 	if item.WordTimingState == queue.WordTimingQueued {
 		// A settled .lrc flipped back for word timings (#982) never takes the
 		// ordinary path below: its unsynced or instrumental result would
@@ -1539,6 +1546,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// miss, so a disabled item cleanly skips the detector. Provider lanes never
 	// consult sourcePath, so this substitution has no effect on them.
 	detectorPath := w.detectorPathFor(item)
+	if w.skipDetectorFirst(resolvedTrack) {
+		detectorPath = "" // a karaoke title goes to the providers (#1468)
+	}
 	// Prime the memoizing detector with this row's stored scores so the detector
 	// lane can re-decide from them instead of re-running YAMNet, when the stored
 	// detector_version still matches the current model version. Cleared (nil) for

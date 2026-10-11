@@ -659,6 +659,39 @@ func (w *LRCWriter) WriteLRCIfAbsent(song models.Song, filename string, outdir s
 	return guarded.WriteLRC(song, filename, outdir)
 }
 
+// Occupant is WriteLRCIfAbsent's refusal without the write: the sidecar that
+// write would keep at this output (the same manual-marker guard, removal-set
+// classification and whole-stem check, over the same resolved path), or nil when
+// the stem holds nothing and the write would land. It only reads. A caller with
+// several outputs asks every one BEFORE its first write, so a file at one output
+// stops a marker landing at another (#1468). The answer is a snapshot: a file
+// that appears afterwards is still refused by the write itself. The errors are
+// the write's own for a name or directory it would refuse (ErrOutputDirMissing
+// included). Meant for a candidate the timing guard promotes as-is.
+func (w *LRCWriter) Occupant(song models.Song, filename string, outdir string) (*KeptError, error) {
+	synced := song.Track.Instrumental != 1 && len(song.Subtitles.Lines) > 0
+	fn, err := SidecarName(song.Track.ArtistName, song.Track.TrackName, filename, synced)
+	if err != nil {
+		return nil, err
+	}
+	if outdir, err = w.resolveOutdir(outdir); err != nil {
+		return nil, err
+	}
+	fp := filepath.Join(outdir, fn)
+	listing := sidecar.List(filepath.Dir(fp))
+	if k := w.refuseManualMarker(fp, listing); k != nil {
+		return k, nil
+	}
+	have := classifyOnDisk(fp, listing, ownedCompanions(fp, listing))
+	if have.OnDisk == RungNone {
+		have = stemOccupant(fp, listing)
+	}
+	if have.OnDisk == RungNone {
+		return nil, nil
+	}
+	return &have, nil
+}
+
 // companionPlan is planCompanion's verdict. removes are the existing
 // canticle-owned companions (every extension-case variant, #989) deleted before
 // the .lrc/.txt is replaced; when write is set, a fresh one is written at path
