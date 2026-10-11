@@ -139,6 +139,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | Sidecars judged per sweep cycle; values below 1 reset to the default. |
 | `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a lyric whose cues overrun the audio: `demote`, `quarantine`, `purge`, `off`. |
 | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
+| `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | Reserved, no effect until the title rule ships: `off`, `strong`, `strong_weak`. See `[instrumental_title]`. |
 | `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode word-timing re-check sweep. |
 | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | Most rows in word-recheck mode at once (1-1000); out-of-range values are ignored. |
 | `MXLRC_UPGRADE_SWEEP_ENABLED` | `false` | Master switch for the serve-mode upgrade sweep. |
@@ -510,6 +511,19 @@ Setting both action keys to `off` gives an observability-only mode: every verdic
 | `on_categorical` | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a categorical lyric. One of `quarantine`, `purge` (irreversible), `off`. **No `demote`**: the words belong to another song, so there is nothing worth keeping as `.txt`. |
 
 Quarantined files are moved under a quarantine root, preserving their path relative to their library root so two same-named sidecars from different albums cannot collide. `purge` unlinks the file outright; the JSONL backup record is then the only trail, which is why it is never a default.
+
+### `[instrumental_title]`
+
+**Reserved: this key has no effect until the title rule ships in the same release series.** It lands first so the setting exists when the rule does. Once the rule ships it is off by default, applies to serve mode only, and never replaces a lyric file already on disk. `scan purge-provenance --source title-rule` is the bulk undo.
+
+```toml
+[instrumental_title]
+mode = "off"
+```
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `mode` | `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | `off`: the track title is ignored (today's behavior). `strong`: a track whose title carries a strong instrumental qualifier (a bracketed or dash-suffixed "Instrumental" or "Off Vocal") is settled with an instrumental marker without asking a lyric provider. `strong_weak`: additionally honors weaker title or album signals, only when the audio detector agrees. An unrecognized file value resets to `off`; `config set` rejects an unrecognized value and leaves the setting unchanged; an invalid env value warns and keeps the current setting. |
 
 ### `[word_sync_recheck]`
 

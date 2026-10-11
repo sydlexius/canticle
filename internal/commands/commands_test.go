@@ -4029,3 +4029,36 @@ func TestRunServeWiresNoWordLane(t *testing.T) {
 		t.Errorf("runServe must pass %q to the handler options (#1350)", want)
 	}
 }
+
+func TestConfigInstrumentalTitleModeGetSetRoundTrip(t *testing.T) {
+	cfg := config.Config{InstrumentalTitle: config.InstrumentalTitleConfig{Mode: "strong"}}
+	got, ok := configValue(cfg, "instrumental_title.mode")
+	if !ok || got != "strong" {
+		t.Fatalf("configValue(instrumental_title.mode) = %q, %v; want strong, true", got, ok)
+	}
+	if !slices.Contains(configKeys(), "instrumental_title.mode") {
+		t.Fatal("configKeys missing instrumental_title.mode")
+	}
+	if err := setConfigValue(&cfg, "instrumental_title.mode", " Strong_Weak "); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	if cfg.InstrumentalTitle.Mode != "strong_weak" {
+		t.Fatalf("mode = %q; want strong_weak", cfg.InstrumentalTitle.Mode)
+	}
+	for _, bad := range []string{"bogus", ""} {
+		if err := setConfigValue(&cfg, "instrumental_title.mode", bad); err == nil {
+			t.Fatalf("setConfigValue accepted %q for instrumental_title.mode", bad)
+		}
+		if cfg.InstrumentalTitle.Mode != "strong_weak" {
+			t.Fatalf("rejected value %q changed the mode to %q; want it left at strong_weak", bad, cfg.InstrumentalTitle.Mode)
+		}
+	}
+	for _, mode := range []string{"off", "strong"} {
+		if err := setConfigValue(&cfg, "instrumental_title.mode", mode); err != nil {
+			t.Fatalf("setConfigValue(%q): %v", mode, err)
+		}
+		if string(cfg.InstrumentalTitle.Mode) != mode {
+			t.Fatalf("mode = %q; want %q", cfg.InstrumentalTitle.Mode, mode)
+		}
+	}
+}
