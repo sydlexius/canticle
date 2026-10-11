@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/orchestrator"
@@ -122,7 +122,7 @@ type laneRig struct {
 func newLaneRig(t *testing.T, mode string, status int64) *laneRig {
 	t.Helper()
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

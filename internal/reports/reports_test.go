@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
@@ -17,7 +17,7 @@ import (
 // helper in internal/cache. Real SQLite, no mocks.
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

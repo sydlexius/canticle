@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -33,7 +33,7 @@ func seedRemediated(t *testing.T) (ctx context.Context, cfgPath, dbPath, dir str
 	dbPath = filepath.Join(dir, "test.db")
 	cfgPath = filepath.Join(dir, "config.toml")
 	reconcilePathsCfg(t, cfgPath, dbPath)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -96,7 +96,7 @@ func seedRemediated(t *testing.T) (ctx context.Context, cfgPath, dbPath, dir str
 
 func remSnapshot(t *testing.T, ctx context.Context, dbPath string) string {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -111,7 +111,7 @@ func remSnapshot(t *testing.T, ctx context.Context, dbPath string) string {
 
 func remRowState(t *testing.T, ctx context.Context, dbPath string, id int64) (status string, outcome, tier sql.NullString) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestRunReconcileRemediated_ApplyEachAction(t *testing.T) {
 			t.Errorf("%s was changed: outcome=%+v tier=%+v", n, o, tier)
 		}
 	}
-	sqlDB, _ := db.Open(ctx, dbPath)
+	sqlDB, _ := dbtest.OpenAt(ctx, t, dbPath)
 	defer sqlDB.Close() //nolint:errcheck // test cleanup
 	if got, _ := cache.New(sqlDB).Lookup(ctx, remArtist, "missing", 200); got != "" {
 		t.Errorf("reset row still served from cache: %q", got)

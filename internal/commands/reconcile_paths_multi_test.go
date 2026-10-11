@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -24,7 +24,7 @@ func seedMultiEntryRow(t *testing.T, ctx context.Context, dbPath, newPath, stale
 	if err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestReconcilePaths_MultiEntryWithoutLinkRowsIsRetained(t *testing.T) {
 	newPath := filepath.Join(root, "ArtistMulti", "AlbumNew", "01. track.flac")
 	staleDir := filepath.Join(root, "ArtistMulti", "AlbumOld")
 	id := seedMultiEntryRow(t, ctx, dbPath, newPath, staleDir)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

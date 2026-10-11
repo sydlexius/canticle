@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 func TestSQLStore_CreateListFindAndRevoke(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestSQLStore_CreateListFindAndRevoke(t *testing.T) {
 
 func TestSQLStore_RevokeByID(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestSQLStore_RevokeByID(t *testing.T) {
 
 func TestSQLStore_InvalidRows(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestSQLStore_InvalidRows(t *testing.T) {
 
 func TestSQLStore_CreateIfNotExistsIgnoresDuplicateHash(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "auth.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

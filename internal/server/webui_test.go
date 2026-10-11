@@ -14,7 +14,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/aligner"
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/web"
 )
@@ -82,7 +82,7 @@ func TestWithWebUIServesPages(t *testing.T) {
 // reports.Repo onto the mounted web UI so the Reports workspace runs a report
 // on demand end-to-end through the server handler.
 func TestWithReportsDBMountsReports(t *testing.T) {
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestReportsTopRungFollowsWordSyncMode(t *testing.T) {
 		{"both", config.WordSyncModeBoth, func(c config.Config) Option { return WithWebUI(c, "vtest") }, "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+			sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 			if err != nil {
 				t.Fatalf("open db: %v", err)
 			}
@@ -160,7 +160,7 @@ func TestReportsTopRungFollowsWordLanes(t *testing.T) {
 		{"mode off, word lane enabled", config.WordSyncModeOff, false, "1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+			sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 			if err != nil {
 				t.Fatalf("open db: %v", err)
 			}
@@ -245,7 +245,7 @@ func TestWithWebUIIfDisabled(t *testing.T) {
 // health seam onto the web UI (#488): NewHandler must hand WithLaneHealth's
 // source to the dashboard, or the tiles silently lose their status line.
 func TestWithLaneHealthReachesDashboard(t *testing.T) {
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestCloseEndsAutoAlignmentRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	ok(err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	audio := filepath.Join(t.TempDir(), "song.flac")

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -29,7 +29,7 @@ func setupReconcileLRC(t *testing.T) (cfgPath, root string) {
 	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRunReconcileLRC_NoLibraryRoots(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.toml")
 	mustWrite(t, cfgPath, "[db]\npath = \""+strings.ReplaceAll(dbPath, `\`, `\\`)+"\"\n")
 	// Open the DB (creates schema) but add no library.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func openDBFromConfig(t *testing.T, cfgPath string) *sql.DB {
 		t.Fatalf("config db path unterminated: %s", string(b))
 	}
 	dbPath := strings.ReplaceAll(string(b)[start:start+end], `\\`, `\`)
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

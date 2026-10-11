@@ -159,7 +159,7 @@ bash scripts/ci-shards.sh verify          # assert exactly-once package coverage
 
 `rest` is the **dynamic remainder** -- everything no named shard claims -- so a newly added package automatically lands in a shard.
 
-Three packages are heavy enough that a shard of their own would still be the pole (`internal/commands` at 252s, `internal/web` at 248s, `internal/queue` at 178s of measured CI time), so they are *partitioned by test name*: a round-robin over sorted test names splits each into buckets (`commands-1..3`, `web-1..3`, `queue-1..2`) selected with `-run`. Before relying on a new partition, confirm each bucket passes alone, shuffled, under `-race`.
+The current map is six shards: `commands-1`, `commands-2`, `queue`, `scanpath`, `web` and `rest`. The slowest test job runs about 124s, which is under the Image Scan job (150-200s), so test shards no longer set CI wall time. Only `internal/commands` (about 103s of test time) is heavy enough to be *partitioned by test name*: a round-robin over sorted test names splits it into two buckets (`commands-1`, `commands-2`) selected with `-run`. Before relying on a new partition, confirm each bucket passes alone, shuffled, under `-race`. Revisit the map when a test job approaches the Image Scan job's time; the measured times behind it are in the header of `scripts/ci-shards.sh`.
 
 To rebalance, edit the `SHARDS` / `BUCKETS` maps at the top of the script and re-run `verify`; the matrix regenerates from them. Base the split on **CI** timings from the job log, not local ones -- the ratio between the two is not stable.
 
@@ -220,7 +220,7 @@ For stateful features:
 - Pure-Go SQLite via `modernc.org/sqlite`, with no CGO (CGO breaks cross-compilation).
 - WAL mode; goose-managed migrations in `internal/db/migrations/`.
 - Repository pattern over interfaces (see `internal/cache/`) so storage stays swappable.
-- Integration tests use real SQLite (in-memory `file::memory:?cache=shared` or a temp file), not mocks.
+- Integration tests use real SQLite, not mocks. Open it with `internal/dbtest`: `dbtest.Open(t)` for a database in the test's temp directory, `dbtest.OpenAt(ctx, t, path)` where the test needs a path (same shape as `db.Open`), `dbtest.Path(t)` for a migrated file that is not opened. The helper migrates once per test binary and copies the file per test. Keep the real `db.Open` only where the test is about the migration itself, the read-only open path, lock or busy behavior, or an in-memory database.
 
 ## Design decisions
 

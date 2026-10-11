@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -84,7 +84,7 @@ func TestRunScanReconcile_ClearsStaleMarker(t *testing.T) {
 
 	// Seed a completed, instrumental-tagged row carrying the marker. detector_version
 	// "old" differs from the current build, so the default narrowed prefilter selects it.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRunScanReconcile_ClearsStaleMarker(t *testing.T) {
 	}
 
 	// Verify the row was re-queued and its verdict cleared.
-	sqlDB2, err := db.Open(ctx, dbPath)
+	sqlDB2, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestRunScanReconcile_ClearsStaleMarker(t *testing.T) {
 // given telemetry version, returning its id. Opens and closes its own DB handle.
 func seedInstrumentalRow(t *testing.T, ctx context.Context, dbPath string, inputs models.Inputs, detVer string) int64 {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestRunScanReconcile_LibraryNotFound(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.toml")
 	writeReconcileCfg(t, cfgPath, filepath.Join(dir, "test.db"), "http://127.0.0.1:1", fakeFFmpegCmd(t))
 	// db.Open creates the schema so resolveLibrary can run.
-	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestRunScanReconcile_StampsTelemetryOnConfirm(t *testing.T) {
 	}
 	// The stub answers a complete response (max map with a baseline class), so
 	// the stamp must carry gate_complete = 1 (#511).
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestRunScanReconcile_StampsTelemetryOnConfirm(t *testing.T) {
 // verdict with no evidence behind it.
 func clearTelemetry(t *testing.T, ctx context.Context, dbPath string, id int64) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -398,7 +398,7 @@ func clearTelemetry(t *testing.T, ctx context.Context, dbPath string, id int64) 
 
 func readTelemetry(t *testing.T, ctx context.Context, dbPath string, id int64) (music, vocal, speech *float64, dv string) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestRunScanReconcile_SkipsNoSourceAndNoMarker(t *testing.T) {
 		t.Errorf("want no-source=1 no-marker=1; got: %s", buf.String())
 	}
 	// The no-marker row must NOT have been reset.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}

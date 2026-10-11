@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/webauth"
 )
@@ -20,7 +20,7 @@ import (
 // Service over it (repo rule: real SQLite, not mocks).
 func newBootstrapService(t *testing.T) *webauth.Service {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "bootstrap.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "bootstrap.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -42,7 +42,7 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 // openBootstrapDB opens a migrated temp SQLite DB for the web-auth builder tests.
 func openBootstrapDB(t *testing.T) *sql.DB {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "buildwebauth.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "buildwebauth.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

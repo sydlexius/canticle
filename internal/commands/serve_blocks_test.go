@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -53,7 +53,7 @@ func TestRunServe_InstallsLyricBlockCheckers(t *testing.T) {
 	t.Setenv("MXLRC_SECRETS_KEY_FILE", filepath.Join(t.TempDir(), "test.key"))
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "serve.db")
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestRunServe_InstallsLyricBlockCheckers(t *testing.T) {
 // miss, so the track is enqueued rather than marked done from the cache (#1394).
 func TestScheduler_BlockedCacheEntryReadsAsMiss(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestScheduler_BlockedCacheEntryReadsAsMiss(t *testing.T) {
 // the serve graph owns the main one while the probe runs.
 func probeRowStatus(t *testing.T, dbPath string, id int64) string {
 	t.Helper()
-	d, err := db.Open(context.Background(), dbPath)
+	d, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Errorf("open for status: %v", err)
 		return ""

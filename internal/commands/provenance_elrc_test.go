@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/sidecar"
 )
@@ -26,7 +26,7 @@ func TestRunProvenanceBackfill_LeavesWordSyncedCompanionUntouched(t *testing.T) 
 		t.Helper()
 		ctx := context.Background()
 		tmpDB := filepath.Join(t.TempDir(), "test.db")
-		sqlDB, err := db.Open(ctx, tmpDB)
+		sqlDB, err := dbtest.OpenAt(ctx, t, tmpDB)
 		if err != nil {
 			t.Fatalf("open db: %v", err)
 		}

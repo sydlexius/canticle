@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/scanfail"
 )
 
@@ -15,7 +15,7 @@ import (
 // metadata failure must never hide a file from the detector.
 func TestDetectorStoreIsSeparateFromScannerStore(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestDetectorStoreIsSeparateFromScannerStore(t *testing.T) {
 // TestStoreOnClosedDBReportsErrors covers the error arms of both operations.
 func TestStoreOnClosedDBReportsErrors(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

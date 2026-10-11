@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/web"
 	"github.com/sydlexius/canticle/internal/webauth"
@@ -19,7 +19,7 @@ import (
 // while no admin exists. The route-level behavior is covered in internal/web;
 // this asserts the handler-construction path (WithOnboarding + AttachOnboarding).
 func TestWithOnboardingWiring(t *testing.T) {
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "onboard.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "onboard.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

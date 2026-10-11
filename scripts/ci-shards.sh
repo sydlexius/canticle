@@ -40,54 +40,50 @@ cd "$repo_root"
 # ---------------------------------------------------------------------------
 # The shard map.
 #
-# Balanced against MEASURED CI per-package times from the `Test (go)` job log of
-# run 30222557570 on main: 936.6s summed across 56 packages, which the unsharded
-# job ran in a 315s step (~3x in-runner parallelism). Job wall time after
-# sharding is max(shard) + runner overhead, so the goal is a flat maximum, not a
-# large shard count.
+# Balanced against MEASURED CI times from run 38177306132 (head 07bf21be), after
+# every test database moved to the migrated-template helper (internal/dbtest).
+# Per shard, job seconds / test-step seconds / cache-restore seconds:
 #
-#   internal/commands  252.2s -> PARTITIONED 3 ways (~84s each)
-#   internal/queue     178.5s -> PARTITIONED 2 ways (~89s each)
-#   internal/web       247.7s (was 111.5s) -> PARTITIONED 3 ways (~82s each)
-#   auth               webauth 59.5 + auth 16.4 + secrets 12.7 + server 4.8 = 93.4s
-#   sqlite             instrumentalrecalib 35.6 + purgeprovenance 33.9 + prune 25.6 = 95.1s
-#   scanpath           cache 24.2 + scan 23.9 + db 21.2 + reports 21.2 + identityrepair 17.9 = 108.4s
-#   rest               dynamic remainder, ~98s (detectorbackfill 16.5, library 12.2,
-#                      audiometa 10.0, cmd/mxlrcgo-svc 9.1, audiodur 8.1, scanfail 5.7,
-#                      detector 2.1, plus a ~35-package sub-2s tail)
+#   commands-1  95 / 52 / 25      internal/commands, half the tests
+#   commands-2 105 / 51 / 35      internal/commands, other half
+#   queue       98 / 56 / 25      queue, instrumentalrecalib, purgeprovenance, prune
+#   scanpath   124 / 69 / 32      cache, scan, db, reports, identityrepair, webauth,
+#                                 auth, secrets, server
+#   web        112 / 41 / 55      internal/web
+#   rest       116 / 67 / 29      dynamic remainder
 #
-# internal/commands and internal/queue are PARTITIONED rather than merely given
-# their own shards because each alone exceeded the target pole: a shard cannot
-# be faster than its slowest single package, so 252s and 178s had to be split by
-# test name to come down at all.
+# Why 6 shards. Wall time was 209s and the Image Scan job (150-200s) is now the
+# longest job in the workflow, so the test shards no longer set wall time. The
+# earlier 12-shard map ran the same tests (run 38176876925) with the same wall
+# time, a 119s slowest test job and 1058s of runner time across test jobs; this
+# map has a 124s slowest and 650s, about 40% less runner time, and keeps about
+# 70s of headroom under the Image Scan job.
 #
-# internal/web was left whole at 111.5s, and is partitioned now (#1282): it grew to
-# 247.7s (336s of job time) and became the pole by a wide margin, the next shard
-# being ~200s. Per-test times from the `Test Shard (web)` log of run 37162519809
-# (457 tests, 246.5s summed) put the round-robin buckets at N=2: 138.2 / 108.3s,
-# N=3: 78.0 / 87.1 / 81.4s, N=4: 61.2 / 49.1 / 77.0 / 59.2s. N=3 is the smallest
-# count whose slowest bucket (~87s of test step, ~170s of job with ~83s of runner
-# overhead) is under the next pole; N=2 (~138s) is not. A fourth bucket would pay
-# a runner for nothing, since the round-robin leaves it lopsided anyway.
-# TestSameOriginGuard (20.5s) bounds how far any further
-# split could go: a bucket cannot be faster than its slowest test.
+# Why internal/commands is still split in two: it is about 103s of test time
+# (the two buckets above), which as one shard would be the slowest test job. Each
+# bucket is a round-robin over SORTED test names, so the halves stay balanced
+# regardless of name clustering. internal/web and internal/queue are no longer
+# split: each now fits in one shard well under the Image Scan time. A bucket
+# cannot be faster than its slowest single test, which bounds any further split.
+#
+# `rest` is the dynamic remainder: every package no named shard claims, so a new
+# package lands in a shard automatically.
+#
+# Revisit when a test job approaches the Image Scan job's time. Re-measure from
+# a CI job log (not a local run), then edit SHARDS / BUCKETS and run `verify`.
 # ---------------------------------------------------------------------------
 declare -A SHARDS=(
   [commands]="internal/commands"
-  [queue]="internal/queue"
   [web]="internal/web"
-  [auth]="internal/webauth internal/auth internal/secrets internal/server"
-  [sqlite]="internal/instrumentalrecalib internal/purgeprovenance internal/prune"
-  [scanpath]="internal/cache internal/scan internal/db internal/reports internal/identityrepair"
+  [queue]="internal/queue internal/instrumentalrecalib internal/purgeprovenance internal/prune"
+  [scanpath]="internal/cache internal/scan internal/db internal/reports internal/identityrepair internal/webauth internal/auth internal/secrets internal/server"
 )
 
 # Bucket count for each PARTITIONED base. A base listed here is split into
 # "<base>-1".."<base>-N" by a round-robin over its sorted test names; a base
 # absent from this map runs as a single named shard.
 declare -A BUCKETS=(
-  [commands]=3
-  [queue]=2
-  [web]=3
+  [commands]=2
 )
 
 # ---------------------------------------------------------------------------

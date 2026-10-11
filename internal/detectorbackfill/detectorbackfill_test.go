@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	dbpkg "github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 var errReport = errors.New("report boom")
 
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
-	sqlDB, err := dbpkg.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

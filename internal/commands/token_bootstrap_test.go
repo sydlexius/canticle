@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/secrets"
 )
@@ -248,7 +248,7 @@ func TestBootstrapToken_NilStoreOrMinterIsANoOp(t *testing.T) {
 // with the old token.
 func TestPersistMintedTokenIsAtomic(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "atomic.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "atomic.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

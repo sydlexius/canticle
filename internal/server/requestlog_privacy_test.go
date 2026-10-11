@@ -13,7 +13,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/web"
 	"github.com/sydlexius/canticle/internal/webauth"
@@ -36,7 +36,7 @@ func captureDebugLog(t *testing.T) *bytes.Buffer {
 func TestSearchTextNeverReachesRequestLog(t *testing.T) {
 	const token = "zqxj7uniquesearchtoken"
 
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "log.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "log.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

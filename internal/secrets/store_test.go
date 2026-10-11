@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 // newTestStore opens a migrated SQLite DB (temp file) and returns a SQLStore
 // keyed with a fresh random key. Real SQLite, no mocks, per repo convention.
 func newTestStore(t *testing.T) (*SQLStore, *sql.DB) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "secrets.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestSQLStoreRoundTrip(t *testing.T) {
 
 func TestNewSQLStoreCopiesKey(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "secrets.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

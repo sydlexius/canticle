@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 )
@@ -70,7 +70,7 @@ func seedVocalGateRejection(t *testing.T, ctx context.Context, dbPath, outdir, d
 	if err := os.WriteFile(srcPath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestRunReconcileInstrumentalRecalibrate_DryRunSettlesNothing(t *testing.T) 
 		t.Errorf("dry-run output missing 'would settle':\n%s", dry.String())
 	}
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestRunReconcileInstrumentalRecalibrate_ApplySettlesVersionMatchedRow(t *te
 		t.Errorf("output should point at the backup file:\n%s", app.String())
 	}
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRunReconcileInstrumentalRecalibrate_VersionMismatchResets(t *testing.T)
 		t.Errorf("output should report the reset:\n%s", app.String())
 	}
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestRunReconcileInstrumentalRecalibrate_LibraryNotFound(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.toml")
 	writeRecalibrateCfg(t, cfgPath, dbPath)
 	// db.Open creates the schema so resolveLibrary can run.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestRunReconcileInstrumentalRecalibrate_ScopedToLibrary(t *testing.T) {
 	writeRecalibrateCfg(t, cfgPath, dbPath)
 	id := seedVocalGateRejection(t, ctx, dbPath, outdir, version)
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestRunReconcileInstrumentalRecalibrate_ScopedToLibrary(t *testing.T) {
 		t.Errorf("expected the library scoping to exclude the unlinked row; got: %s", buf.String())
 	}
 
-	sqlDB2, err := db.Open(ctx, dbPath)
+	sqlDB2, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestRunReconcileInstrumentalRecalibrate_ResumeCursorPrinted(t *testing.T) {
 // and no gate_complete bit.
 func nullGateBit(t *testing.T, ctx context.Context, dbPath string, id int64) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

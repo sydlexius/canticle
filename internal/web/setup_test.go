@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/secrets"
 	"github.com/sydlexius/canticle/internal/trustnet"
@@ -36,7 +36,7 @@ type onboardingFixture struct {
 // secret store uses a fixed 32-byte test key; the login backoff is stubbed.
 func newTestOnboarding(t *testing.T, policy *trustnet.Policy) onboardingFixture {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "onboard.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "onboard.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -869,7 +869,7 @@ func TestNewOnboardingPanicsOnNil(t *testing.T) {
 // TestNewOnboardingDefaultsNilPolicyToLoopback verifies a nil policy is treated
 // as loopback-only (safe default) rather than open or panicking.
 func TestNewOnboardingDefaultsNilPolicyToLoopback(t *testing.T) {
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "nilpol.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "nilpol.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/worker"
@@ -27,7 +27,7 @@ func (g fixedGen) WordGeneration() int64 { return int64(g) }
 // each a full recheck candidate (ids 1..n).
 func wordSweepDB(t *testing.T, n int) *sql.DB {
 	t.Helper()
-	dbh, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "ws.db"))
+	dbh, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "ws.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

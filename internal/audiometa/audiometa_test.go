@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/audiometa"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
 
@@ -29,7 +29,7 @@ func newTestDB(t *testing.T) *audiometa.Store {
 // where the rows persist and the code changes underneath them.
 func newTestDBWithHandle(t *testing.T, readerVersion string) (*audiometa.Store, *sql.DB) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

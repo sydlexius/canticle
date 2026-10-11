@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	dbpkg "github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/detectorbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -142,7 +142,7 @@ func seedRejection(t *testing.T, q *queue.DBQueue, sourcePath string, tel queue.
 func openTestQueueWithDB(t *testing.T) (*queue.DBQueue, *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	sqlDB, err := dbpkg.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -153,7 +153,7 @@ func openTestQueueWithDB(t *testing.T) (*queue.DBQueue, *sql.DB) {
 func openTestQueue(t *testing.T) *queue.DBQueue {
 	t.Helper()
 	ctx := context.Background()
-	sqlDB, err := dbpkg.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

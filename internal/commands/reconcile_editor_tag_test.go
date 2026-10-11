@@ -18,7 +18,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lrcbackfill"
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -512,7 +512,7 @@ func TestRunServe_EditorTagBackfillCompletesBeforeWorkerStarts(t *testing.T) {
 	mustWrite(t, target, canticleLRCFixture)
 
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

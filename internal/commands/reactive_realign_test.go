@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/realign"
@@ -23,7 +23,7 @@ func realignTestSetup(t *testing.T) (context.Context, *sql.DB, models.Library, s
 	if err != nil {
 		t.Fatalf("evalsymlinks: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

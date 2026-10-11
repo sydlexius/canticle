@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -29,7 +29,7 @@ func seedReconcilePathsRowWithIdentity(t *testing.T, ctx context.Context, dbPath
 	if err := os.WriteFile(filePath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -73,7 +73,7 @@ func seedReconcilePathsPresentFile(t *testing.T, ctx context.Context, dbPath, fi
 	if err := os.WriteFile(filePath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write present source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed present: %v", err)
 	}
@@ -301,7 +301,7 @@ func seedSecondLibrary(t *testing.T, ctx context.Context, dbPath, dir, name stri
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir second root: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open second library: %v", err)
 	}
@@ -323,7 +323,7 @@ func seedPresentFileInLibrary(t *testing.T, ctx context.Context, dbPath string, 
 	if err := os.WriteFile(filePath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write present source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed present: %v", err)
 	}
@@ -342,7 +342,7 @@ func seedPresentFileInLibrary(t *testing.T, ctx context.Context, dbPath string, 
 // relink moved it. Fails if neither is present.
 func reconcilePathsWorkQueueSource(t *testing.T, ctx context.Context, dbPath, wantOld, wantNew string) string {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open work_queue: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestReconcilePaths_RelinkNeverCrossesLibraryBoundary(t *testing.T) {
 		t.Errorf("want 'relinked 0 source'; got: %s", buf.String())
 	}
 	// The artifact: no work_queue row points at the other library's file.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

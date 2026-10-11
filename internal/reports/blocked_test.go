@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/tablesort"
 )
 
 func openBlockedDB(t *testing.T) *sql.DB {
 	t.Helper()
-	d, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "blocked.db"))
+	d, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "blocked.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 )
@@ -30,7 +30,7 @@ func seedReconcilePathsPreBrokenRow(t *testing.T, ctx context.Context, dbPath, n
 	if err := os.WriteFile(newPath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -71,7 +71,7 @@ func seedReconcilePathsPreBrokenRow(t *testing.T, ctx context.Context, dbPath, n
 // row's output_paths column by id.
 func reconcilePathsWorkQueueOutputPaths(t *testing.T, ctx context.Context, dbPath string, id int64) []models.OutputPath {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestReconcilePaths_RepairDryRunReportsWithoutMutating(t *testing.T) {
 	// Its source_path is emptied because Sweep's gather (which runs first) fails
 	// loudly on malformed output_paths for any row it selects by source_path.
 	badID := seedReconcilePathsPreBrokenRow(t, ctx, dbPath, filepath.Join(root, "Bad", "New", "02.flac"), filepath.Join(root, "Bad", "Old"))
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

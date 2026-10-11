@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 type upstreamSeed struct {
@@ -37,7 +37,7 @@ func seedUpstream(t *testing.T, specs []upstreamSeed) (ctx context.Context, cfgP
 	dbPath = filepath.Join(dir, "test.db")
 	cfgPath = filepath.Join(dir, "config.toml")
 	reconcilePathsCfg(t, cfgPath, dbPath)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -79,7 +79,7 @@ func seedUpstream(t *testing.T, specs []upstreamSeed) (ctx context.Context, cfgP
 
 func readUpstream(t *testing.T, ctx context.Context, dbPath string, id int64) sql.NullString {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestRunReconcileUpstream_DryRunMatchesApply(t *testing.T) {
 // no derivable sidecar and is counted, not guessed.
 func TestRunReconcileUpstream_SkipsBlankSourcePath(t *testing.T) {
 	ctx, cfgPath, dbPath, _, ids := seedUpstream(t, []upstreamSeed{{name: "blank", lane: "innertube", status: "done"}})
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

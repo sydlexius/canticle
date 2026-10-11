@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 // seedDetectorStatsDB creates a database with one detected-instrumental row, one
@@ -23,7 +23,7 @@ func setupDetectorStats(t *testing.T) (ctx context.Context, cfgPath, dbPath stri
 	cfgPath = filepath.Join(dir, "config.toml")
 	reconcilePathsCfg(t, cfgPath, dbPath)
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestRunReconcileDetectorStats_UnwritableBackupRollsBack(t *testing.T) {
 // which is the only ordering that exposes an over-recording backup.
 func failSecondAttribution(t *testing.T, ctx context.Context, dbPath string) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

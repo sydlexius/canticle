@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -294,7 +295,7 @@ func TestDBQueue_BatchedDequeueSurfacesRefillError(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ro.db")
 
-	w, err := db.Open(ctx, path)
+	w, err := dbtest.OpenAt(ctx, t, path)
 	if err != nil {
 		t.Fatalf("open writable: %v", err)
 	}

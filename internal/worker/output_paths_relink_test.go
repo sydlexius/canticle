@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/prune"
@@ -38,7 +38,7 @@ func TestRelinkedRowWritesToNewOutputPath(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestResurrectedRelinkWritesToNewOutputPath(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	root := filepath.Join(dir, "music")
-	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

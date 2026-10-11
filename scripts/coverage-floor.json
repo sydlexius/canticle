@@ -10,6 +10,7 @@
   "internal/commands": 68,
   "internal/config": 88,
   "internal/db": 69,
+  "internal/dbtest": 76,
   "internal/detector": 82,
   "internal/detectorbackfill": 87,
   "internal/failsig": 100,

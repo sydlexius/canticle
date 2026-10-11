@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -16,7 +16,7 @@ import (
 // file seeds.
 func getLibraryForTest(t *testing.T, ctx context.Context, dbPath string) models.Library {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestRunLibraryUpdate_LegacyRelativePathStaysMaintainable(t *testing.T) {
 	dbPath := filepath.Join(dir, "state", "test.db")
 	cfg := writeCommandsConfig(t, dbPath)
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

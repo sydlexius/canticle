@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -33,7 +33,7 @@ func symlinkedLibrary(t *testing.T) (ctx context.Context, sqlDB *sql.DB, libID i
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, err = db.Open(ctx, filepath.Join(base, "test.db"))
+	sqlDB, err = dbtest.OpenAt(ctx, t, filepath.Join(base, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

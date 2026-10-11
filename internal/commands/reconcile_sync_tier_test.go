@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -27,7 +27,7 @@ func seedSyncTierCandidate(t *testing.T) (ctx context.Context, cfgPath, dbPath, 
 	cfgPath = filepath.Join(dir, "config.toml")
 	reconcilePathsCfg(t, cfgPath, dbPath)
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -43,7 +43,7 @@ func seedSyncTierCandidate(t *testing.T) (ctx context.Context, cfgPath, dbPath, 
 
 func readSyncTierCol(t *testing.T, ctx context.Context, dbPath string, id int64) sql.NullString {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRunReconcileSyncTier_ApplyClassifiesEachTier(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.toml")
 	reconcilePathsCfg(t, cfgPath, dbPath)
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestRunReconcileSyncTier_ExcludesNonCandidates(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.toml")
 	reconcilePathsCfg(t, cfgPath, dbPath)
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

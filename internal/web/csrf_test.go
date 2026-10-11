@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/webauth"
 )
@@ -235,7 +235,7 @@ func TestEnforceSameOriginSessionFallback(t *testing.T) {
 // newTestAuthForCSRF builds an Auth over a real webauth.Service for CSRF tests.
 func newTestAuthForCSRF(t *testing.T) *Auth {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "csrf.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "csrf.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

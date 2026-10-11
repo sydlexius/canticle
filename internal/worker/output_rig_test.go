@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -56,7 +56,7 @@ func newHealRig(t *testing.T, paths func(srcDir, root, rootB string) []models.Ou
 	ctx := context.Background()
 	base := t.TempDir()
 	r := &healRig{root: filepath.Join(base, "music"), rootB: filepath.Join(base, "musicB")}
-	sqlDB, err := db.Open(ctx, filepath.Join(base, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(base, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

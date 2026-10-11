@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/instrumentalmark"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
@@ -53,7 +53,7 @@ func newQIFixture(t *testing.T) *qiFixture {
 	if err := os.WriteFile(f.cfg, []byte("[db]\npath = \""+strings.ReplaceAll(f.dbPath, `\`, `\\`)+"\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, err := db.Open(ctx, f.dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, f.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func (f *qiFixture) run(t *testing.T, unmark bool, a QueueMarkInstrumentalCmd) (
 
 func (f *qiFixture) row(t *testing.T, id int64) (marked bool) {
 	t.Helper()
-	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	sqlDB, err := dbtest.OpenAt(f.ctx, t, f.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func sameFile(t *testing.T, a, b string) bool {
 // requireDequeues asserts the worker would pick row id up again.
 func (f *qiFixture) requireDequeues(t *testing.T, id int64) {
 	t.Helper()
-	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	sqlDB, err := dbtest.OpenAt(f.ctx, t, f.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func (f *qiFixture) requireDequeues(t *testing.T, id int64) {
 
 func (f *qiFixture) setStatus(t *testing.T, id int64, status string) {
 	t.Helper()
-	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	sqlDB, err := dbtest.OpenAt(f.ctx, t, f.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

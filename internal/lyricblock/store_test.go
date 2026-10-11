@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 func newStore(t *testing.T) (*Store, *sql.DB, *bytes.Buffer) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

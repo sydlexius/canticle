@@ -43,7 +43,7 @@ When the user says **"next"**, **"what's next"**, **"keep going"**, or any equiv
 
 - **Never reintroduce CGO.** SQLite is pure-Go `modernc.org/sqlite`; CGO breaks cross-compilation.
 - **No global mutable state.** Inject dependencies through interfaces and mock at the boundary.
-- **Integration tests use real SQLite** (in-memory `file::memory:?cache=shared` or a temp file), not mocks.
+- **Integration tests use real SQLite**, not mocks. Open it with `internal/dbtest` (`dbtest.Open(t)` / `dbtest.OpenAt`), not `db.Open`: migrating per test is what made CI slow. Keep `db.Open` only where the test is about the migration, the read-only open, or lock contention.
 - **Never `--no-verify`**, on a commit or a push. The only push override is `PUSH_GATE=full`, which is stricter.
 - **CI is authoritative** for the race suite and for golangci-lint findings that do not reproduce locally (the `gosec` taint analyzers such as `G704` are prone to version-specific phantoms). Do not chase local reproduction, but read the finding: suppress with a per-site `//nolint:gosec // reason: ...` only after confirming a false positive, and fix a real one. Bumping the CI pin needs a probe PR.
 - **Every `//nolint` carries `// reason:`** (enforced by `nolintlint`). Do not add a path to the exclusion block in `.golangci.yml` to silence a new finding.

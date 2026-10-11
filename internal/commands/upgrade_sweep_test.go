@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 // upgradeSweepDB seeds n settled unsynced rows, each an upgrade candidate.
 func upgradeSweepDB(t *testing.T, n int) *sql.DB {
 	t.Helper()
-	dbh, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "us.db"))
+	dbh, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "us.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

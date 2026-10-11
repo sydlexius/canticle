@@ -82,3 +82,4 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `timingacc` -- pure line-start accuracy measurement for `timing-accuracy`: a monotone LCS `matchLines` over `normalize.NormalizeKey` text and `LineStats`; no I/O, so it imports neither `lyrics` nor `models`.
 - `version` -- build-time `Version`/`Commit`/`Date` (GoReleaser ldflags) and `VersionString()`.
 - `testutil` -- generates synthetic ID3-tagged audio for load/concurrency tests and the genlib tool.
+- `dbtest` -- test-only helper that opens fully migrated SQLite databases from a per-binary template (`Open`, `OpenAt`, `Path`) instead of re-running every migration per test.
