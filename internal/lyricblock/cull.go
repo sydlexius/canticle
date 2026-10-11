@@ -8,10 +8,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/selfwrite"
 	"github.com/sydlexius/canticle/internal/sidecar"
@@ -140,6 +142,42 @@ func Inventory(artist, title string, outs []Output) ([]string, error) {
 	return files, nil
 }
 
+// leftover counts what a cull of files would leave on the lyric stem of outs:
+// every case variant of the .lrc, .txt and (while that kind is active) .elrc
+// that Inventory did not list. That is the set lyrics.WriteLRCIfAbsent's absence
+// check reads at the stem the row's own artist names. An output with no filename
+// is named from the artist, and the worker names it from the resolved artist
+// (the album artist when it is a real name), so that stem is counted as well.
+// Zero means the worker's next write finds its stem empty.
+func leftover(artist, albumArtist, title string, outs []Output, files []string) (int, error) {
+	n := 0
+	for _, o := range outs {
+		artists := []string{artist}
+		if ra := normalize.ResolveArtist(albumArtist, artist); o.Filename == "" && ra != artist {
+			artists = append(artists, ra)
+		}
+		l := sidecar.List(o.Dir)
+		for _, a := range artists {
+			name, err := lyrics.SidecarName(a, title, o.Filename, true)
+			if err != nil {
+				return 0, fmt.Errorf("lyricblock: sidecar name: %w", err)
+			}
+			stem := sidecar.StemOf(filepath.Join(o.Dir, name))
+			for _, kind := range []sidecar.Kind{sidecar.KindLineSynced, sidecar.KindUnsynced, sidecar.KindWordSynced} {
+				if !sidecar.Active(kind) {
+					continue
+				}
+				for _, v := range l.Variants(stem + sidecar.Ext(kind)) {
+					if !slices.Contains(files, v) {
+						n++
+					}
+				}
+			}
+		}
+	}
+	return n, nil
+}
+
 // ReadBackup captures path's bytes through one no-follow handle that must fstat
 // regular, so a file swapped for a symlink after the inventory is refused.
 func ReadBackup(op string, workItemID int64, path string) (Backup, error) {
@@ -203,6 +241,17 @@ func resolveOutputs(roots []string, outs []models.OutputPath) ([]Output, error) 
 
 // reportedSet remembers the content (sha256) last reported for each path.
 type reportedSet map[string][sha256.Size]byte
+
+// unreported returns the records whose exact path and content were not reported.
+func (s reportedSet) unreported(recs []Backup) []Backup {
+	var out []Backup
+	for _, rec := range recs {
+		if prev, ok := s[rec.Path]; !ok || prev != sha256.Sum256(rec.Content) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
 
 // report sends rec to fn unless this exact path and content was already sent.
 func report(fn func(Backup) error, rec Backup, reported reportedSet) error {
