@@ -33,6 +33,12 @@ var (
 	// revives those only through their own paths (Retry, RecheckRetired); a mark
 	// would delete the files and strand the row. Nothing is touched.
 	ErrNotMarkable = errors.New("lyricblock: work item is failed or unavailable; revive it first")
+	// ErrHandEdited is returned, only under MarkRequest.RefuseHandEdited, for a
+	// row whose lyric was edited by hand. Nothing is touched.
+	ErrHandEdited = errors.New("lyricblock: work item's lyric was edited by hand")
+	// ErrStemOccupied is returned, only under MarkRequest.RequireEmptyStem, when
+	// the mark would leave a file on the track's lyric stem. Nothing is touched.
+	ErrStemOccupied = errors.New("lyricblock: a file the mark would leave occupies the lyric stem")
 )
 
 const (
@@ -74,6 +80,33 @@ type MarkRequest struct {
 	// A nil Report with a file to remove fails with ErrNoBackupSink before
 	// anything changes.
 	Report func(Backup) error
+	// Op labels each Backup; empty means "mark-wrong".
+	Op string
+	// RefuseHandEdited refuses a row whose lyric was edited by hand
+	// (ErrHandEdited) instead of clearing the edit mark. The guard is in the
+	// first statement of transaction 1, so an edit made after the row was read is
+	// refused too, with nothing blocked, invalidated or removed. After that
+	// statement the row is no longer line-editable, which is what keeps an edit
+	// from landing before the reopen.
+	RefuseHandEdited bool
+	// RequireEmptyStem refuses (ErrStemOccupied), in a dry run too, when a file
+	// Mark would not remove sits on the lyric stem of any output: a companion
+	// canticle does not own, a hand-placed instrumental marker. Such a file would
+	// stop the next write. It is a check at the first read, not a guarantee at
+	// unlink time: a file placed later is caught by the writer, which refuses, and
+	// nothing is lost.
+	RequireEmptyStem bool
+	// Vet, when set, sees the records just read, before anything changes and in a
+	// dry run too. Its error aborts the mark with a zero result. It must not
+	// modify the records it is handed: they are the ones written to the backup.
+	// Its error is wrapped as is, so it must carry no path or lyric text.
+	//
+	// It is called again with any record that is new or changed after the first
+	// transaction. A failure there leaves the row 'done' with its edit marks
+	// cleared, the block inserted and the cache invalidated, and nothing removed.
+	// A rerun with the same deterministic Vet refuses again, so the caller must
+	// report it as needing a manual mark-wrong, not as retryable.
+	Vet func([]Backup) error
 }
 
 // MarkResult holds counts only. Files is the number of lyric files found (and,
@@ -95,10 +128,13 @@ type target struct {
 	// written (see Mark's recovery branch).
 	recordsFile bool
 	manual      bool
+	edited      bool
+	albumArtist string
 	outputs     []models.OutputPath
 	// key is the row's own work_queue.artist_key/title_key, the identity blocks
-	// are stored under. cacheKeys are the identities to un-cache: the row's and
-	// each linked scan result's (the cache is keyed by those, not by key).
+	// are stored under. cacheKeys are the identities to un-cache: the row's, its
+	// resolved artist's and each linked scan result's (the cache is keyed by
+	// those, not by key).
 	key       [2]string
 	cacheKeys [][2]string
 	// meta is the row state Mark clears, carried on every Backup.
@@ -135,6 +171,12 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 		return MarkResult{}, ErrBusy
 	case t.status == queue.StatusFailed || t.status == queue.StatusUnavailable:
 		return MarkResult{}, ErrNotMarkable
+	case req.RefuseHandEdited && t.edited:
+		return MarkResult{}, ErrHandEdited
+	}
+	op := req.Op
+	if op == "" {
+		op = opMark
 	}
 	outs, err := resolveOutputs(req.Roots, t.outputs)
 	if err != nil {
@@ -143,6 +185,15 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 	files, err := Inventory(t.artist, t.title, outs)
 	if err != nil {
 		return MarkResult{}, err
+	}
+	if req.RequireEmptyStem {
+		n, lerr := leftover(t.artist, t.albumArtist, t.title, outs, files)
+		if lerr != nil {
+			return MarkResult{}, lerr
+		}
+		if n > 0 {
+			return MarkResult{}, ErrStemOccupied
+		}
 	}
 	if len(files) == 0 {
 		// A mark that died between the unlink and the reopen: finish it. The proof
@@ -163,9 +214,14 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 		}
 		return res, err
 	}
-	recs, err := ReadAll(opMark, id, t.meta, files)
+	recs, err := ReadAll(op, id, t.meta, files)
 	if err != nil {
 		return MarkResult{}, fmt.Errorf("lyricblock: work item %d: %w", id, err)
+	}
+	if req.Vet != nil {
+		if verr := req.Vet(recs); verr != nil {
+			return MarkResult{}, fmt.Errorf("lyricblock: work item %d was not vetted, nothing changed: %w", id, verr)
+		}
 	}
 	fps := newFingerprints(recs, nil)
 	if len(fps) == 0 {
@@ -174,6 +230,8 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 	if req.DryRun {
 		return MarkResult{DryRun: true, Files: len(files)}, nil
 	}
+	// A record reported here can be for a file that stays (block may still refuse
+	// the row), so a restore tool must not replay records of refused work items.
 	reported := reportedSet{}
 	if rerr := ReportAll(req.Report, recs, reported); rerr != nil {
 		return MarkResult{}, fmt.Errorf("lyricblock: backup for work item %d failed, nothing changed: %w", id, rerr)
@@ -181,7 +239,7 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 	var res MarkResult
 	err = dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
 		var terr error
-		res, terr = s.block(ctx, id, t, fps, true)
+		res, terr = s.block(ctx, id, t, fps, true, req.RefuseHandEdited)
 		return terr
 	})
 	if err != nil {
@@ -192,7 +250,12 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 	if err != nil {
 		return res, fmt.Errorf("lyricblock: work item %d is blocked but its files were not removed; retry the mark: %w", id, err)
 	}
-	lateRecs, rerr := ReadAll(opMark, id, t.meta, late)
+	lateRecs, rerr := ReadAll(op, id, t.meta, late)
+	if fresh := reported.unreported(lateRecs); rerr == nil && req.Vet != nil && len(fresh) > 0 {
+		if verr := req.Vet(fresh); verr != nil {
+			return res, fmt.Errorf("lyricblock: work item %d is blocked but a new or changed file was not vetted and nothing was removed; mark it by hand: %w", id, verr)
+		}
+	}
 	if rerr == nil {
 		rerr = ReportAll(req.Report, lateRecs, reported)
 	}
@@ -203,7 +266,7 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 		var more MarkResult
 		err = dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
 			var terr error
-			more, terr = s.block(ctx, id, t, extra, false)
+			more, terr = s.block(ctx, id, t, extra, false, false)
 			return terr
 		})
 		if err != nil {
@@ -225,8 +288,10 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 
 // block is Mark's first transaction: the blocks and the cache invalidation
 // commit together. With clear it first clears the row's edit marks, guarded so
-// the row it changes is the row it judged (not in flight, not hand-marked).
-func (s *Service) block(ctx context.Context, id int64, t target, fps []string, clear bool) (MarkResult, error) {
+// the row it changes is the row it judged (not in flight, not hand-marked, and
+// with refuseEdited not hand-edited either: that row keeps its marks and the
+// transaction rolls back with ErrHandEdited).
+func (s *Service) block(ctx context.Context, id int64, t target, fps []string, clear, refuseEdited bool) (MarkResult, error) {
 	var res MarkResult
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -234,7 +299,11 @@ func (s *Service) block(ctx context.Context, id int64, t target, fps []string, c
 	}
 	defer func() { _ = tx.Rollback() }()
 	if clear {
-		if err := guardedUpdate(ctx, tx, id, clearEditMarks); err != nil {
+		q := clearEditMarks
+		if refuseEdited {
+			q += andUnedited
+		}
+		if err := guardedUpdate(ctx, tx, id, q); err != nil {
 			return res, err
 		}
 	}
@@ -297,6 +366,7 @@ func (s *Service) reopen(ctx context.Context, id int64, res *MarkResult) error {
 // hand-marked.
 const (
 	guard          = ` WHERE id = ? AND status <> 'processing' AND manual_instrumental_at IS NULL`
+	andUnedited    = ` AND lyric_edited_at IS NULL`
 	clearEditMarks = `UPDATE work_queue SET lyric_offset_ms = NULL, lyric_edited_at = NULL, sync_tier = NULL` + guard
 	// clearSettledState is the word/upgrade state of the removed file plus the
 	// stamp columns purge-provenance also resets.
@@ -319,14 +389,17 @@ func guardedUpdate(ctx context.Context, tx *sql.Tx, id int64, query string) erro
 	if n > 0 {
 		return nil
 	}
-	var manual bool
-	switch qerr := tx.QueryRowContext(ctx, `SELECT manual_instrumental_at IS NOT NULL FROM work_queue WHERE id = ?`, id).Scan(&manual); {
+	// Neither hand-marked nor in flight leaves only the andUnedited clause.
+	var manual, busy, edited bool
+	switch qerr := tx.QueryRowContext(ctx, `SELECT manual_instrumental_at IS NOT NULL, status = 'processing', lyric_edited_at IS NOT NULL FROM work_queue WHERE id = ?`, id).Scan(&manual, &busy, &edited); {
 	case errors.Is(qerr, sql.ErrNoRows):
 		return ErrNotFound
 	case qerr != nil:
 		return fmt.Errorf("lyricblock: re-read work item %d: %w", id, qerr)
 	case manual:
 		return ErrManualInstrumental
+	case edited && !busy:
+		return ErrHandEdited
 	}
 	return ErrBusy
 }
@@ -355,9 +428,9 @@ func (s *Service) load(ctx context.Context, id int64) (target, error) {
 	var offset sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT artist, title, artist_key, title_key, status, COALESCE(provider_lane, ''), COALESCE(upstream, ''), outdir, filename, output_paths,
-                manual_instrumental_at, lyric_edited_at, lyric_offset_ms, sync_tier, outcome_type
+                manual_instrumental_at, lyric_edited_at, lyric_offset_ms, sync_tier, outcome_type, album_artist
            FROM work_queue WHERE id = ?`, id).
-		Scan(&t.artist, &t.title, &t.key[0], &t.key[1], &t.status, &t.lane, &t.upstream, &outdir, &filename, &outputPaths, &markedAt, &editedAt, &offset, &tier, &outcome)
+		Scan(&t.artist, &t.title, &t.key[0], &t.key[1], &t.status, &t.lane, &t.upstream, &outdir, &filename, &outputPaths, &markedAt, &editedAt, &offset, &tier, &outcome, &t.albumArtist)
 	if errors.Is(err, sql.ErrNoRows) {
 		return target{}, fmt.Errorf("work item %d: %w", id, ErrNotFound)
 	}
@@ -365,6 +438,7 @@ func (s *Service) load(ctx context.Context, id int64) (target, error) {
 		return target{}, fmt.Errorf("lyricblock: load work item %d: %w", id, err)
 	}
 	t.manual = markedAt.Valid
+	t.edited = editedAt.Valid
 	t.recordsFile = outcome.String == "synced" || outcome.String == "unsynced"
 	t.meta = map[string]string{}
 	if editedAt.Valid {
@@ -386,6 +460,12 @@ func (s *Service) load(ctx context.Context, id int64) (target, error) {
 	}
 	t.cacheKeys = [][2]string{{t.artist, t.title}}
 	seen := map[[2]string]bool{{normalize.NormalizeKey(t.artist), normalize.NormalizeKey(t.title)}: true}
+	// The worker reads and stores the cache under the resolved artist, which is
+	// the album artist when that is a real name.
+	if ra := normalize.ResolveArtist(t.albumArtist, t.artist); !seen[[2]string{normalize.NormalizeKey(ra), normalize.NormalizeKey(t.title)}] {
+		seen[[2]string{normalize.NormalizeKey(ra), normalize.NormalizeKey(t.title)}] = true
+		t.cacheKeys = append(t.cacheKeys, [2]string{ra, t.title})
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT sr.artist, sr.title FROM scan_results sr
            JOIN work_queue_scan_results j ON j.scan_result_id = sr.id WHERE j.work_queue_id = ? ORDER BY sr.id`, id)
@@ -430,6 +510,10 @@ func Refusal(err error, res MarkResult) string {
 		return "marked instrumental by hand"
 	case errors.Is(err, ErrNotMarkable):
 		return "failed or unavailable"
+	case errors.Is(err, ErrHandEdited):
+		return "lyric edited by hand"
+	case errors.Is(err, ErrStemOccupied):
+		return "another file occupies the lyric stem"
 	}
 	return ""
 }
