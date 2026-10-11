@@ -5,8 +5,86 @@ find) by listening to the audio, so it writes an instrumental marker instead of
 re-querying providers forever for lyrics that do not exist. This page is the
 single reference for how that works, how to deploy it, and how to tune it.
 
-It is **disabled by default**. Nothing in this page applies unless you set
-`enabled = true` and a `classifier_url` under `[instrumental_detector]`.
+It is **disabled by default**. Nothing in this page applies unless
+a `classifier_url` is set under `[instrumental_detector]` and detection is enabled
+globally (`enabled = true`) or for a library.
+
+## What the detector is for
+
+The detector covers a blind spot in the provider catalog. It does not compete
+with provider lyrics: by default it is consulted only after every provider has
+missed.
+
+A provider row that reports no lyrics, no subtitles, and `Instrumental = 0` is an
+**unannotated catalog entry**. It does *not* assert that the track has vocals. It
+only says the provider never filled in that row. For game soundtracks, classical,
+and similar collections, most of the catalog is in exactly that state. The
+detector listens to the audio and settles those tracks, so Canticle stops asking
+providers about lyrics that do not exist. Where a provider does return lyrics, the
+detector does not run under the default ordering (see "Only on provider misses"
+below). The opt-in `ordering = "front"` consults the detector first and skips the
+providers when it is confident.
+
+### Where it earns its keep
+
+The figures below are from one live deployment of about 47,500 tracks. They show
+the shape of the benefit, not a guarantee for your library.
+
+| Library | Detector instrumental rate | Provider lyric coverage |
+|---|---|---|
+| VGM | 62.5% | 2.1% |
+| Classical | 58.5% | 2.3% |
+| Music | 21.4% | 82.9% |
+| Kids Music | 4.2% | 91.9% |
+
+In game-soundtrack and classical collections the provider resolves about 2% of
+tracks and the detector resolves about 60%, so the detector does nearly all the
+useful work. In a general pop library the provider resolves about 83% and the
+detector is a modest supplement.
+
+**Which number to quote.** The detector rates above are measured over rows where
+detection actually ran. That is the honest denominator. The final outcome
+distribution per library looks far more instrumental-heavy (about 98%), but that
+is a selection artifact: a row settles as instrumental exactly when the detector
+says so, and stays deferred when it does not. Quote the roughly 60%, not the 98%.
+
+**When to enable it.** Turn it on for instrumental-heavy collections (soundtracks,
+classical, ambient, library music), where providers have little to offer. It is
+marginal for mainstream vocal libraries, where providers already cover most
+tracks and each detector check costs an ffmpeg sample plus an inference call. You
+can enable it per library (see the User Guide) instead of globally.
+
+### The three gates, in operator terms
+
+A track is marked instrumental only if all three checks pass. If any one fails,
+the track stays a normal miss.
+
+1. **Music:** the track is music throughout (averaged over the whole sample).
+2. **No singing:** no sung vocal appears anywhere, even briefly (the loudest
+   moment counts, not the average).
+3. **No sustained speech:** spoken word does not run through the track (averaged,
+   so a brief announcer or crowd sample is tolerated).
+
+Thresholds and the reasoning for mean versus max are in "The decision model"
+below.
+
+### What you need to deploy
+
+The detector needs the YAMNet classifier sidecar, which you build and run
+yourself (see "Sidecar setup"), plus `ffmpeg` (and `ffprobe`, for spread
+sampling; see "ffmpeg and ffprobe are both required" below). Instrumental
+detection requires `providers.mode = "ordered"`; under parallel dispatch the
+detector is inactive and a warning is logged. (`ordering = "front"` with
+`providers.mode = "parallel"` is rejected at config load.) With no
+`classifier_url` set, no detector is built and Canticle behaves as if the feature
+did not exist: providers only.
+
+If the sidecar is configured but unreachable, Canticle never writes a marker
+without it, so nothing is mislabeled. Until the first successful call after boot,
+a refused connection is treated as the sidecar still starting: the item is
+released with no penalty and retried. After 5 consecutive refused connections
+with no success since boot, or if a sidecar that was up goes away, the detector
+lane counts as an outage and its circuit breaker trips. Provider lookups carry on throughout.
 
 ## What it does and when it runs
 
@@ -18,9 +96,10 @@ instrumental marker (`.txt`) for that track.
 
 Two rules bound when it can act:
 
-- **Only on provider misses.** The detector runs *after* every lyrics provider
-  has come back empty. If a provider returns lyrics, the track is never
-  classified - the audio model never overrides provider-supplied data.
+- **Only on provider misses.** By default (`ordering = "demoted"`), the detector
+  runs *after* every lyrics provider has come back empty. If a provider returns
+  lyrics, the track is never classified - the audio model never overrides
+  provider-supplied data.
 - **Never destructive.** It only writes a marker where there would otherwise be a
   miss. A marker is not a final state: `--upgrade` re-checks every instrumental
   marker, provider- or detector-written alike, and a result at least as good as
