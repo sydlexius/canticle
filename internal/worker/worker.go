@@ -2508,14 +2508,16 @@ func (w *Worker) completeDetectorInstrumental(ctx context.Context, item queue.Wo
 	// old ordering stamped it between the required stamps and Complete; that gap
 	// no longer exists.
 	//
-	// This path records the WRITER VERSION ONLY. A detector settle resolves no
-	// identifiers (there is no provider result), and it never carries a fetch
-	// time: song.FetchedAt is assigned inside the !cacheHit block further down
-	// runOne, which this branch has already returned before reaching. So
-	// fetched_at stays NULL here, and a detector row is indistinguishable from a
-	// legacy (pre-#1207) cache hit on that column alone -- use provider_lane / instrumental_result
-	// to tell them apart. The detector's own timing lives in completed_at and the
-	// detector telemetry, so nothing is lost by not inventing one here.
+	// This path records the WRITER VERSION plus whatever ISRC/MBID the incoming
+	// track already held (the detector lane carries them, #530). A detector
+	// settle resolves no identifiers of its own (there is no provider result),
+	// and it never carries a fetch time: song.FetchedAt is assigned inside the
+	// !cacheHit block further down runOne, which this branch has already
+	// returned before reaching. So fetched_at stays NULL here, and a detector row
+	// is indistinguishable from a legacy (pre-#1207) cache hit on that column
+	// alone -- use provider_lane / instrumental_result to tell them apart. The
+	// detector's own timing lives in completed_at and the detector telemetry, so
+	// nothing is lost by not inventing one here.
 	w.stampCompletionProvenance(ctxNoCancel, item.ID, song)
 	w.clearWordTiming(ctxNoCancel, item)
 	w.clearSyncTier(ctxNoCancel, item)

@@ -3138,9 +3138,10 @@ func TestRunOnceDetectorInstrumentalStampsOutcomeType(t *testing.T) {
 // path only.
 //
 // It also pins what that path can and cannot record: a detector settle resolves
-// no identifiers and never reaches the FetchedAt assignment (that lives in the
-// !cacheHit block, which this branch returns before), so writer_version is the
-// only field it carries. Asserting the zero FetchedAt keeps the code comment
+// no identifiers of its own (it carries only what the incoming track already
+// held, see TestRunOnceDetectorInstrumentalCarriesRecordingIdentity) and never
+// reaches the FetchedAt assignment (that lives in the !cacheHit block, which
+// this branch returns before), so writer_version is the only field it carries. Asserting the zero FetchedAt keeps the code comment
 // honest -- an earlier version of it claimed a fetch time was recorded here.
 func TestRunOnceDetectorInstrumentalStampsProvenance(t *testing.T) {
 	track := models.Track{ArtistName: "Composer", TrackName: "Silent Piece"}
@@ -3177,7 +3178,7 @@ func TestRunOnceDetectorInstrumentalStampsProvenance(t *testing.T) {
 		t.Errorf("FetchedAt = %v; want zero -- the detector path never reaches the FetchedAt assignment", prov.FetchedAt)
 	}
 	if prov.ISRC != "" || prov.MBID != "" {
-		t.Errorf("identifiers = (%q, %q); want both empty -- a detector settle resolves none", prov.ISRC, prov.MBID)
+		t.Errorf("identifiers = (%q, %q); want both empty -- this item carried none and a detector settle resolves none of its own", prov.ISRC, prov.MBID)
 	}
 }
 

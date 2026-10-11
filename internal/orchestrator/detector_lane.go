@@ -112,20 +112,31 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker, pacer provid
 			if !res.Instrumental {
 				return models.Song{}, ErrLaneBenignMiss
 			}
-			// Only these identity fields are carried, deliberately: this mirrors the
-			// inline miss-branch path in the worker that this lane replaces, so the
-			// settled song is byte-identical to today's. Note it therefore also
-			// inherits that path's limitation of dropping the remaining
-			// models.Track fields (AlbumArtist, TrackLength, HasLyrics,
-			// HasSubtitles, ISRC, SpotifyID, RecordingMBID). Widening this to copy
-			// the incoming track is a behavior change, tracked separately, not a
-			// silent tweak to make here.
+			// Carried: the recording-identity subset (AlbumArtist, TrackLength, ISRC,
+			// RecordingMBID) beside the name fields, so the settled song describes the
+			// same recording a provider settle would (#530). Its live consumer is the
+			// worker's completion-provenance stamp (work_queue.isrc/mbid), which prune
+			// also reads as the fallback identity of a gone row whose scan result has
+			// none; the instrumental marker writes no identity tags for any lane, so
+			// the file bytes are unchanged. TrackLength is the audio file's duration
+			// when the worker's tag refresh ran, otherwise zero, and DecidePromotion
+			// never judges an instrumental, so it cannot reach the timing guard.
+			//
+			// Deliberately NOT carried: HasLyrics and HasSubtitles describe a
+			// PROVIDER's catalog row (a detector verdict has no catalog) and nothing
+			// outside the providers reads them; SpotifyID is never populated on the
+			// queue path (CLI probe only). Copying all of Track would pass those
+			// along as meaningless provider-shaped claims.
 			return models.Song{
 				Track: models.Track{
-					ArtistName:   track.ArtistName,
-					TrackName:    track.TrackName,
-					AlbumName:    track.AlbumName,
-					Instrumental: 1,
+					ArtistName:    track.ArtistName,
+					TrackName:     track.TrackName,
+					AlbumName:     track.AlbumName,
+					AlbumArtist:   track.AlbumArtist,
+					TrackLength:   track.TrackLength,
+					ISRC:          track.ISRC,
+					RecordingMBID: track.RecordingMBID,
+					Instrumental:  1,
 				},
 				DetectorVersion:    res.Version,
 				DetectorMusicSum:   res.Confidence,

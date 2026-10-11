@@ -407,3 +407,40 @@ func TestNewLaneOutageWithNilCause(t *testing.T) {
 		t.Errorf("a nil-cause outage rendered empty; an empty reason reads as 'no error recorded'")
 	}
 }
+
+// TestDetectorLane_SettledSongCarriesRecordingIdentity pins the #530 decision:
+// the recording-identity subset survives a gate-positive settle, while the
+// provider-catalog flags and SpotifyID are deliberately left behind.
+func TestDetectorLane_SettledSongCarriesRecordingIdentity(t *testing.T) {
+	d := &stubDetector{res: detector.Result{Instrumental: true, Version: "1.5.0"}}
+	lane := NewDetectorLane(d, circuit.New(time.Minute, time.Hour), nil)
+	in := models.Track{
+		ArtistName:    "Fennel Quartet",
+		TrackName:     "Slow Lantern",
+		AlbumName:     "Quiet Rooms",
+		AlbumArtist:   "Various Fennel",
+		TrackLength:   241,
+		ISRC:          "ZZXXX2600001",
+		RecordingMBID: "00000000-0000-4000-8000-000000000530",
+		HasLyrics:     1,
+		HasSubtitles:  1,
+		SpotifyID:     "invented-spotify-id",
+	}
+	song, err := lane.FindLyrics(context.Background(), in, "/music/slow-lantern.flac")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	want := models.Track{
+		ArtistName:    in.ArtistName,
+		TrackName:     in.TrackName,
+		AlbumName:     in.AlbumName,
+		AlbumArtist:   in.AlbumArtist,
+		TrackLength:   in.TrackLength,
+		ISRC:          in.ISRC,
+		RecordingMBID: in.RecordingMBID,
+		Instrumental:  1,
+	}
+	if song.Track != want {
+		t.Fatalf("settled track = %+v\nwant %+v (HasLyrics/HasSubtitles/SpotifyID must stay zero)", song.Track, want)
+	}
+}
