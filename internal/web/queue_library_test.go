@@ -241,11 +241,16 @@ func setLanes(t *testing.T, db *sql.DB) {
 		{"Done 006", "2026-01-06T00:00:00Z", "2026-01-06T00:00:00Z"},
 		{"Done 007", "2026-01-07T00:00:00Z", "2026-01-07T00:00:00Z"},
 	})
-	for title, lane := range map[string]string{"Done 001": "musixmatch", "Done 002": "petitlyrics", "Done 003": "innertube",
-		"Done 004": "musixmatch", "Done 006": "Musixmatch", "Done 007": "detector"} {
-		if _, err := db.ExecContext(context.Background(), `UPDATE work_queue SET provider_lane = ? WHERE title = ?`, lane, title); err != nil {
-			t.Fatal(err)
-		}
+	// One statement, not a loop: the update_work_queue_updated_at trigger stamps
+	// updated_at at one-second resolution, and SQLite fixes "now" per statement, so
+	// every lane-stamped row gets the SAME updated_at. A loop (worse, a map-ordered
+	// one) can straddle a second boundary and reorder the default updated_at DESC
+	// sort, whose tie-break is id DESC (#1463).
+	if _, err := db.ExecContext(context.Background(), `UPDATE work_queue SET provider_lane = CASE title
+		WHEN 'Done 001' THEN 'musixmatch' WHEN 'Done 002' THEN 'petitlyrics' WHEN 'Done 003' THEN 'innertube'
+		WHEN 'Done 004' THEN 'musixmatch' WHEN 'Done 006' THEN 'Musixmatch' WHEN 'Done 007' THEN 'detector' END
+		WHERE title IN ('Done 001', 'Done 002', 'Done 003', 'Done 004', 'Done 006', 'Done 007')`); err != nil {
+		t.Fatal(err)
 	}
 }
 
