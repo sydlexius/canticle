@@ -157,7 +157,7 @@ func TestScheduler_BlockedCacheEntryReadsAsMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, cacheRepo, nil, "", 0)
+	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, cacheRepo, nil, "", 0, nil)
 	if err := s.OnScanComplete(ctx, models.Library{ID: lib.ID}, nil, lib.Path, scan.TriggerScheduler); err != nil {
 		t.Fatal(err)
 	}

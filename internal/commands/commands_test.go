@@ -829,7 +829,7 @@ func TestSchedulerBuildsScanEnqueuer(t *testing.T) {
 		t.Fatalf("Upsert scan result: %v", err)
 	}
 
-	got := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 7}, nil, false, nil, nil, "", 0)
+	got := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 7}, nil, false, nil, nil, "", 0, nil)
 	if got.OnScanComplete == nil {
 		t.Fatal("scheduler OnScanComplete = nil; want enqueue callback")
 	}
@@ -3026,7 +3026,7 @@ func TestSchedulerStampsProvidersVersionOnItsQueue(t *testing.T) {
 	}
 
 	const gen = 42
-	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", gen)
+	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", gen, nil)
 	if err := s.OnScanComplete(ctx, models.Library{ID: lib.ID}, nil, lib.Path, scan.TriggerScheduler); err != nil {
 		t.Fatalf("OnScanComplete: %v", err)
 	}
@@ -3101,7 +3101,7 @@ func TestSchedulerOnScanCompleteRepairsQueueDivergence(t *testing.T) {
 		t.Fatalf("corrective upsert: %v", err)
 	}
 
-	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", 0)
+	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", 0, nil)
 	if err := s.OnScanComplete(ctx, models.Library{ID: lib.ID}, nil, lib.Path, scan.TriggerScheduler); err != nil {
 		t.Fatalf("OnScanComplete: %v", err)
 	}
@@ -3193,7 +3193,7 @@ func TestSchedulerOnScanCompleteWatcherTriggerScopesDivergenceToSubtree(t *testi
 		t.Fatalf("corrective upsert B: %v", err)
 	}
 
-	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", 0)
+	s := scheduler(sqlDB, scanner.ScanOptions{}, nil, false, nil, nil, "", 0, nil)
 	if err := s.OnScanComplete(ctx, models.Library{ID: lib.ID}, nil, "/music/artistA", scan.TriggerWatcher); err != nil {
 		t.Fatalf("OnScanComplete: %v", err)
 	}

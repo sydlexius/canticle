@@ -37,6 +37,7 @@ import (
 	"github.com/sydlexius/canticle/internal/identityrepair"
 	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/instrumentalmark"
+	"github.com/sydlexius/canticle/internal/instrumentaltitle"
 	"github.com/sydlexius/canticle/internal/langguard"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/logging"
@@ -2442,7 +2443,7 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion, strongTitlePredicate(cfg))
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
@@ -2658,7 +2659,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion)
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion, strongTitlePredicate(cfg))
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(cfg.Realign.IdentityKeys)
@@ -2891,7 +2892,7 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		// providersVersion 0: a one-shot `scan` constructs no provider set, so it
 		// has no generation to compare a stored verdict against. Zero never
 		// suppresses, so the CLI keeps its pre-#679 behavior exactly.
-	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup, 0)
+	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup, 0, strongTitlePredicate(cfg))
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	if len(args.Libraries) > 0 {
@@ -2970,11 +2971,25 @@ func resolveDetectOverride(detect, noDetect bool) (*bool, error) {
 	return resolveFlagOverride(detect, noDetect, "--detect-instrumental and --no-detect-instrumental")
 }
 
+// strongTitlePredicate is the scan enqueuer's instrumental-title predicate
+// (#1469): true for a track whose title classifies Strong. It is nil under
+// instrumental_title.mode=off so the enqueuer behaves exactly as before. The
+// mode is read once at startup, like the other config-derived seams here, so a
+// change to it takes effect on restart.
+func strongTitlePredicate(cfg config.Config) func(models.Track) bool {
+	if cfg.InstrumentalTitleMode() == config.InstrumentalTitleOff {
+		return nil
+	}
+	return func(t models.Track) bool {
+		return instrumentaltitle.Classify(t.TrackName, t.AlbumName).Tier == instrumentaltitle.Strong
+	}
+}
+
 // scheduler builds the scan scheduler. cacheRepo is the cache used to skip
 // already-cached tracks at enqueue time; pass the worker's shared repo in serve
 // mode so the /metrics hit-rate covers scheduler lookups too (#308),
 // or nil for a one-shot scan (a fresh, uncounted repo is created).
-func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo, realigner *realign.Realigner, realignBackupPath string, providersVersion int) scan.Scheduler {
+func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo, realigner *realign.Realigner, realignBackupPath string, providersVersion int, titleInstrumental func(models.Track) bool) scan.Scheduler {
 	results := scan.New(sqlDB)
 	if cacheRepo == nil {
 		cacheRepo = cache.New(sqlDB)
@@ -3016,6 +3031,8 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 		// A blocked cache entry reads as a miss at scan time (#1394). Wired here,
 		// where the scheduler already holds the database; fetch mode has none.
 		Blocks: lyricblock.NewStore(sqlDB, nil),
+		// Nil under instrumental_title.mode=off; see strongTitlePredicate (#1469).
+		TitleInstrumental: titleInstrumental,
 	}
 	return scan.Scheduler{
 		Libraries: library.New(sqlDB),
