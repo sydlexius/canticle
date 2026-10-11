@@ -88,6 +88,7 @@ nav:
   - LRC Normalization: lrc-normalization.md
   - Developer Guide:
       - Overview: DEVELOPER.md
+      - Architecture: ARCHITECTURE.md
       - Multilingual Output Policy: multilingual-output-policy.md
       - Multi-Provider Orchestration: multi-provider-orchestration.md
       - Provider Attribution: provider-attribution.md

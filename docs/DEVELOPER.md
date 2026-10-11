@@ -12,7 +12,7 @@ The entrypoint lives in `cmd/mxlrcgo-svc`, so `go run .` does not work. Use:
 go run ./cmd/mxlrcgo-svc [args]
 ```
 
-`make help` lists every target.
+`make help` lists every target. A single test: `go test -run TestFoo ./internal/<pkg>` (tests live next to the code they cover under `internal/`).
 
 ### Web UI assets
 
@@ -42,12 +42,14 @@ Wire the tracked git hooks once (this sets `core.hooksPath=.githooks`, a relativ
 
 ```sh
 make hooks      # enable the pre-commit + pre-push hooks
-make doctor     # verify the hooks are wired and tool-version pins agree
+make doctor     # verify the hooks are wired and tool-version pins agree (or run scripts/check-hooks.sh)
 ```
 
-`make gate` runs the full local gate: conflict markers, commit signatures, product name, gofmt, web asset generation, build, non-race tests of the changed packages, patch coverage, golangci-lint, actionlint, the PR-trigger scope check, the test-shard split check, and govulncheck. The race suite, coverage floor and codecov dry-run are CI-authoritative and run locally only under `RUN_RACE=1 make gate` (full `go test -race ./...`). `/prep-pr` runs this same chain through `.gates.toml` and records a gate receipt. Run it on demand before a PR. The git hooks do not run all of it.
+`make gate` (`scripts/pre-push-gate.sh`) runs the full local gate behind a per-worktree run-lock: conflict markers, commit signatures, product name, gofmt, web asset generation, build, non-race tests of the changed packages, patch coverage (skipped if the estimator is absent), golangci-lint, actionlint, the PR-trigger scope check, the test-shard split check, and govulncheck. The race suite, coverage floor and codecov dry-run are CI-authoritative and run locally only under `RUN_RACE=1 make gate` (full `go test -race ./...`; the local coverage floor and codecov dry-run both need its whole-module profile, so they are skipped otherwise and the CI Coverage Floor / Upload Coverage jobs own them). `/prep-pr` runs this same chain through `.gates.toml`, and gate-runner writes a `gate-receipt/v1` to `<git-dir>/prep-pr-receipt.json`. Run it on demand before a PR. The git hooks do not run all of it.
 
-`.githooks/pre-push` is the fast push path:
+`.githooks/pre-commit` runs conflict markers, typos, product name, gofmt, build, golangci-lint and govulncheck on staged content.
+
+`.githooks/pre-push` is the fast push path; it does NOT re-run the full gate:
 
 0. **Commit signatures.** `scripts/check-commit-signatures.sh --refs` runs first, over the commits each pushed ref would send, and refuses any commit with no `gpgsig` header (main requires signed commits). It runs before receipt reuse and the `PUSH_GATE=full` override (the full gate re-checks only base..HEAD, and `make gate` runs that check in full mode only) because the receipt is keyed on the tree, which an unsigned re-created commit (`git commit-tree`) keeps.
 1. **Receipt reuse.** If `$(git rev-parse --git-dir)/prep-pr-receipt.json` is a passing `gate-receipt/v1`, its `tree_sha` matches the tree of every ref being pushed, and the working tree is clean, the hook prints one PASS line and exits (`scripts/check-push-receipt.sh`). Anything else (missing, malformed, failing or stale receipt, or a dirty tree) falls through to step 2. A push that only deletes refs needs no gate.
@@ -89,10 +91,20 @@ make test                # race tests
 make test-shuffle        # race tests with randomized order (-shuffle=on)
 make test-cover          # coverage profile + HTML report
 make coverage-floor      # enforce the per-package coverage floor
-make vulncheck           # govulncheck (pinned)
+make vulncheck           # govulncheck (pinned: govulncheck@v1.1.4)
 make scan                # build the Docker image and scan it for HIGH+ CVEs (needs Docker + grype at the ci.yml pin)
-make sync-tool-versions  # assert the golangci-lint and grype pins match across CI and local
+make sync-tool-versions  # assert the golangci-lint and grype pins match across CI and local (scripts/check-tool-versions.sh)
 ```
+
+### Linter configuration and version policy
+
+The linter config is `.golangci.yml`. Every `//nolint:linter` directive carries a `// reason:` comment. This is **enforced** by `nolintlint` (`require-explanation: true`), not just a convention, so a directive without the token fails the pre-commit hook, `make gate`, and CI alike. Pre-existing packages are excluded by path while their backlog is backfilled; each backfill PR deletes its own exclusion line, and the block disappears when the last one lands. Do not add a path there to silence a new finding. Keep the golangci-lint pin aligned across `ci.yml` and `.pre-commit-config.yaml` (`make sync-tool-versions` enforces it).
+
+**golangci-lint version policy.** The version pinned in CI (`ci.yml`) is the source of truth. `make sync-tool-versions` only aligns the config-file pins; it does not pin the binary you have installed locally, so `make gate` / the pre-commit hook can pass locally on a different golangci-lint version while CI flags issues your version does not (and vice versa). The `gosec` taint analyzers (e.g. `G704` SSRF on `httpClient.Do`) are especially prone to version-specific phantom findings that do not reproduce locally. When CI flags one of these, treat CI's version as authoritative and do not chase local reproduction, but read the finding first: trace the source-to-sink path and check what constrains the URL. Add a per-site `//nolint:gosec // reason` (the reason is required, and states why the path is safe) only after confirming a false positive; local non-reproduction alone is not a reason. A real finding gets fixed. Bumping the CI pin needs a probe PR: run against a clean cache and confirm no analyzer-regression findings before merging.
+
+### CI workflows and releases
+
+CI workflows live in `.github/workflows/`: `ci.yml` (including an image CVE `scan` job), `release.yml`, `nightly.yml` and `codeql.yml` are the main ones. Releases: `git tag vX.Y.Z && git push --tags` triggers GoReleaser.
 
 ### Live serve smoke (manual)
 
@@ -192,9 +204,34 @@ CI publishes the site to GitHub Pages via `.github/workflows/pages.yml`. The bui
 - Web UI track tables list the identity columns in the order Artist, Album, Title; the album is the library file's own, shown as a dash when empty (`templates.AlbumText`).
 - Formatting, naming, and file layout are enforced by `gofmt` and `.golangci.yml` -- follow the linter.
 
-See `CLAUDE.md` (the "Architecture" orientation and "Package catalog" sections) for a deeper reference on the package surface, architecture, and data flow.
+See [Architecture](ARCHITECTURE.md) for the project overview, the architecture orientation and the one-line-per-package catalog.
+
+## CLI usage and input modes
+
+See the [CLI Reference](CLI_REFERENCE.md) and the repository `README.md` for flags and examples. Two behaviors worth flagging when working on the fetch path:
+
+- Directory mode overrides `--outdir`: it writes the output next to the audio file. The extension depends on the lyric type: `.lrc` when synced lyrics are found, `.txt` when only unsynced lyrics or an instrumental marker is written.
+- `--upgrade` re-fetches songs that previously got `.txt` (unsynced lyrics or an instrumental marker, any provenance) to promote them when better lyrics become available, at a lookup per `.txt` per run (a provider request or more on a cache miss).
+
+## Database conventions
+
+For stateful features:
+
+- Pure-Go SQLite via `modernc.org/sqlite`, with no CGO (CGO breaks cross-compilation).
+- WAL mode; goose-managed migrations in `internal/db/migrations/`.
+- Repository pattern over interfaces (see `internal/cache/`) so storage stays swappable.
+- Integration tests use real SQLite (in-memory `file::memory:?cache=shared` or a temp file), not mocks.
 
 ## Design decisions
 
 - [Multilingual lyric output policy](multilingual-output-policy.md) - how the writer handles songs with an original and a translation: a single bilingual `.lrc` where the original and translation lines share one timestamp. Several code comments under `internal/` reference this policy.
 - [Multi-provider orchestration](multi-provider-orchestration.md) - how multiple lyrics-provider lanes run together: ordered fallback by default (parallel race opt-in), per-lane circuit breakers, a single-writer dedup guarantee via the `queue.Complete` CAS, and the cross-lane error precedence that backs off rather than recording a false miss.
+
+## Reading PR comments with raw `gh`
+
+If you fall back to raw `gh`: the `!` character triggers bash history expansion even inside double quotes, which breaks `--jq` filters using `!=`. Always use `select(.field == "value" | not)`:
+
+```bash
+gh api "repos/{owner}/{repo}/pulls/{number}/comments" --paginate \
+  --jq '[.[] | select(.user.login == "some-bot" | not) | {id, user: .user.login, body}]'
+```

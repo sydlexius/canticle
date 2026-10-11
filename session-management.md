@@ -2,8 +2,19 @@
 
 The working log for this repo: problems, methods, fixes and measurements, newest first.
 Read it on resume, after the gitignored `SESSION-STATE.md` (which holds transient checkpoint state).
-Durable rules and the one-line-per-package catalog live in `CLAUDE.md`; this file holds the point-in-time detail behind them.
+Durable rules live in the root `CLAUDE.md` and the nested `internal/<pkg>/CLAUDE.md` files, and the one-line-per-package catalog lives in `docs/ARCHITECTURE.md`; this file holds the point-in-time detail behind them.
 Add a dated `##` section at the top for new material. Do not edit history except to correct it.
+
+## 2026-10-11 - root CLAUDE.md slimmed to principles and pitfalls (#1491)
+
+The root `CLAUDE.md` was 26,684 bytes and is loaded into every session and every spawned agent. The maintainer's direction: it holds repo-specific principles and pitfalls, mostly generic, and no architecture documentation. It is now under 6 KB. Nothing was deleted; each part moved as follows, and unlike the two earlier trims the moved text is not repeated here because it survives in the named destination.
+
+- Project overview, the one-paragraph architecture orientation and the package catalog (one line per package, purpose only) moved to `docs/ARCHITECTURE.md`, registered in `properdocs.yml` and `docs/index.md`. The catalog edit rule moved with it.
+- The "Quality gating and CI" section (gate chain, hook mechanics, receipt fast path, make targets, linter config and version policy, workflow list, release trigger), the CLI usage notes and the database conventions moved to `docs/DEVELOPER.md`, merged into its existing sections; only clauses it did not already carry were added.
+- Per-package invariants that rode on catalog lines moved to nested `CLAUDE.md` files, loaded only when working in that directory: `internal/timing`, `internal/config`, `internal/lyrics`, `internal/queue`, `internal/prune`, `internal/commands`, `internal/selfwrite`, `internal/web`, `internal/orchestrator`.
+- Catalog invariants already stated in a comment at the code site were not copied; the code comment is the surviving copy: `innertube` client strings and pacing floor (`calls.go`, `pacer.go`), `orchestrator` dispatch rule (`suitability.go`, `orchestrator.go`), `cache.Invalidate` (`cache.go`), `audiodur` and `revalidate` fail-open (`audiodur.go`, `revalidate.go` package doc), `worker` word recheck (`word_recheck.go`), `reports` predicate (`bucket.go`), `purgeprovenance` ordering (`purgeprovenance.go`), `instrumentalmark` backup (`mark.go`, `record.go`), `identityrepair` write-ahead (`identityrepair.go`), `lyricblock` (`store.go`, migration 069), `web` FLAC fallback (`flacfallback.go`).
+- The raw-`gh` history-expansion gotcha and the single-test command moved to `docs/DEVELOPER.md`.
+- Stayed in the root file: the two resume pointers, the memory-MCP section (tightened), "what to work on next", the non-obvious build facts, the principles and pitfalls list, and a "Where things are" block that forbids adding architecture or per-package detail back.
 
 ## 2026-10-07 - further detail moved out of the CLAUDE.md package catalog
 
