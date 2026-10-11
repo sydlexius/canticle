@@ -12,7 +12,7 @@
 # MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE,
 # MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING,
 # MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED,
-# MXLRC_TIMING_VALIDATION_ON_CATEGORICAL,
+# MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_INSTRUMENTAL_TITLE_MODE,
 # MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL,
 # MXLRC_VERIFICATION_FFMPEG_PATH,
 # MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_MIN_CONFIDENCE,
@@ -715,6 +715,21 @@ on_mis_synced = "demote"
 #   off        - judge and record it, change nothing on disk
 # Env: MXLRC_TIMING_VALIDATION_ON_CATEGORICAL.
 on_categorical = "quarantine"
+
+[instrumental_title]
+# RESERVED: this key has no effect until the title rule ships in the same
+# release series. Off by default; serve mode only; never replaces a lyric file
+# already on disk. Bulk undo: `scan purge-provenance --source title-rule`.
+#   off         - the track title is ignored (the default; today's behavior)
+#   strong      - a title with a strong instrumental qualifier (a bracketed or
+#                 dash-suffixed "Instrumental" or "Off Vocal") is
+#                 settled with an instrumental marker without asking a lyric
+#                 provider
+#   strong_weak - additionally honors weaker title or album signals, only
+#                 when the audio detector agrees
+# An unrecognized value resets to "off".
+# Env: MXLRC_INSTRUMENTAL_TITLE_MODE.
+mode = "off"
 
 [word_sync_recheck]
 # Serve-mode word-timing re-check sweep: keeps queuing newly settled

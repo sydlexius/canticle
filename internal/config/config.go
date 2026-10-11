@@ -30,6 +30,7 @@ type Config struct {
 	Enrichment           EnrichmentConfig           `toml:"enrichment"`
 	Realign              RealignConfig              `toml:"realign"`
 	TimingValidation     TimingValidationConfig     `toml:"timing_validation"`
+	InstrumentalTitle    InstrumentalTitleConfig    `toml:"instrumental_title"`
 	WordSyncRecheck      WordSyncRecheckConfig      `toml:"word_sync_recheck"`
 	UpgradeSweep         UpgradeSweepConfig         `toml:"upgrade_sweep"`
 	Guard                GuardConfig                `toml:"guard"`
@@ -545,6 +546,67 @@ const (
 	detectorOrderingDemoted = "demoted"
 	detectorOrderingFront   = "front"
 )
+
+// InstrumentalTitleMode is the instrumental_title.mode policy (#1467). Off
+// (the default) ignores the track title, which is today's behavior; Strong
+// settles a title carrying a strong instrumental qualifier without a provider
+// request; StrongWeak additionally honors weaker title or album signals when
+// the audio detector agrees. The key is reserved: nothing reads it yet.
+type InstrumentalTitleMode string
+
+const (
+	// InstrumentalTitleOff ignores the title (the default).
+	InstrumentalTitleOff InstrumentalTitleMode = "off"
+	// InstrumentalTitleStrong honors strong title qualifiers only.
+	InstrumentalTitleStrong InstrumentalTitleMode = "strong"
+	// InstrumentalTitleStrongWeak also honors weak signals when the detector agrees.
+	InstrumentalTitleStrongWeak InstrumentalTitleMode = "strong_weak"
+)
+
+// instrumentalTitleModes is the one list the loader, the env arm, the registry
+// enum and `config set` all read, so none can accept a mode another rejects.
+func instrumentalTitleModes() []InstrumentalTitleMode {
+	return []InstrumentalTitleMode{InstrumentalTitleOff, InstrumentalTitleStrong, InstrumentalTitleStrongWeak}
+}
+
+// normalizeInstrumentalTitleMode lowercases and trims a raw mode and reports
+// whether it is one of the supported values.
+func normalizeInstrumentalTitleMode(v string) (InstrumentalTitleMode, bool) {
+	m := InstrumentalTitleMode(strings.ToLower(strings.TrimSpace(v)))
+	for _, ok := range instrumentalTitleModes() {
+		if m == ok {
+			return m, true
+		}
+	}
+	return m, false
+}
+
+// NormalizeInstrumentalTitleMode exposes normalizeInstrumentalTitleMode to
+// `config set` so every spelling shares one table.
+func NormalizeInstrumentalTitleMode(v string) (InstrumentalTitleMode, bool) {
+	return normalizeInstrumentalTitleMode(v)
+}
+
+// InstrumentalTitleConfig holds the [instrumental_title] settings.
+type InstrumentalTitleConfig struct {
+	// Mode is off (default), strong or strong_weak. An unrecognized value
+	// resets to off. Override: MXLRC_INSTRUMENTAL_TITLE_MODE.
+	Mode InstrumentalTitleMode `toml:"mode"`
+}
+
+// InstrumentalTitleMode returns the validated, normalized policy; consumers
+// must read the mode through this accessor, never the raw exported field
+// InstrumentalTitle.Mode, which a Config built in code can leave unnormalized.
+// A nil or zero-value Config reads as off.
+func (c *Config) InstrumentalTitleMode() InstrumentalTitleMode {
+	if c == nil {
+		return InstrumentalTitleOff
+	}
+	if m, ok := normalizeInstrumentalTitleMode(string(c.InstrumentalTitle.Mode)); ok {
+		return m
+	}
+	return InstrumentalTitleOff
+}
 
 // VerificationConfig holds optional STT verification settings.
 type VerificationConfig struct {
@@ -1155,6 +1217,7 @@ func defaults() Config {
 			OnMisSynced:        TimingActionDemote,
 			OnCategorical:      TimingActionQuarantine,
 		},
+		InstrumentalTitle: InstrumentalTitleConfig{Mode: InstrumentalTitleOff},
 		WordSyncRecheck: WordSyncRecheckConfig{
 			Enabled: false,
 			Batch:   wordSyncRecheckBatchDefault,
@@ -1366,6 +1429,13 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if !validTimingAction(cfg.TimingValidation.OnCategorical, timingCategoricalActions()) {
 				cfg.TimingValidation.OnCategorical = d.TimingValidation.OnCategorical
 			}
+			// An unrecognized mode resets to off (the conservative default), the
+			// same rule as timing_validation's action enums.
+			if m, ok := normalizeInstrumentalTitleMode(string(cfg.InstrumentalTitle.Mode)); ok {
+				cfg.InstrumentalTitle.Mode = m
+			} else {
+				cfg.InstrumentalTitle.Mode = d.InstrumentalTitle.Mode
+			}
 			// WordSyncRecheck.Batch outside 1..max resets to the default, the same
 			// bound the env and `config set` paths enforce. Enabled is not
 			// re-defaulted: it defaults false, so absent and explicit false agree.
@@ -1567,7 +1637,7 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 // applyEnvOverrides overlays environment variables onto cfg.
 // Token precedence within env vars: MUSIXMATCH_TOKEN > MXLRC_API_TOKEN.
 // Cooldown precedence: MXLRC_API_COOLDOWN > MXLRC_COOLDOWN.
-// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_OUTPUT_BUMP_AUDIO_MTIME, MXLRC_WORD_SYNC, MXLRC_WORD_SYNC_MODE, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_PREVIEW_FLAC_FALLBACK, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_WORD_SYNC_RECHECK_ENABLED, MXLRC_WORD_SYNC_RECHECK_BATCH, MXLRC_UPGRADE_SWEEP_ENABLED, MXLRC_UPGRADE_SWEEP_BATCH, MXLRC_WORD_SYNC_GENERATE_ENABLED, MXLRC_WORD_SYNC_GENERATE_URL, MXLRC_WORD_SYNC_GENERATE_CONCURRENCY, MXLRC_WORD_SYNC_GENERATE_MODEL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
+// Supported: MUSIXMATCH_TOKEN, MXLRC_API_TOKEN, MXLRC_API_COOLDOWN, MXLRC_COOLDOWN, MXLRC_API_CIRCUIT_OPEN_DURATION, MXLRC_API_CIRCUIT_BACKOFF_BASE, MXLRC_MISS_BACKOFF_BASE_HOURS, MXLRC_MISS_BACKOFF_CAP_HOURS, MXLRC_MAX_MISS_ATTEMPTS, MXLRC_OUTPUT_DIR, MXLRC_BILINGUAL_OUTPUT, MXLRC_OUTPUT_BUMP_AUDIO_MTIME, MXLRC_WORD_SYNC, MXLRC_WORD_SYNC_MODE, MXLRC_DB_PATH, MXLRC_SECRETS_KEY_FILE, MXLRC_SERVER_ADDR, MXLRC_WEB_UI_ENABLED, MXLRC_PREVIEW_FLAC_FALLBACK, MXLRC_WEBHOOK_API_KEY, MXLRC_SCAN_INTERVAL, MXLRC_WORK_INTERVAL, MXLRC_TRUSTED_CIDRS, MXLRC_TRUSTED_PROXIES, MXLRC_TLS_CERT_FILE, MXLRC_TLS_KEY_FILE, MXLRC_TLS_SELF_SIGNED, MXLRC_TLS_REDIRECT_HTTP, MXLRC_TLS_SELF_SIGNED_HOSTS, MXLRC_PROVIDER_PRIMARY, MXLRC_PROVIDERS_DISABLED, MXLRC_PROVIDERS_MODE, MXLRC_PROVIDERS_RACE_WAIT_SECONDS, MXLRC_PROVIDERS_FALLBACK_ORDER, MXLRC_PROVIDERS_PETITLYRICS_COOLDOWN_SECONDS, MXLRC_VERIFICATION_ENABLED, MXLRC_VERIFICATION_WHISPER_URL, MXLRC_WHISPER_URL, MXLRC_VERIFICATION_FFMPEG_PATH, MXLRC_VERIFICATION_SAMPLE_DURATION_SECONDS, MXLRC_VERIFICATION_SAMPLE_DURATION, MXLRC_VERIFICATION_MIN_CONFIDENCE, MXLRC_VERIFICATION_MIN_SIMILARITY, MXLRC_INSTRUMENTAL_DETECTOR_ENABLED, MXLRC_INSTRUMENTAL_DETECTOR_CLASSIFIER_URL, MXLRC_INSTRUMENTAL_DETECTOR_FFMPEG_PATH, MXLRC_INSTRUMENTAL_DETECTOR_SAMPLE_DURATION_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_MIN_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_COOLDOWN_SECONDS, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_VOCAL_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_CLASSES, MXLRC_INSTRUMENTAL_DETECTOR_SPEECH_MAX_CONFIDENCE, MXLRC_INSTRUMENTAL_DETECTOR_SPREAD_SAMPLES, MXLRC_INSTRUMENTAL_DETECTOR_FFPROBE_PATH, MXLRC_INSTRUMENTAL_DETECTOR_ORDERING, MXLRC_ENRICHMENT_ENABLED, MXLRC_REALIGN_ENABLED, MXLRC_REALIGN_ON_SCAN, MXLRC_REALIGN_REQUIRE_PROVENANCE, MXLRC_REALIGN_CROSS_DIRECTORY, MXLRC_REALIGN_IDENTITY_KEYS, MXLRC_REALIGN_MIN_CONFIDENCE, MXLRC_TIMING_VALIDATION_ENABLED, MXLRC_TIMING_VALIDATION_REVALIDATE_EXISTING, MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH, MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED, MXLRC_TIMING_VALIDATION_ON_CATEGORICAL, MXLRC_INSTRUMENTAL_TITLE_MODE, MXLRC_WORD_SYNC_RECHECK_ENABLED, MXLRC_WORD_SYNC_RECHECK_BATCH, MXLRC_UPGRADE_SWEEP_ENABLED, MXLRC_UPGRADE_SWEEP_BATCH, MXLRC_WORD_SYNC_GENERATE_ENABLED, MXLRC_WORD_SYNC_GENERATE_URL, MXLRC_WORD_SYNC_GENERATE_CONCURRENCY, MXLRC_WORD_SYNC_GENERATE_MODEL, MXLRC_GUARD_ACCEPTED_SCRIPTS, MXLRC_GUARD_THRESHOLD, MXLRC_QUEUE_RANDOMIZE, MXLRC_QUEUE_BATCH_SIZE, MXLRCGO_WATCH_ENABLED, MXLRCGO_WATCH_DEBOUNCE_MS, MXLRCGO_WATCH_MAX_DIRS, MXLRC_LOG_LEVEL, MXLRC_LOG_FORMAT, MXLRC_LOG_FILE, MXLRC_LOG_MAX_SIZE_MB, MXLRC_LOG_MAX_FILES, MXLRC_LOG_MAX_AGE_DAYS, MXLRC_LOG_COMPRESS
 //
 // applied (must be non-nil) records the dotted config field path for every
 // override that ACTUALLY took effect. Env values that are rejected (invalid
@@ -2209,6 +2279,14 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		} else {
 			cfg.TimingValidation.OnCategorical = action
 			applied["timing_validation.on_categorical"] = true
+		}
+	}
+	if v := os.Getenv("MXLRC_INSTRUMENTAL_TITLE_MODE"); v != "" {
+		if m, ok := normalizeInstrumentalTitleMode(v); !ok {
+			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_TITLE_MODE", "value", v, "current", cfg.InstrumentalTitle.Mode) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
+		} else {
+			cfg.InstrumentalTitle.Mode = m
+			applied["instrumental_title.mode"] = true
 		}
 	}
 	if v := os.Getenv("MXLRC_WORD_SYNC_RECHECK_ENABLED"); v != "" {

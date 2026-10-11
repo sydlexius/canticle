@@ -380,3 +380,24 @@ func TestConfigToSlogAttrs_ProviderCooldownKeysPresent(t *testing.T) {
 		}
 	}
 }
+
+func TestInstrumentalTitleModeRenders(t *testing.T) {
+	cfg := defaults()
+	cfg.InstrumentalTitle.Mode = InstrumentalTitleStrong
+
+	text := FormatConfigText(cfg, nil, nil)
+	if !strings.Contains(text, "[instrumental_title]\nmode = strong") {
+		t.Errorf("FormatConfigText missing instrumental_title mode = strong:\n%s", text)
+	}
+
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	r := slog.NewRecord(time.Time{}, slog.LevelDebug, "test", 0)
+	r.AddAttrs(ConfigToSlogAttrs(cfg, nil, nil)...)
+	if err := h.Handle(context.Background(), r); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(buf.String(), "instrumental_title.mode=strong") {
+		t.Errorf("ConfigToSlogAttrs missing instrumental_title.mode=strong: %s", buf.String())
+	}
+}

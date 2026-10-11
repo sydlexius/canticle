@@ -136,6 +136,8 @@ func validEnvValue(f FieldSpec) string {
 		return "replace"
 	case "timing_validation.on_mis_synced":
 		return "quarantine"
+	case "instrumental_title.mode":
+		return "strong"
 	case "server.scan_schedule.at":
 		// A HH:MM anchor; anything else is rejected and leaves provenance false.
 		return "04:00"
