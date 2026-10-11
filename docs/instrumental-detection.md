@@ -168,6 +168,8 @@ unaffected either way.
 byte for byte, on an ordinary pass and on an upgrade re-fetch alike, and so does
 any instrumental marker already there, whoever wrote it: the detector, a
 provider, or a person. The rule changes only tracks with nothing on disk yet.
+A track written to several output directories counts as one track: a lyric or
+marker in any of them means no marker is written in any.
 One-shot `fetch` ignores the rule: naming a track there is an explicit request
 for it.
 

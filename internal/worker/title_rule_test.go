@@ -598,3 +598,128 @@ func TestTitleRule_KaraokeDetectorSkipIsFrontOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestTitleRule_AnyOccupiedOutputWritesNothing: the rule acts only on a track
+// with nothing on disk, and a row with several outputs is one track. A lyric
+// at ANY output keeps every output as it is: no marker lands beside it at an
+// empty one, and the row settles describing the kept file with its lane left
+// alone, so `purge-provenance --source title-rule` has nothing of this row's to
+// delete. The order of the outputs does not matter, and a row whose outputs
+// are all empty still gets its marker at each.
+func TestTitleRule_AnyOccupiedOutputWritesNothing(t *testing.T) {
+	two := func(dir string) []models.OutputPath {
+		return []models.OutputPath{{Outdir: filepath.Join(dir, "a"), Filename: "track.lrc"}, {Outdir: filepath.Join(dir, "b"), Filename: "track.lrc"}}
+	}
+	lyric := models.Song{Track: strongTrack, Lyrics: models.Lyrics{LyricsBody: "words already on disk"}}
+	for _, tc := range []struct {
+		name, occupied string
+		want           string // status|provider_lane|outcome_type|attempts
+	}{
+		{"lyric at the first output", "a", "done|null|unsynced|0"},
+		{"lyric at the last output", "b", "done|null|unsynced|0"},
+		{"every output empty", "", "done|title-rule|instrumental|0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newTitleRigPaths(t, strongTrack, two)
+			for _, sub := range []string{"a", "b"} {
+				if err := os.Mkdir(r.path(sub), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var before string
+			if tc.occupied != "" {
+				if err := r.lw.WriteLRC(lyric, "track.lrc", r.path(tc.occupied)); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+				before = r.read(t, filepath.Join(tc.occupied, "track.txt"))
+			}
+			r.run(t)
+			if n := r.fetches(); n != 0 {
+				t.Errorf("fetcher calls = %d; want 0", n)
+			}
+			if got := r.cols(t, "status", "provider_lane", "outcome_type", "attempts"); got != tc.want {
+				t.Errorf("status|lane|outcome|attempts = %q; want %q", got, tc.want)
+			}
+			for _, sub := range []string{"a", "b"} {
+				entries, err := os.ReadDir(r.path(sub))
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch {
+				case tc.occupied == "":
+					if got := r.read(t, filepath.Join(sub, "track.txt")); !strings.Contains(got, "[source:title-rule]") {
+						t.Errorf("%s: marker = %q; want the title-rule marker", sub, got)
+					}
+				case sub == tc.occupied:
+					if after := r.read(t, filepath.Join(sub, "track.txt")); after != before || len(entries) != 1 {
+						t.Errorf("%s: kept lyric changed or gained a neighbor (%d entries):\n%s", sub, len(entries), after)
+					}
+				case len(entries) != 0:
+					t.Errorf("%s: %d file(s) written beside a kept lyric at the other output; want none", sub, len(entries))
+				}
+			}
+		})
+	}
+}
+
+// TestTitleRule_WordRecheckRowWithNoFile pins what the recheck fast path relies
+// on when the settled .lrc has since vanished: it still asks no lane and writes
+// nothing (a word recheck could only ever land a word-synced lyric, the one
+// thing the rule exists not to fetch for this title), and the row is not
+// stranded by it. A scan that finds the sidecar gone reopens the parked recheck
+// row as an ordinary fetch (queue.reopenWordRecheckForScan), and the rule's
+// ordinary branch then writes the marker, still with no fetch.
+func TestTitleRule_WordRecheckRowWithNoFile(t *testing.T) {
+	ctx := context.Background()
+	park := func(t *testing.T) *titleRig {
+		t.Helper()
+		r := newTitleRig(t, strongTrack)
+		if _, err := r.q.Dequeue(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.q.SetOutcomeType(ctx, r.id, "synced"); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.q.Complete(ctx, r.id); err != nil {
+			t.Fatal(err)
+		}
+		if flipped, err := r.q.MarkWordRecheckQueued(ctx, []int64{r.id}, queue.WordRecheckOptions{}, nil); err != nil || len(flipped) != 1 {
+			t.Fatalf("flip = %d, %v; want 1 row", len(flipped), err)
+		}
+		r.primary.song = recheckSong("word line", true, models.WordAnswerServed)
+		return r
+	}
+	t.Run("the worker reaches it first", func(t *testing.T) {
+		r := park(t)
+		r.run(t)
+		if entries, err := os.ReadDir(r.dir); err != nil || len(entries) != 0 {
+			t.Errorf("output directory holds %d file(s), %v; want nothing written", len(entries), err)
+		}
+		if got := r.cols(t, "status", "word_timing_state", "outcome_type", "provider_lane"); got != "done|absent|synced|null" {
+			t.Errorf("status|word state|outcome|lane = %q; want done|absent|synced|null", got)
+		}
+		if n := r.fetches(); n != 0 {
+			t.Errorf("fetcher calls = %d; want 0", n)
+		}
+	})
+	t.Run("a scan reaches it first", func(t *testing.T) {
+		r := park(t)
+		in := models.Inputs{Track: strongTrack, Outdir: r.dir, Filename: "track.lrc", SourcePath: r.path("track.flac"), FromScan: true}
+		if _, err := r.q.Enqueue(ctx, in, queue.PriorityScan); err != nil {
+			t.Fatalf("scan enqueue: %v", err)
+		}
+		if got := r.cols(t, "status", "word_timing_state", "outcome_type"); got != "pending|null|null" {
+			t.Fatalf("status|word state|outcome = %q; want the row reopened as an ordinary fetch", got)
+		}
+		r.run(t)
+		if got := r.read(t, "track.txt"); !strings.Contains(got, "[source:title-rule]") {
+			t.Errorf("marker = %q; want the title-rule marker", got)
+		}
+		if got := r.cols(t, "status", "provider_lane", "outcome_type"); got != "done|title-rule|instrumental" {
+			t.Errorf("status|lane|outcome = %q; want done|title-rule|instrumental", got)
+		}
+		if n := r.fetches(); n != 0 {
+			t.Errorf("fetcher calls = %d; want 0", n)
+		}
+	})
+}

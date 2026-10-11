@@ -461,3 +461,80 @@ func TestWriteLRCIfAbsent_CaseVariant(t *testing.T) {
 	}
 	mustExist(t, filepath.Join(dir, "song.txt"))
 }
+
+// TestOccupantAgreesWithWriteLRCIfAbsent: Occupant is the read-only twin of
+// WriteLRCIfAbsent, so for every state of the stem it must name exactly the
+// file that write would keep (or nothing where the write would land), and it
+// must leave the directory untouched. The worker probes every output with it
+// before the first write (#1468); a disagreement would let a marker land beside
+// a lyric at another output.
+func TestOccupantAgreesWithWriteLRCIfAbsent(t *testing.T) {
+	instrumental, _, _ := rungSongs()
+	instrumental.WinningLane = TitleRuleLaneName
+	manual := instrumental
+	manual.WinningLane = ManualLaneName
+	for name, files := range map[string]map[string]string{
+		"empty stem":       {},
+		"another stem":     {"other.txt": "words\n"},
+		"marker":           {"song.txt": InstrumentalMarker + "\n"},
+		"plain words":      {"song.txt": "words\n"},
+		"synced lyric":     {"song.lrc": "[00:01.00]line\n"},
+		"lyric and words":  {"song.lrc": "[00:01.00]line\n", "song.txt": "words\n"},
+		"orphan companion": {"song.elrc": "[by:canticle]\n[00:01.00]<00:01.00>line\n"},
+		"manual marker":    nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if name == "orphan companion" && !sidecar.Active(sidecar.KindWordSynced) {
+				t.Skip("companion inactive")
+			}
+			dir := t.TempDir()
+			w := NewLRCWriter()
+			for f, body := range files {
+				seed(t, filepath.Join(dir, f), body)
+			}
+			if files == nil {
+				if err := w.WriteManualMarker(manual, "song.lrc", dir); err != nil {
+					t.Fatalf("seed manual marker: %v", err)
+				}
+			}
+			before := dirSnapshot(t, dir)
+			got, err := w.Occupant(instrumental, "song.lrc", dir)
+			if err != nil {
+				t.Fatalf("Occupant: %v", err)
+			}
+			if after := dirSnapshot(t, dir); after != before {
+				t.Fatalf("Occupant changed the directory:\n%s\nwant:\n%s", after, before)
+			}
+			var want *KeptError
+			if werr := w.WriteLRCIfAbsent(instrumental, "song.lrc", dir); werr != nil && !errors.As(werr, &want) {
+				t.Fatalf("WriteLRCIfAbsent: %v", werr)
+			}
+			if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+				t.Fatalf("Occupant = %#v; WriteLRCIfAbsent kept %#v", got, want)
+			}
+			if wantOccupied := name != "empty stem" && name != "another stem"; (got != nil) != wantOccupied {
+				t.Errorf("occupied = %v; want %v", got != nil, wantOccupied)
+			}
+		})
+	}
+	// A directory the write would refuse as missing is the same error here, not
+	// "empty": the caller's missing-directory handling depends on telling them apart.
+	root := t.TempDir()
+	if k, err := NewLRCWriter(root).Occupant(instrumental, "song.lrc", filepath.Join(root, "gone")); k != nil || !errors.Is(err, ErrOutputDirMissing) {
+		t.Errorf("missing directory: Occupant = %#v, %v; want nil, ErrOutputDirMissing", k, err)
+	}
+}
+
+// dirSnapshot is every entry of dir with its content, in name order.
+func dirSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		b.WriteString(e.Name() + "\n" + readText(t, filepath.Join(dir, e.Name())) + "\n")
+	}
+	return b.String()
+}

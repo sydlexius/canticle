@@ -19,9 +19,11 @@ import (
 func (w *Worker) SetTitleRule(enabled bool) { w.titleRule = enabled }
 
 // absentOnlyWriter is the write that lands only on an empty stem
-// (lyrics.LRCWriter.WriteLRCIfAbsent).
+// (lyrics.LRCWriter.WriteLRCIfAbsent) plus its read-only twin, which names what
+// that write would keep without writing (lyrics.LRCWriter.Occupant).
 type absentOnlyWriter interface {
 	WriteLRCIfAbsent(models.Song, string, string) error
+	Occupant(models.Song, string, string) (*lyrics.KeptError, error)
 }
 
 // titleRuleSettles reports whether the rule settles this row as instrumental:
@@ -94,7 +96,7 @@ func (w *Worker) titleRuleGate(ctx context.Context, item queue.WorkItem, track m
 	if !ok {
 		// Loud, never silent: without the guarded write a forced writer could
 		// replace a lyric, so the row takes the ordinary path instead.
-		slog.Error("worker title rule: writer lacks WriteLRCIfAbsent; row takes the ordinary path", "id", item.ID)
+		slog.Error("worker title rule: writer lacks WriteLRCIfAbsent or Occupant; row takes the ordinary path", "id", item.ID)
 		return false, nil
 	}
 	w.lastItemContactedProvider = false
@@ -116,6 +118,15 @@ func (w *Worker) titleRuleGate(ctx context.Context, item queue.WorkItem, track m
 // makes `scan purge-provenance --source title-rule` the bulk undo (it must agree
 // with the marker's [source:]), and a done row with no outcome is the #655
 // state. A failure of either fails the row; the retry rewrites the same marker.
+//
+// A row with several outputs is ONE track, and the rule acts only on a track
+// with nothing on disk. So every output is probed (read-only) before the first
+// write, and a lyric or marker at any of them means nothing is written at any:
+// the row settles through the kept path, lane untouched. Otherwise a lyric at
+// one output would sit beside a title-rule marker at another, under a row whose
+// lane says the rule settled it. The probe is a snapshot. A file that appears
+// at one output after it is still refused there by the write, but the outputs
+// already written keep their marker and the row records the title-rule settle.
 func (w *Worker) completeTitleInstrumental(ctx context.Context, item queue.WorkItem, track models.Track, writer absentOnlyWriter) error {
 	track.Instrumental = 1
 	song := lyrics.StampBlockIdentity(ctx, models.Song{Track: track, WinningLane: lyrics.TitleRuleLaneName})
@@ -127,8 +138,25 @@ func (w *Worker) completeTitleInstrumental(ctx context.Context, item queue.WorkI
 	failWrite := func(cause error) error {
 		return w.fail(ctx, item, fmt.Errorf("worker: write title-rule marker for item %d: %w", item.ID, scrubWritePaths(cause)))
 	}
-	for _, p := range paths {
-		writeErr := writer.WriteLRCIfAbsent(song, p.Filename, p.Outdir)
+	probes := make([]error, len(paths)) // a *lyrics.KeptError where that output is occupied
+	occupied := false
+	for i, p := range paths {
+		k, probeErr := writer.Occupant(song, p.Filename, p.Outdir)
+		if probes[i] = probeErr; probeErr == nil && k != nil {
+			probes[i], occupied = k, true
+		}
+	}
+	for i, p := range paths {
+		var writeErr error
+		if occupied {
+			// Nothing is written anywhere: this output's probe stands in for
+			// its write, and an empty one is left empty.
+			if writeErr = probes[i]; writeErr == nil {
+				continue
+			}
+		} else {
+			writeErr = writer.WriteLRCIfAbsent(song, p.Filename, p.Outdir)
+		}
 		switch {
 		case errors.Is(writeErr, lyrics.ErrKeptBetter):
 			kept = append(kept, keptErrorOf(writeErr))
@@ -146,9 +174,10 @@ func (w *Worker) completeTitleInstrumental(ctx context.Context, item queue.WorkI
 	if len(skipped) > 0 && ((!wrote && len(kept) == 0) || !w.skippedAllStale(ctx, item, skipped)) {
 		return failWrite(missingErr)
 	}
-	if len(kept) == len(paths)-len(skipped) {
-		// A lyric or a marker (anyone's) is already on disk everywhere: nothing
-		// landed, so the row settles describing the kept file.
+	if occupied || len(kept) == len(paths)-len(skipped) {
+		// A lyric or a marker (anyone's) is already on disk: nothing landed, so
+		// the row settles describing the kept file. (The second term is the
+		// probe-to-write gap: every output filled after an all-empty probe.)
 		return w.completeKept(ctx, item, kept)
 	}
 	ctxNoCancel := context.WithoutCancel(ctx)
