@@ -139,7 +139,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | Sidecars judged per sweep cycle; values below 1 reset to the default. |
 | `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a lyric whose cues overrun the audio: `demote`, `quarantine`, `purge`, `off`. |
 | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
-| `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | Reserved, no effect until the title rule ships: `off`, `strong`, `strong_weak`. See `[instrumental_title]`. |
+| `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | The instrumental title rule: `off`, `strong`, `strong_weak`. See `[instrumental_title]`. |
 | `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode word-timing re-check sweep. |
 | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | Most rows in word-recheck mode at once (1-1000); out-of-range values are ignored. |
 | `MXLRC_UPGRADE_SWEEP_ENABLED` | `false` | Master switch for the serve-mode upgrade sweep. |
@@ -514,7 +514,7 @@ Quarantined files are moved under a quarantine root, preserving their path relat
 
 ### `[instrumental_title]`
 
-**Reserved: this key has no effect until the title rule ships in the same release series.** It lands first so the setting exists when the rule does. Once the rule ships it is off by default, applies to serve mode only, and never replaces a lyric file already on disk. `scan purge-provenance --source title-rule` is the bulk undo.
+The instrumental title rule: in serve mode, a track whose title says it is an instrumental version is settled with an instrumental marker instead of being looked up. It is off by default, applies to serve mode only (one-shot `fetch` is unaffected), and never replaces a lyric file or an instrumental marker already on disk: it changes only tracks with nothing on disk yet. The mode is read at startup, so a change needs a restart. A sung track whose title carries a strong qualifier gets a marker and no lyrics while the rule is on; the rationale and that residual risk are in "Title rule" in [instrumental-detection.md](instrumental-detection.md). The bulk undo is to set the mode back to `off`, then run `scan purge-provenance --source title-rule`.
 
 ```toml
 [instrumental_title]
@@ -523,7 +523,7 @@ mode = "off"
 
 | Key | Env | Default | Meaning |
 |---|---|---|---|
-| `mode` | `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | `off`: the track title is ignored (today's behavior). `strong`: a track whose title carries a strong instrumental qualifier (a bracketed or dash-suffixed "Instrumental" or "Off Vocal") is settled with an instrumental marker without asking a lyric provider. `strong_weak`: additionally honors weaker title or album signals, only when the audio detector agrees. An unrecognized file value resets to `off`; `config set` rejects an unrecognized value and leaves the setting unchanged; an invalid env value warns and keeps the current setting. |
+| `mode` | `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | `off`: the track title is ignored (today's behavior). `strong`: a track whose title carries a strong instrumental qualifier (a bracketed or dash-suffixed "Instrumental" or "Off Vocal") is settled with an instrumental marker without asking a lyric provider. `strong_weak`: reserved for weaker title or album signals confirmed by the audio detector; today it acts exactly as `strong`. An unrecognized file value resets to `off`; `config set` rejects an unrecognized value and leaves the setting unchanged; an invalid env value warns and keeps the current setting. |
 
 ### `[word_sync_recheck]`
 
