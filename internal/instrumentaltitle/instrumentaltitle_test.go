@@ -589,9 +589,8 @@ func TestPlaceholderArtist(t *testing.T) {
 
 // TestActionable: the one answer the worker gate and the bulk repair share. A
 // bracketed Strong title needs no artist; a Strong dash-suffix needs a real
-// artist that is not the text before the separator, whichever of the track
-// artist, the album artist or the resolved artist carries it. The verdict is
-// Classify's own either way.
+// artist that is not the text before the separator, whether the track artist
+// or the album artist carries it. The verdict is Classify's own either way.
 func TestActionable(t *testing.T) {
 	const suffix = "Tin Lantern Band - Minus One"
 	for _, tc := range []struct {
