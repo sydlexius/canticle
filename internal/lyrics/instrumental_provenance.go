@@ -25,6 +25,12 @@ const SourceDetector = "canticle-detector"
 // disagreement here would mislabel every detector marker as provider-written.
 const DetectorLaneName = "detector"
 
+// TitleRuleLaneName is the models.Song.WinningLane of a marker the title rule
+// wrote (#1468). The writer uses the lane as the [source:] token, so the tag and
+// work_queue.provider_lane are the same string and
+// `scan purge-provenance --source title-rule` selects exactly these markers.
+const TitleRuleLaneName = "title-rule"
+
 // InstrumentalProvenance is the provenance read from an instrumental .txt marker.
 // A detector marker carries Source == SourceDetector and a DetectorVersion; a
 // provider marker carries the provider lane name and an empty DetectorVersion.

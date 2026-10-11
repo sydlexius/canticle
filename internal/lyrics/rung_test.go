@@ -299,3 +299,43 @@ func TestWriteLRC_NoDowngrade_CompanionOfSurvivingVariant(t *testing.T) {
 	mustExist(t, elrc)
 	mustNotExist(t, filepath.Join(dir, "song.lrc"))
 }
+
+// TestWriteLRCIfAbsent: the write lands only on an empty stem. Anything already
+// there stays byte for byte, including a file on the candidate's OWN rung, which
+// is the one case WriteLRCNoDowngrade replaces; a forced writer changes nothing.
+func TestWriteLRCIfAbsent(t *testing.T) {
+	instrumental, _, _ := rungSongs()
+	instrumental.WinningLane = TitleRuleLaneName
+	const detectorMarker = "[by:canticle]\n[source:canticle-detector]\n[dv:9.9.9]\n" + InstrumentalMarker + "\n"
+	for name, tc := range map[string]struct {
+		file, body string
+		onDisk     Rung
+	}{
+		"tagged marker":   {"song.txt", detectorMarker, RungInstrumental},
+		"untagged marker": {"song.txt", InstrumentalMarker + "\n", RungInstrumental},
+		"plain words":     {"song.txt", "words\n", RungUnsynced},
+		"synced lyric":    {"song.lrc", "[00:01.00]line\n", RungLine},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := filepath.Join(dir, tc.file)
+			seed(t, p, tc.body)
+			w := NewLRCWriter()
+			w.SetForceOverwrite(true)
+			var k *KeptError
+			if err := w.WriteLRCIfAbsent(instrumental, "song.lrc", dir); !errors.As(err, &k) || k.OnDisk != tc.onDisk {
+				t.Fatalf("err = %v, want a *KeptError on rung %d", err, tc.onDisk)
+			}
+			if got := readText(t, p); got != tc.body {
+				t.Errorf("%s changed: %q", tc.file, got)
+			}
+		})
+	}
+	dir := t.TempDir()
+	if err := NewLRCWriter().WriteLRCIfAbsent(instrumental, "song.lrc", dir); err != nil {
+		t.Fatalf("empty stem: %v", err)
+	}
+	if got := readText(t, filepath.Join(dir, "song.txt")); !strings.Contains(got, "[source:title-rule]") {
+		t.Errorf("empty stem: marker = %q", got)
+	}
+}

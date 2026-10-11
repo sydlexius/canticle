@@ -499,3 +499,90 @@ func FuzzClassify(f *testing.F) {
 		}
 	})
 }
+
+// TestKaraokeExcluded pins the one distinction Classify's None hides: karaoke
+// (title or album) is reported, an a cappella title and a clean one are not.
+func TestKaraokeExcluded(t *testing.T) {
+	for _, tc := range []struct {
+		title, album string
+		want         bool
+	}{
+		{"Glass Harbor (Karaoke Version)", "", true},
+		{"Glass Harbor - カラオケ", "", true},
+		{"Glass Harbor", "Paper Kites Karaoke", true},
+		{"Glass Harbor (A Cappella)", "", false},
+		{"Glass Harbor (Instrumental)", "Paper Kites", false},
+	} {
+		if got := KaraokeExcluded(tc.title, tc.album); got != tc.want {
+			t.Errorf("KaraokeExcluded(%q, %q) = %v, want %v", tc.title, tc.album, got, tc.want)
+		}
+		if tc.want && Classify(tc.title, tc.album) != (Verdict{}) {
+			t.Errorf("Classify(%q, %q) is not None for a karaoke exclusion", tc.title, tc.album)
+		}
+	}
+}
+
+// TestSuffixBaseWithin: the artist check a Strong dash-suffix needs. Track
+// numbering beside the name is ignored, but a number that is part of the name
+// is compared. The name inside the prefix counts as much as the prefix inside
+// the name, so every doubtful shape is true (the caller then does not act).
+func TestSuffixBaseWithin(t *testing.T) {
+	for _, tc := range []struct {
+		title, name string
+		want        bool
+	}{
+		{"Tin Lantern Band - Minus One", "Tin Lantern Band", true},
+		{"Tin Lantern Band - 03 - Minus One", "Tin Lantern Band", true},
+		{"03 Tin Lantern Band - Minus One", "tin lantern band", true},
+		{"3 Tin Lanterns - Instrumental", "3 Tin Lanterns", true},
+		{"03 - 3 Tin Lanterns - Instrumental", "3 Tin Lanterns", true},
+		{"Tin Lantern Band (Live) - Minus One", "Tin Lantern Band", true},
+		{"808 - Minus One", "808", true}, // the name is itself numbering
+		{"Tin Lantern Band - Minus One", "Tin Lantern Band feat. Paper Kites", true},
+		{"Tïn Läntern Band - Minus One", "TIN LANTERN BAND", true},                      // diacritics, case
+		{"Ｔｉｎ Lantern Band - Minus One", "Tin Lantern Band", true},                      // full-width
+		{"T.L.B. - Minus One", "TLB", true},                                             // dotted initials
+		{"03 Tin Lantern Band - Minus One", "Tin Lantern Band feat. Paper Kites", true}, // numbering beside one artist of several
+		// A leading article on either side changes nothing (containment).
+		{"The Tin Lantern Band - Minus One", "Tin Lantern Band", true},
+		{"Tin Lantern Band - Minus One", "The Tin Lantern Band", true},
+		{"03 The Tin Lantern Band - Minus One", "Tin Lantern Band", true},
+		{"The The - Minus One", "The The", true},
+		{"The - Minus One", "The", true}, // the article is the whole name
+		// The name inside the prefix: the title credits more than the tag does.
+		{"Tin Lantern Band feat. Paper Kites - Minus One", "Tin Lantern Band", true},
+		{"Tin Lantern Band Glass Harbor - Minus One", "Tin Lantern Band", true},
+		{"Tin Lantern Band - Glass Harbor - Instrumental", "Tin Lantern Band", true}, // the stated trade
+		// Every spelling of the ampersand is one token.
+		{"Tin & Lantern - Minus One", "Tin and Lantern", true},
+		{"Tin &amp; Lantern - Minus One", "Tin & Lantern", true},
+		{"Tin and Lantern - Minus One", "Tin ＆ Lantern", true},
+		{"Tin And Lantern - Minus One", "TIN &AMP; LANTERN", true},
+		{"Tin Lantern - Minus One", "Tin & Lantern", false}, // not a contiguous run of it
+		{"Glass Harbor - Minus One", "Tin Lantern Band", false},
+		{"Lantern Tin Band - Minus One", "Tin Lantern Band", false}, // same tokens, another order
+		{"3 Glass Harbor - Instrumental", "3 Tin Lanterns", false},
+		{"Glass Harbor (Instrumental)", "Glass Harbor", false}, // no separator
+		{"Tin Lantern Band - Minus One", "", false},
+		// Another script cannot be matched: the accepted residual.
+		{"ティン - Minus One", "Tin", false},
+	} {
+		if got := SuffixBaseWithin(tc.title, tc.name); got != tc.want {
+			t.Errorf("SuffixBaseWithin(%q, %q) = %v, want %v", tc.title, tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPlaceholderArtist: a filler is no artist, a real name is one, including
+// a real name that merely contains a filler word.
+func TestPlaceholderArtist(t *testing.T) {
+	for name, want := range map[string]bool{
+		"": true, "  ": true, "Various Artists": true, "various artists": true, "Various": true,
+		"VA": true, "V.A.": true, "v.a": true, "Unknown Artist": true, "[Unknown]": true, "Unknown": true,
+		"Tin Lantern Band": false, "Unknown Lanterns": false, "Various Lanterns": false, "Va Lantern": false,
+	} {
+		if got := PlaceholderArtist(name); got != want {
+			t.Errorf("PlaceholderArtist(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

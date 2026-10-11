@@ -163,7 +163,7 @@ func TestRecentOutcomesSourceSortsByDisplayedLabel(t *testing.T) {
 // generated CASE.
 func TestSourceLabelCaseCoversEveryLane(t *testing.T) {
 	expr := reports.SourceLabelExprForTest()
-	for _, l := range append(reports.Lanes(), "detector") {
+	for _, l := range append(reports.Lanes(), "detector", "title-rule") {
 		want := "WHEN '" + l + "' THEN '" + reports.LaneLabel(l) + "'"
 		if !strings.Contains(expr, want) {
 			t.Errorf("CASE lacks %q:\n%s", want, expr)

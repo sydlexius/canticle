@@ -549,3 +549,105 @@ func classifyField(s string) Verdict {
 	consider(scan(s, false), PositionInline, false)
 	return best
 }
+
+// KaraokeExcluded reports whether Classify withholds its verdict because the
+// title or the album names karaoke. Classify returns the same None for that as
+// for "no signal"; a caller that must tell them apart (to keep an audio
+// detector from settling a karaoke track ahead of the lyric providers) asks
+// here, so the exclusion tables stay in one place.
+func KaraokeExcluded(title, album string) bool {
+	_, t := excluded(prepare(title))
+	_, a := excluded(prepare(album))
+	return t || a
+}
+
+// SuffixBaseWithin reports whether the text before title's dash-suffix
+// separator could be name: the two are equal, or either holds the other as a
+// contiguous run of tokens. It is the check PositionSuffix asks of the caller:
+// "Artist - Minus One" is a song named Minus One whose title tag carries the
+// artist, not a qualified title.
+//
+// Both sides are compared as normalized tokens (case, width, diacritics and
+// dotted initials folded), with "&", "&amp;" and "and" as one token and track
+// numbering around the prefix ignored. Numbers are never stripped before the
+// first comparison, so a name that starts with a number still matches.
+// Containment runs in BOTH directions: the prefix inside the name covers a
+// multi-artist tag, and the name inside the prefix covers a title tag that
+// credits more than the tag does ("Artist feat. Guest - Minus One"). A leading
+// "The" on either side needs no rule of its own: the shorter side is then a run
+// inside the longer one.
+//
+// The trade is deliberate: a genuine "Artist - Title - Instrumental" title is
+// true here as well, so the caller declines it and the track is simply fetched
+// like any other. Every doubtful case resolves toward true, which only ever
+// withholds a verdict. What it cannot see is a respelling in another script (a
+// katakana prefix against a romanized tag): that stays false, an accepted
+// residual. It is false for a name with no tokens or a title with no separator.
+func SuffixBaseWithin(title, name string) bool {
+	want := tokens(nameText(name))
+	rs := []rune(nameText(title))
+	spans, ok := bracketSpans(rs)
+	if len(want) == 0 || !ok {
+		return false
+	}
+	covered := coverage(rs, spans)
+	sep, _, ok := dashSuffix(rs, covered)
+	if !ok {
+		return false
+	}
+	// Judged with and without bracketed text: either reading may be the name.
+	outside := slices.Clone(rs[:sep])
+	for i := range outside {
+		if covered[i] {
+			outside[i] = ' '
+		}
+	}
+	for _, base := range [][]rune{rs[:sep], outside} {
+		have := tokens(string(base))
+		// As written first, so a name that is itself numbering still matches;
+		// then with the track numbering around it dropped.
+		lo, hi := 0, len(have)
+		for lo < hi && dressing.MatchString(have[lo]) {
+			lo++
+		}
+		for lo < hi && dressing.MatchString(have[hi-1]) {
+			hi--
+		}
+		for _, h := range [][]string{have, have[lo:hi]} {
+			if runWithin(h, want) || runWithin(want, h) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// PlaceholderArtist reports whether name is no artist at all: empty, or one of
+// the fillers a tagger writes when it has none ("Various Artists", "VA",
+// "V.A.", "Unknown Artist", "Unknown"). A caller of SuffixBaseWithin must not
+// count such a name as an artist it compared against: with no real artist known
+// the dash-suffix check has not been made, and the answer is not to act.
+func PlaceholderArtist(name string) bool {
+	toks := tokens(prepare(name))
+	return len(toks) == 0 || slices.Contains(placeholderArtists, strings.Join(toks, " "))
+}
+
+// placeholderArtists are PlaceholderArtist's fillers, as joined tokens.
+var placeholderArtists = []string{"various artists", "various", "va", "unknown artist", "unknown"}
+
+// ampersand folds every spelling of "&" to the word, spaced so it is a token.
+// It runs on prepared text: lower case, and a full-width sign already folded.
+var ampersand = strings.NewReplacer("&amp;", " and ", "&", " and ")
+
+// nameText is prepare for a name comparison: the ampersand becomes its word.
+func nameText(s string) string { return ampersand.Replace(prepare(s)) }
+
+// runWithin reports whether the non-empty run occurs contiguously in in.
+func runWithin(run, in []string) bool {
+	for i := 0; len(run) > 0 && i+len(run) <= len(in); i++ {
+		if slices.Equal(in[i:i+len(run)], run) {
+			return true
+		}
+	}
+	return false
+}

@@ -135,6 +135,9 @@ type LRCWriter struct {
 	// allowManual lets a write replace a manual instrumental marker; set only by
 	// WriteManualMarker (manualguard.go).
 	allowManual bool
+	// onlyIfAbsent widens the no-downgrade guard to an equal rung, so a write
+	// lands only where the stem holds nothing; set only by WriteLRCIfAbsent.
+	onlyIfAbsent bool
 	// blocks, when non-nil, backstops the orchestrator and cache checks (#1394):
 	// WriteLRC refuses a result the operator blocked. Nil (every non-serve
 	// caller) is a no-op.
@@ -534,7 +537,7 @@ func (w *LRCWriter) WriteLRC(song models.Song, filename string, outdir string) e
 	}
 	w.at("probed")
 	if !w.force {
-		if have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion); got < have.OnDisk {
+		if have, got := classifyOnDisk(fp, listing, companion.removes), w.candidateRung(song, companion); got < have.OnDisk || (w.onlyIfAbsent && have.OnDisk != RungNone) {
 			slog.Debug("keeping better lyrics already on disk", "path", fp, "on_disk", int(have.OnDisk), "candidate", int(got),
 				"artist", song.Track.ArtistName, "track", song.Track.TrackName)
 			return &have
@@ -636,6 +639,18 @@ func (w *LRCWriter) SetForceOverwrite(enabled bool) {
 func (w *LRCWriter) WriteLRCNoDowngrade(song models.Song, filename string, outdir string) error {
 	guarded := *w
 	guarded.force = false
+	return guarded.WriteLRC(song, filename, outdir)
+}
+
+// WriteLRCIfAbsent is WriteLRCNoDowngrade that also refuses an EQUAL rung: it
+// writes only when the stem holds no lyric file and no instrumental marker of
+// any provenance, and otherwise returns the same *KeptError describing the file
+// that stayed. The title rule (#1468) writes through it, so a marker the
+// detector, a provider or a person put there is never restamped as its own.
+func (w *LRCWriter) WriteLRCIfAbsent(song models.Song, filename string, outdir string) error {
+	guarded := *w
+	guarded.force = false
+	guarded.onlyIfAbsent = true
 	return guarded.WriteLRC(song, filename, outdir)
 }
 
