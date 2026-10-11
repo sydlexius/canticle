@@ -129,6 +129,8 @@ func seedRejection(t *testing.T, q *queue.DBQueue, sourcePath string, tel queue.
 	if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 		t.Fatalf("defer: %v", err)
 	}
+	// Fixtures model a complete detection; the gate_complete exclusion has its own test in internal/queue.
+	tel.GateComplete = true
 	if _, err := q.StampUnclassifiedMiss(ctx, item.ID, tel); err != nil {
 		t.Fatalf("stamp unclassified miss: %v", err)
 	}

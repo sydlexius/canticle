@@ -4791,6 +4791,7 @@ func runScanReconcile(ctx context.Context, out io.Writer, args ScanReconcileCmd)
 					SpeechMean:      res.SpeechConfidence,
 					VocalClass:      res.WinningVocalClass,
 					DetectorVersion: res.Version,
+					GateComplete:    res.Reusable,
 				}
 				stamped, serr := workQueue.StampInstrumentalTelemetry(ctx, item.ID, tel)
 				switch {

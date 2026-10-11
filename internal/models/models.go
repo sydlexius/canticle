@@ -265,6 +265,9 @@ type Song struct {
 	DetectorVocalPeak  float64 `json:"-"`
 	DetectorSpeechMean float64 `json:"-"`
 	DetectorVocalClass string  `json:"-"`
+	// DetectorGateComplete carries detector.Result.Reusable (vocal gate ran on a
+	// complete response) so the settle can persist work_queue.gate_complete (#511).
+	DetectorGateComplete bool `json:"-"`
 	// AudioDurationSeconds is the duration of the AUDIO FILE this song is being
 	// written for, in seconds. Zero means unknown.
 	//

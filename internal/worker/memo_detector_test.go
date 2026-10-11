@@ -46,7 +46,7 @@ func (p *plainDetector) Detect(_ context.Context, _ string) (detector.Result, er
 }
 
 func telemetryV1() *storedTelemetry {
-	return &storedTelemetry{Version: "v1", MusicSum: 0.9, VocalPeak: 0.02, SpeechMean: 0.01, VocalClass: "Singing"}
+	return &storedTelemetry{Version: "v1", MusicSum: 0.9, VocalPeak: 0.02, SpeechMean: 0.01, VocalClass: "Singing", GateComplete: true}
 }
 
 func TestMemoDetectorReusesStoredScoresOnVersionMatch(t *testing.T) {
@@ -69,6 +69,9 @@ func TestMemoDetectorReusesStoredScoresOnVersionMatch(t *testing.T) {
 	}
 	if res.Version != "v1" {
 		t.Errorf("Version = %q; want v1", res.Version)
+	}
+	if !res.Reusable {
+		t.Errorf("Reusable = false; a reused gate-complete row must carry the bit forward so a later stamp keeps it")
 	}
 	last, ran := m.lastInference()
 	if ran {
@@ -185,5 +188,35 @@ func TestMemoDetectorPrimeResetsStaleState(t *testing.T) {
 	}
 	if res.Version != "" || res.Confidence != 0 {
 		t.Errorf("after priming B: stale result leaked: %+v; want zero", res)
+	}
+}
+
+// A primed row whose gate_complete bit is not true (NULL from before migration
+// 070, or 0 from a degraded response) must never be re-decided from its stored
+// scores: DecideStored skips the completeness guards, so reuse would settle a
+// guard-degraded row instrumental (#511). It must run live inference instead.
+func TestMemoDetectorInfersWhenGateNotComplete(t *testing.T) {
+	inner := &fakeStoredDecider{
+		version:   "v1",
+		detectRes: detector.Result{Version: "v1", Reusable: true},
+		decideFn:  func(_, _, _ float64) bool { return true },
+	}
+	m := newMemoDetector(inner)
+	tel := telemetryV1()
+	tel.GateComplete = false
+	m.prime(tel)
+
+	res, err := m.Detect(context.Background(), "/music/a.flac")
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if inner.detectN != 1 {
+		t.Fatalf("inner Detect called %d times; want 1 (gate bit not set forces live inference)", inner.detectN)
+	}
+	if res.Instrumental {
+		t.Errorf("Instrumental = true; the stored scores must not have been re-decided")
+	}
+	if _, ran := m.lastInference(); !ran {
+		t.Errorf("lastInference ran = false; want true")
 	}
 }

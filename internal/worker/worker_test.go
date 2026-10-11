@@ -3658,6 +3658,8 @@ func buildRedequeuedItem(base queue.WorkItem, st instrumentalStamp) queue.WorkIt
 	base.DetectorSpeechMean = &st.Tel.SpeechMean
 	base.DetectorVocalClass = &st.Tel.VocalClass
 	base.DetectorVersion = &st.Tel.DetectorVersion
+	// Round-trip the stamped gate bit: the memo reuses scores only when it is true.
+	base.DetectorGateComplete = &st.Tel.GateComplete
 	return base
 }
 

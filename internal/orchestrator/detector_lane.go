@@ -143,6 +143,8 @@ func NewDetectorLane(d detector.Detector, breaker *circuit.Breaker, pacer provid
 				DetectorVocalPeak:  res.VocalConfidence,
 				DetectorSpeechMean: res.SpeechConfidence,
 				DetectorVocalClass: res.WinningVocalClass,
+				// Reusable == maxAvailable && baselineComplete: persisted as gate_complete.
+				DetectorGateComplete: res.Reusable,
 			}, nil
 		},
 	}

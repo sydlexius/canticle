@@ -286,7 +286,7 @@ func TestListVocalGateRejections(t *testing.T) {
 	ctx := context.Background()
 	// Seed one deferred row, stamp it not-instrumental with telemetry.
 	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
-	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0", GateComplete: true}); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	got, err := q.ListVocalGateRejections(ctx, ListVocalGateRejectionsOptions{})
@@ -345,7 +345,7 @@ func TestResetInstrumentalToUnclassified(t *testing.T) {
 	q := NewDBQueue(openQueueTestDB(t))
 	ctx := context.Background()
 	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
-	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0", GateComplete: true}); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	if reset, err := q.ResetInstrumentalToUnclassified(ctx, id); err != nil || !reset {
@@ -376,7 +376,7 @@ func TestResetInstrumentalToUnclassified_NonDeferredRowNotReset(t *testing.T) {
 	q := NewDBQueue(openQueueTestDB(t))
 	ctx := context.Background()
 	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
-	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0", GateComplete: true}); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	// Simulate a worker claiming the row mid-recalibration.
@@ -409,7 +409,7 @@ func TestResetInstrumentalToUnclassified_NonZeroVerdictNotReset(t *testing.T) {
 	q := NewDBQueue(openQueueTestDB(t))
 	ctx := context.Background()
 	id := seedDeferredRow(t, q, "Artist", "Title", "/music/a.flac")
-	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+	if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0", GateComplete: true}); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	// Simulate a concurrent positive settle (still deferred) landing between the
@@ -462,7 +462,7 @@ func TestListVocalGateRejections_ScopesToLibrary(t *testing.T) {
 		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
 			t.Fatalf("defer %s: %v", title, err)
 		}
-		if _, err := q.StampUnclassifiedMiss(ctx, item.ID, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+		if _, err := q.StampUnclassifiedMiss(ctx, item.ID, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0", GateComplete: true}); err != nil {
 			t.Fatalf("stamp %s: %v", title, err)
 		}
 		return item.ID
@@ -491,7 +491,7 @@ func TestListVocalGateRejections_Limit(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		id := seedDeferredRow(t, q, "Artist", fmt.Sprintf("Title%d", i), fmt.Sprintf("/music/%d.flac", i))
-		if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+		if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0", GateComplete: true}); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 	}
@@ -516,7 +516,7 @@ func TestListVocalGateRejections_AfterID(t *testing.T) {
 	var ids []int64
 	for i := 0; i < 3; i++ {
 		id := seedDeferredRow(t, q, "Artist", fmt.Sprintf("Title%d", i), fmt.Sprintf("/music/%d.flac", i))
-		if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}); err != nil {
+		if _, err := q.StampUnclassifiedMiss(ctx, id, InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0", GateComplete: true}); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		ids = append(ids, id)
@@ -715,5 +715,238 @@ func TestListDetectorInstrumentalMarkers_ClosedDBErrors(t *testing.T) {
 
 	if _, err := q.ListDetectorInstrumentalMarkers(ctx, ListInstrumentalMarkersOptions{}); err == nil {
 		t.Fatal("expected an error querying a closed database, got nil")
+	}
+}
+
+// TestListVocalGateRejections_RequiresGateComplete pins the #511 bit: a row
+// stamped from a degraded classifier response (baselineComplete=false: a real
+// vocal_peak and a non-empty vocal_class, so every other guard passes) must not
+// be listed, a complete row must, and a pre-migration NULL row is excluded.
+func TestListVocalGateRejections_RequiresGateComplete(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	tel := InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}
+	degraded := seedDeferredRow(t, q, "Artist", "Degraded", "/music/degraded.flac")
+	complete := seedDeferredRow(t, q, "Artist", "Complete", "/music/complete.flac")
+	legacy := seedDeferredRow(t, q, "Artist", "Legacy", "/music/legacy.flac")
+	if _, err := q.StampUnclassifiedMiss(ctx, degraded, tel); err != nil { // GateComplete false
+		t.Fatalf("stamp degraded: %v", err)
+	}
+	tel.GateComplete = true
+	if _, err := q.StampUnclassifiedMiss(ctx, complete, tel); err != nil {
+		t.Fatalf("stamp complete: %v", err)
+	}
+	tel.GateComplete = false
+	if _, err := q.StampUnclassifiedMiss(ctx, legacy, tel); err != nil {
+		t.Fatalf("stamp legacy: %v", err)
+	}
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET gate_complete = NULL WHERE id = ?`, legacy); err != nil {
+		t.Fatalf("null the legacy bit: %v", err)
+	}
+	var stored int
+	if err := q.db.QueryRowContext(ctx, `SELECT gate_complete FROM work_queue WHERE id = ?`, degraded).Scan(&stored); err != nil || stored != 0 {
+		t.Fatalf("degraded gate_complete = %d, %v; want a stored 0", stored, err)
+	}
+	got, err := q.ListVocalGateRejections(ctx, ListVocalGateRejectionsOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != complete || !got[0].Tel.GateComplete {
+		t.Fatalf("listed %+v; want only the complete row %d", got, complete)
+	}
+}
+
+// TestGateCompleteWritersAndReset checks every telemetry writer persists the bit
+// and ResetInstrumental clears it with the other telemetry columns.
+func TestGateCompleteWritersAndReset(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	read := func(id int64) *int {
+		t.Helper()
+		var v *int
+		if err := q.db.QueryRowContext(ctx, `SELECT gate_complete FROM work_queue WHERE id = ?`, id).Scan(&v); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		return v
+	}
+	tel := InstrumentalTelemetry{MusicSum: 0.9, VocalPeak: 0.02, SpeechMean: 0.01, VocalClass: "Singing", DetectorVersion: "v1", GateComplete: true}
+
+	settled := seedDeferredRow(t, q, "A", "Settle", "/music/s.flac")
+	set := seedDeferredRow(t, q, "A", "Set", "/music/set.flac")
+	stamp := seedDeferredRow(t, q, "A", "Stamp", "/music/st.flac")
+	if out, err := q.SettleInstrumental(ctx, settled, tel, OwnedByBackfill); err != nil || out != Settled {
+		t.Fatalf("settle = %v, %v", out, err)
+	}
+	if v := read(settled); v == nil || *v != 1 {
+		t.Errorf("SettleInstrumental gate_complete = %v; want 1", v)
+	}
+	if err := q.SetInstrumentalResult(ctx, set, 0, tel); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if v := read(set); v == nil || *v != 1 {
+		t.Errorf("SetInstrumentalResult gate_complete = %v; want 1", v)
+	}
+
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET instrumental_result = 1, status = 'done' WHERE id = ?`, stamp); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if ok, err := q.StampInstrumentalTelemetry(ctx, stamp, tel); err != nil || !ok {
+		t.Fatalf("stamp telemetry = %v, %v", ok, err)
+	}
+	if v := read(stamp); v == nil || *v != 1 {
+		t.Errorf("StampInstrumentalTelemetry gate_complete = %v; want 1", v)
+	}
+
+	if n, err := q.ResetInstrumental(ctx, settled); err != nil || n != 1 {
+		t.Fatalf("reset = %d, %v", n, err)
+	}
+	if v := read(settled); v != nil {
+		t.Errorf("ResetInstrumental left gate_complete = %d; want NULL", *v)
+	}
+}
+
+// StampInstrumentalTelemetry stores the bit it is given, including false: it has
+// its own UPDATE text, distinct from StampUnclassifiedMiss, so a stuck-at-true
+// there is caught by nothing else (#511).
+func TestStampInstrumentalTelemetry_StoresFalseGateBit(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	id := seedDeferredRow(t, q, "A", "Stamp", "/music/st.flac")
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET instrumental_result = 1, status = 'done' WHERE id = ?`, id); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tel := InstrumentalTelemetry{MusicSum: 0.9, VocalPeak: 0.02, SpeechMean: 0.01, VocalClass: "Singing", DetectorVersion: "v1"}
+	if ok, err := q.StampInstrumentalTelemetry(ctx, id, tel); err != nil || !ok {
+		t.Fatalf("stamp = %v, %v", ok, err)
+	}
+	var v *int
+	if err := q.db.QueryRowContext(ctx, `SELECT gate_complete FROM work_queue WHERE id = ?`, id).Scan(&v); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if v == nil || *v != 0 {
+		t.Errorf("gate_complete = %v; want a stored 0 for a degraded stamp", v)
+	}
+}
+
+// The dequeued WorkItem carries the persisted bit: nil for NULL, pointers to the
+// stored value otherwise. The worker memo reuses stored scores only on true.
+func TestDequeueCarriesGateCompleteBit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  string
+		want *bool
+	}{
+		{"null", "NULL", nil},
+		{"zero", "0", boolRef(false)},
+		{"one", "1", boolRef(true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := NewDBQueue(openQueueTestDB(t))
+			ctx := context.Background()
+			id := seedDeferredRow(t, q, "A", "Carry", "/music/c.flac")
+			if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET gate_complete = `+tc.set+`, next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, id); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			item, err := q.Dequeue(ctx)
+			if err != nil {
+				t.Fatalf("Dequeue: %v", err)
+			}
+			switch {
+			case tc.want == nil && item.DetectorGateComplete != nil:
+				t.Errorf("DetectorGateComplete = %v; want nil", *item.DetectorGateComplete)
+			case tc.want != nil && (item.DetectorGateComplete == nil || *item.DetectorGateComplete != *tc.want):
+				t.Errorf("DetectorGateComplete = %v; want %v", item.DetectorGateComplete, *tc.want)
+			}
+		})
+	}
+}
+
+func boolRef(b bool) *bool { return &b }
+
+// CountVocalGateExcluded counts exactly the rows the reopen drops for want of the
+// bit (NULL or 0), and nothing the reopen lists.
+func TestCountVocalGateExcluded(t *testing.T) {
+	q := NewDBQueue(openQueueTestDB(t))
+	ctx := context.Background()
+	tel := InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}
+	if n, err := q.CountVocalGateExcluded(ctx, nil); err != nil || n != 0 {
+		t.Fatalf("empty queue count = %d, %v; want 0", n, err)
+	}
+	complete := seedDeferredRow(t, q, "A", "Complete", "/music/complete.flac")
+	zero := seedDeferredRow(t, q, "A", "Zero", "/music/zero.flac")
+	null := seedDeferredRow(t, q, "A", "Null", "/music/null.flac")
+	for id, gate := range map[int64]bool{complete: true, zero: false, null: false} {
+		tel.GateComplete = gate
+		if _, err := q.StampUnclassifiedMiss(ctx, id, tel); err != nil {
+			t.Fatalf("stamp %d: %v", id, err)
+		}
+	}
+	if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET gate_complete = NULL WHERE id = ?`, null); err != nil {
+		t.Fatalf("null the bit: %v", err)
+	}
+	if n, err := q.CountVocalGateExcluded(ctx, nil); err != nil || n != 2 {
+		t.Errorf("count = %d, %v; want 2 (the 0 and the NULL row, not the complete one)", n, err)
+	}
+
+	// Rows the list also excludes for another reason must not be counted, even
+	// with the gate bit unset: this pins the shared base predicate and the
+	// word-recheck exclusion (a count of the gate term alone would include them).
+	for _, tc := range []struct{ name, set string }{
+		{"done", `status = 'done'`},
+		{"null-score", `music_sum = NULL`},
+		{"empty-vocal-class", `vocal_class = ''`},
+		{"word-recheck", `word_timing_state = 'queued'`},
+	} {
+		id := seedDeferredRow(t, q, "A", "Other-"+tc.name, "/music/other-"+tc.name+".flac")
+		tel.GateComplete = false
+		if _, err := q.StampUnclassifiedMiss(ctx, id, tel); err != nil {
+			t.Fatalf("stamp %s: %v", tc.name, err)
+		}
+		if _, err := q.db.ExecContext(ctx, `UPDATE work_queue SET gate_complete = NULL, `+tc.set+` WHERE id = ?`, id); err != nil { //nolint:gosec // reason: G202 -- tc.set is a literal from this test table
+			t.Fatalf("make %s row: %v", tc.name, err)
+		}
+	}
+	if n, err := q.CountVocalGateExcluded(ctx, nil); err != nil || n != 2 {
+		t.Errorf("count with other-reason rows = %d, %v; want still 2", n, err)
+	}
+}
+
+// CountVocalGateExcluded honors the same library option the list does.
+func TestCountVocalGateExcluded_ScopesToLibrary(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := openQueueTestDB(t)
+	q := NewDBQueue(sqlDB)
+	libA, srA := insertLibraryAndScanResult(t, sqlDB, "/libA", "/libA/a.mp3")
+	libB, srB := insertLibraryAndScanResult(t, sqlDB, "/libB", "/libB/b.mp3")
+	tel := InstrumentalTelemetry{MusicSum: 0.97, VocalPeak: 0.04, SpeechMean: 0.001, VocalClass: "Singing", DetectorVersion: "1.17.0"}
+	for i, sr := range []int64{srA, srB, srB} {
+		item, err := q.Enqueue(ctx, models.Inputs{
+			Track:        models.Track{ArtistName: "Artist", TrackName: fmt.Sprintf("t%d", i)},
+			Outdir:       "out",
+			Filename:     fmt.Sprintf("t%d.lrc", i),
+			SourcePath:   fmt.Sprintf("/lib/t%d.mp3", i),
+			ScanResultID: sr,
+		}, PriorityScan)
+		if err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		if _, err := q.Dequeue(ctx); err != nil {
+			t.Fatalf("dequeue %d: %v", i, err)
+		}
+		if _, err := q.Defer(ctx, item.ID, time.Hour, errors.New("no results found")); err != nil {
+			t.Fatalf("defer %d: %v", i, err)
+		}
+		if _, err := q.StampUnclassifiedMiss(ctx, item.ID, tel); err != nil {
+			t.Fatalf("stamp %d: %v", i, err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		lib  *int64
+		want int
+	}{{"all", nil, 3}, {"libA", &libA, 1}, {"libB", &libB, 2}} {
+		if n, err := q.CountVocalGateExcluded(ctx, tc.lib); err != nil || n != tc.want {
+			t.Errorf("%s: count = %d, %v; want %d", tc.name, n, err, tc.want)
+		}
 	}
 }

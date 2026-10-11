@@ -2356,6 +2356,9 @@ func (w *Worker) primeDetectorMemo(item queue.WorkItem) {
 		return
 	}
 	tel := &storedTelemetry{Version: *item.DetectorVersion}
+	if item.DetectorGateComplete != nil {
+		tel.GateComplete = *item.DetectorGateComplete
+	}
 	if item.DetectorMusicSum != nil {
 		tel.MusicSum = *item.DetectorMusicSum
 	}
@@ -2396,6 +2399,8 @@ func (w *Worker) stampDetectorMissTelemetry(ctxNoCancel context.Context, id int6
 		SpeechMean:      res.SpeechConfidence,
 		VocalClass:      res.WinningVocalClass,
 		DetectorVersion: res.Version,
+		// Always true here: the Reusable guard above skips every degraded response.
+		GateComplete: res.Reusable,
 	}
 	if err := w.queue.SetInstrumentalResult(ctxNoCancel, id, 0, tel); err != nil {
 		slog.Warn("worker: stamp not-instrumental telemetry failed; will re-infer next pass", "id", id, "error", err)
@@ -2426,6 +2431,7 @@ func (w *Worker) settleDetectorInstrumental(ctxNoCancel context.Context, item qu
 		SpeechMean:      song.DetectorSpeechMean,
 		VocalClass:      song.DetectorVocalClass,
 		DetectorVersion: song.DetectorVersion,
+		GateComplete:    song.DetectorGateComplete,
 	}
 	outcome, err := w.queue.SettleInstrumental(ctxNoCancel, item.ID, tel, queue.OwnedByWorker)
 	if err != nil {

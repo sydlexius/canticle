@@ -35,9 +35,11 @@ type fakeStore struct {
 	// rather than mere callback execution.
 	order *[]string
 
-	lastOpts    queue.ListUnclassifiedOptions
-	stamped     map[int64]int
-	settled     []int64
+	lastOpts queue.ListUnclassifiedOptions
+	stamped  map[int64]int
+	settled  []int64
+	// gateBits records the GateComplete bit each write carried, per queue id.
+	gateBits    map[int64]bool
 	stampCalls  int
 	settleCalls int
 	// laneAttempts is the LAST attempt recorded per queue id, mirroring the real
@@ -81,7 +83,15 @@ func (s *fakeStore) ListUnclassified(_ context.Context, opts queue.ListUnclassif
 	return items, nil
 }
 
-func (s *fakeStore) SettleInstrumental(_ context.Context, id int64, _ queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error) {
+func (s *fakeStore) recordGate(id int64, tel queue.InstrumentalTelemetry) {
+	if s.gateBits == nil {
+		s.gateBits = map[int64]bool{}
+	}
+	s.gateBits[id] = tel.GateComplete
+}
+
+func (s *fakeStore) SettleInstrumental(_ context.Context, id int64, tel queue.InstrumentalTelemetry, owner queue.RowOwnership) (queue.SettleOutcome, error) {
+	s.recordGate(id, tel)
 	// The backfill does not own its rows; passing OwnedByWorker would guard on the
 	// wrong status and settle nothing in production, so assert it here.
 	if owner != queue.OwnedByBackfill {
@@ -102,7 +112,8 @@ func (s *fakeStore) SettleInstrumental(_ context.Context, id int64, _ queue.Inst
 	return queue.Settled, nil
 }
 
-func (s *fakeStore) StampUnclassifiedMiss(_ context.Context, id int64, _ queue.InstrumentalTelemetry) (bool, error) {
+func (s *fakeStore) StampUnclassifiedMiss(_ context.Context, id int64, tel queue.InstrumentalTelemetry) (bool, error) {
+	s.recordGate(id, tel)
 	s.stampCalls++
 	if s.stampErr != nil {
 		return false, s.stampErr
@@ -852,5 +863,31 @@ func TestRun_NegativeVerdictReportFailureAbortsStamp(t *testing.T) {
 	}
 	if store.stampCalls != 0 {
 		t.Errorf("stamped despite a failed backup (%d calls)", store.stampCalls)
+	}
+}
+
+// The detector's Reusable flag (vocal gate ran on a complete response) must reach
+// both backfill writes as the gate_complete bit, in both polarities (#511): a
+// settle from a complete response carries true, and a degraded miss carries false.
+func TestRun_PropagatesGateCompleteBit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		res  detector.Result
+		want bool
+	}{
+		{"complete instrumental settle", detector.Result{Instrumental: true, Confidence: 0.95, Version: "v1", Reusable: true}, true},
+		{"complete miss", detector.Result{Confidence: 0.5, Version: "v1", Reusable: true}, true},
+		{"degraded miss", detector.Result{Confidence: 0.5, Version: "v1", Reusable: false}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore(t, item(1, "/music/a.flac"))
+			if _, err := New(store, fakeDetector{res: tc.res}, &fakeWriter{}).Run(context.Background(), Options{GlobalDetectDefault: true}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			got, ok := store.gateBits[1]
+			if !ok || got != tc.want {
+				t.Errorf("gate bit written = %v (present=%v); want %v", got, ok, tc.want)
+			}
+		})
 	}
 }

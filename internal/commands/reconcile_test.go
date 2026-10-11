@@ -364,6 +364,20 @@ func TestRunScanReconcile_StampsTelemetryOnConfirm(t *testing.T) {
 		t.Errorf("detector_version = %q; want the sidecar model version. A stamped row must record "+
 			"WHICH MODEL confirmed it, since that is what gates verdict reuse", dv)
 	}
+	// The stub answers a complete response (max map with a baseline class), so
+	// the stamp must carry gate_complete = 1 (#511).
+	sqlDB, err := db.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	var gate *int
+	if err := sqlDB.QueryRowContext(ctx, `SELECT gate_complete FROM work_queue WHERE id = ?`, id).Scan(&gate); err != nil {
+		t.Fatalf("read gate_complete: %v", err)
+	}
+	if gate == nil || *gate != 1 {
+		t.Errorf("gate_complete = %v; want 1 from a complete detector response", gate)
+	}
 }
 
 // clearTelemetry reduces a row to the pre-migration-025 shape: an instrumental
