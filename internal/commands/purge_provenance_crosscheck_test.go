@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 // setPurgeLane stamps work_queue.provider_lane on the seeded row for filename.
 func setPurgeLane(t *testing.T, ctx context.Context, dbPath, filename, lane string) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

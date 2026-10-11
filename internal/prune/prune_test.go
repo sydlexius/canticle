@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -120,7 +120,7 @@ func openSeeded(t *testing.T) (context.Context, *sql.DB, int64, string) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestPrunePath_PrefixBoundary(t *testing.T) {
 func TestSweep_LibraryScoped(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	sqlDB, err := db.Open(ctx, filepath.Join(dir, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

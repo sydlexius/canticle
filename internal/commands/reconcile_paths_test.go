@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/prune"
@@ -37,7 +37,7 @@ func seedReconcilePathsRow(t *testing.T, ctx context.Context, dbPath, filePath s
 	if err := os.WriteFile(filePath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -79,7 +79,7 @@ func reconcilePathsCfg(t *testing.T, cfgPath, dbPath string) {
 
 func countRows(t *testing.T, ctx context.Context, dbPath, table string) int {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open count: %v", err)
 	}
@@ -102,7 +102,7 @@ func setupReconcilePaths(t *testing.T) (ctx context.Context, cfgPath, dbPath, ro
 		t.Fatalf("mkdir root: %v", err)
 	}
 	reconcilePathsCfg(t, cfgPath, dbPath)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestRunSweeperStartupReconciles(t *testing.T) {
 	if err := os.RemoveAll(filepath.Dir(gone)); err != nil {
 		t.Fatalf("remove dir: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestRunSweeperRelinksInFolderSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedReconcilePathsPresentFile(t, ctx, dbPath, flac, "")
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestRunSweeperLogsRelinkAndRetainOutcomes(t *testing.T) {
 		}
 	}
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestRunSweeperRecordsDeletedSources(t *testing.T) {
 				// Opens for append, but fsync fails on a character device.
 				backup = os.DevNull
 			}
-			sqlDB, err := db.Open(ctx, dbPath)
+			sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -612,7 +612,7 @@ func TestRunSweeperLogsSkippedPrune(t *testing.T) {
 	gone, busy := filepath.Join(root, "ArtistA", "01. gone.flac"), filepath.Join(root, "ArtistB", "01. busy.flac")
 	seedReconcilePathsRow(t, ctx, dbPath, gone)
 	seedReconcilePathsRow(t, ctx, dbPath, busy)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,7 +651,7 @@ func TestReconcilePaths_SkippedPruneIsNotCountedAsPruned(t *testing.T) {
 	gone, busy := filepath.Join(root, "ArtistA", "01. gone.flac"), filepath.Join(root, "ArtistB", "01. busy.flac")
 	seedReconcilePathsRow(t, ctx, dbPath, gone)
 	seedReconcilePathsRow(t, ctx, dbPath, busy)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +704,7 @@ func TestRunSweeperAgesOutGoneRow(t *testing.T) {
 	if err := os.Remove(gone); err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -801,7 +801,7 @@ func TestRunSweeperBreakerAndItsAdvice(t *testing.T) {
 	ctx, cfgPath, dbPath, root := setupReconcilePaths(t)
 	const n = 51
 	seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistA", "kept.flac"))
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -905,7 +905,7 @@ func TestReconcilePaths_ReportsRetainedSourcesHoldingWork(t *testing.T) {
 			for _, name := range []string{"D1", "D2"} {
 				seedReconcilePathsRow(t, ctx, dbPath, filepath.Join(root, "ArtistA", name, "02. "+name+".flac"))
 			}
-			sqlDB, err := db.Open(ctx, dbPath)
+			sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 			if err != nil {
 				t.Fatal(err)
 			}

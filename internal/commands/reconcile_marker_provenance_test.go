@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -35,7 +35,7 @@ func seedDetectorMarker(t *testing.T, ctx context.Context, dbPath, outdir, detec
 // lets a test cover the marker-absent-on-disk skip path).
 func seedDetectorMarkerRow(t *testing.T, ctx context.Context, dbPath, outdir, basename, detectorVersion string, writeMarker bool) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestRunReconcileMarkerProvenance_MissingWorkQueueTableFailsClean(t *testing
 	cfgPath := filepath.Join(dir, "config.toml")
 	writeMarkerProvCfg(t, cfgPath, dbPath)
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

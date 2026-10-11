@@ -12,7 +12,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -49,7 +49,7 @@ func timingSweepCfg(dbPath string, mutate func(*config.Config)) config.Config {
 // accept-time guard existed. Either alone must NOT start a file-moving loop.
 func TestNewTimingSweepJobRequiresBothFlags(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sweep.db")
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestNewTimingSweepJobRequiresBothFlags(t *testing.T) {
 // audio -- silently, forever, unattended.
 func TestNewTimingSweepJobRejectsAnIllegalAction(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sweep.db")
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestNewTimingSweepJobRejectsAnIllegalAction(t *testing.T) {
 // still waking on every tick.
 func TestNewTimingSweepJobDefaultsANonPositiveBatch(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sweep.db")
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -216,7 +216,7 @@ func sweepFixture(t *testing.T, mutate func(*config.Config)) (*timingSweepJob, *
 	ctx := context.Background()
 	base := t.TempDir()
 	dbPath := filepath.Join(base, "sweep.db")
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -578,7 +578,7 @@ func TestNewTimingSweepJobRefusesAQuarantineInsideALibrary(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	dbPath := filepath.Join(dbDir, "sweep.db")
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -614,7 +614,7 @@ func TestNewTimingSweepJobRefusesAQuarantineInsideALibrary(t *testing.T) {
 func TestBankingDurationLookupFillsAColdCache(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(base, "bank.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestBankingDurationLookupFillsAColdCache(t *testing.T) {
 func TestBankingDurationLookupDegradesToAMiss(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(base, "bank.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -702,7 +702,7 @@ func TestBankingDurationLookupDegradesToAMiss(t *testing.T) {
 func TestBankingDurationLookupPropagatesAStoreFailure(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(base, "bank.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestRunCycleUsesTheProductionDurationWiring(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
 	dbPath := filepath.Join(base, "sweep.db")
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -818,7 +818,7 @@ func untaggedMP3Bytes(frames int) []byte {
 func TestBankingDurationLookupResolvesUntaggedAudio(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	sqlDB, err := db.Open(ctx, filepath.Join(base, "bank.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(base, "bank.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1013,7 +1013,7 @@ func TestRunCycleStampsPostSettleSource(t *testing.T) {
 // second handle on the fixture database (it sits beside the backup trail).
 func sweepRowVerdict(t *testing.T, job *timingSweepJob, id int64) (timingOutcome, outcomeType string) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(filepath.Dir(job.backupPath), "sweep.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(filepath.Dir(job.backupPath), "sweep.db"))
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}

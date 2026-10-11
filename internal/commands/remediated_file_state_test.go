@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/revalidate"
 )
 
@@ -37,7 +37,7 @@ var fileStateCases = []struct {
 // readFileState returns the row's outcome_type and sync_tier ("" for NULL).
 func readFileState(t *testing.T, dbPath string) (outcome, tier string) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -52,7 +52,7 @@ func readFileState(t *testing.T, dbPath string) (outcome, tier string) {
 // tierTheRow gives the seeded synced row the word tier a real fetch would have.
 func tierTheRow(t *testing.T, dbPath string) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestSweepVerdictAndFileStateAreOneWrite(t *testing.T) {
 	dbPath := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(lrc))), "sweep.db")
 	writeFile(t, lrc, lateCueBody)
 	tierTheRow(t, dbPath)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

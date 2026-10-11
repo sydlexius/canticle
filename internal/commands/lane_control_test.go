@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/musixmatch"
@@ -84,7 +84,7 @@ func TestRunServe_SeedsLaneControls(t *testing.T) {
 
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "serve.db")
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

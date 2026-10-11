@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/testutil"
@@ -40,7 +40,7 @@ func writeRealignCfg(t *testing.T, path, dbPath, realignBody string) {
 // for root.
 func seedRealignLibrary(t *testing.T, ctx context.Context, dbPath, root, name string) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}

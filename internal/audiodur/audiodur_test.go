@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/audiodur"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 )
 
 // testReaderVersion is the parser identity every single-Store test writes and
@@ -24,7 +24,7 @@ func openTestStore(t *testing.T) *audiodur.Store {
 // under readerVersion.
 func openTestStoreAs(t *testing.T, readerVersion string) *audiodur.Store {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -37,7 +37,7 @@ func openTestStoreAs(t *testing.T, readerVersion string) *audiodur.Store {
 // rows persist and the code changes underneath them.
 func openSharedDB(t *testing.T, versionA, versionB string) (a, b *audiodur.Store) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestRecordRestampsRowOnReaderChange(t *testing.T) {
 // pre-existing population invalidates itself with no row data migrated.
 func TestLegacyNullReaderVersionIsAMiss(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/selfwrite"
 )
 
@@ -14,7 +14,7 @@ import (
 // no path it returns the disabled form (empty DBPath, which makes the routes 404).
 func TestWebMarkDeps(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "serve.db")
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/pathutil"
@@ -45,7 +45,7 @@ func setupIndexMetadata(t *testing.T, filenames ...string) (cfgPath, dbPath, roo
 		}
 	}
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -72,7 +72,7 @@ func addSecondLibrary(t *testing.T, dbPath, name string, filenames ...string) {
 			t.Fatalf("write fixture %s: %v", fn, err)
 		}
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -93,7 +93,7 @@ func countAudioMetadataRows(t *testing.T, dbPath string) int {
 func indexedFilePaths(t *testing.T, dbPath string) []string {
 	t.Helper()
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestIndexMetadataNoLibraryRoots(t *testing.T) {
 	dbPath := filepath.Join(dir, "test.db")
 	cfgPath := filepath.Join(dir, "config.toml")
 	reconcilePathsCfg(t, cfgPath, dbPath)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +684,7 @@ func countAudioDurationRows(t *testing.T, dbPath string) int {
 func bankedDuration(t *testing.T, dbPath, filePath string) (seconds int, found bool) {
 	t.Helper()
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -810,7 +810,7 @@ func TestIndexMetadataDurationBankFailureIsNonFatal(t *testing.T) {
 	// test isolates the branch under examination instead of breaking the DB
 	// wholesale and asserting on a failure that could have come from anywhere.
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -875,7 +875,7 @@ func TestIndexMetadataBanksDurationOnCacheHitWithoutReading(t *testing.T) {
 	// Now forge the production state: delete the duration row that pass 1 wrote,
 	// leaving the metadata row current. This is what an upgrade from a build that
 	// indexed metadata but never banked durations looks like on disk.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -965,7 +965,7 @@ func TestIndexMetadataCacheHitDurationBankFailureIsNonFatal(t *testing.T) {
 	// Break ONLY the duration store, leaving audio_metadata intact: the Lookup
 	// still hits, the walk still takes the skip path, and Record then fails on a
 	// missing relation.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestIndexMetadataDryRunWritesNoDurationOnCacheHit(t *testing.T) {
 	}
 
 	// Clear the duration rows pass 1 wrote, leaving the metadata rows current.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

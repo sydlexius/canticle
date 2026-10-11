@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/webauth"
 )
@@ -53,7 +53,7 @@ func addLoginCSRF(r *http.Request) {
 // already set up and the login backoff sleep stubbed out so tests do not block.
 func newTestAuth(t *testing.T, policy *trustnet.Policy) (*Auth, *webauth.Service) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "web.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "web.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

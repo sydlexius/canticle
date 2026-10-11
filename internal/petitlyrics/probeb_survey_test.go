@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -491,7 +492,7 @@ func probeBSample(ctx context.Context, c *Client, row probeBRow, bands map[strin
 // integration-test convention.
 func TestSampleDoneRowsUsesBandQuota(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "probeb.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "probeb.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

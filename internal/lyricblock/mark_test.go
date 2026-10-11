@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/selfwrite"
@@ -37,7 +37,7 @@ func newFx(t *testing.T) *fx {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	d, err := db.Open(ctx, filepath.Join(base, "t.db"))
+	d, err := dbtest.OpenAt(ctx, t, filepath.Join(base, "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -39,7 +39,7 @@ func newFixture(t *testing.T) *fixture {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, err := db.Open(ctx, filepath.Join(base, "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(base, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

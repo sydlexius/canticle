@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
@@ -40,7 +40,7 @@ func newCacheLaneRig(t *testing.T, primary *fakeFetcher) (*cacheLaneRig, *Worker
 func newCacheLaneRigFor(t *testing.T, primary *fakeFetcher, track models.Track) (*cacheLaneRig, *Worker) {
 	t.Helper()
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

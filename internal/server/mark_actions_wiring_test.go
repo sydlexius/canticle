@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/instrumentalmark"
 	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -22,7 +22,7 @@ import (
 // passing deps with no database path, leaves the same route answering 404.
 func TestWithMarkActionsWiring(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

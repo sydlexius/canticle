@@ -13,6 +13,7 @@ import (
 	"github.com/sydlexius/canticle/internal/audiodur"
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
@@ -64,7 +65,7 @@ const fixtureDurationSeconds = 120
 // the same audiodur store the command reads from.
 func primeDuration(t *testing.T, dbPath, audio string, seconds int) {
 	t.Helper()
-	sqlDB, err := db.Open(t.Context(), dbPath)
+	sqlDB, err := dbtest.OpenAt(t.Context(), t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -228,7 +229,7 @@ func addRevalidateLibrary(t *testing.T, cfgPath, name, root string) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	sqlDB, err := dbtest.OpenAt(t.Context(), t, cfg.DB.Path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -469,7 +470,7 @@ func seedRevalidateRow(t *testing.T, cfgPath, audio string) *queue.DBQueue {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	sqlDB, err := dbtest.OpenAt(t.Context(), t, cfg.DB.Path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -516,7 +517,7 @@ func TestRevalidateApplyStampsTheCoupledRow(t *testing.T) {
 	// A post-settle stamp (#1120): the row is owed one provider pass.
 	if cfg, err := config.Load(cfgPath); err != nil {
 		t.Fatal(err)
-	} else if sqlDB, err := db.Open(t.Context(), cfg.DB.Path); err != nil {
+	} else if sqlDB, err := dbtest.OpenAt(t.Context(), t, cfg.DB.Path); err != nil {
 		t.Fatal(err)
 	} else {
 		var src sql.NullString
@@ -670,7 +671,7 @@ func TestRevalidateApplyStampFailureExitsNonZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	sqlDB, err := dbtest.OpenAt(t.Context(), t, cfg.DB.Path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -743,7 +744,7 @@ func TestStampRemediatedRowsInFlightRowIsNotStamped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	sqlDB, err := dbtest.OpenAt(t.Context(), t, cfg.DB.Path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -768,7 +769,7 @@ func TestRevalidateApplyLookupFailureExitsNonZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	sqlDB, err := db.Open(t.Context(), cfg.DB.Path)
+	sqlDB, err := dbtest.OpenAt(t.Context(), t, cfg.DB.Path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

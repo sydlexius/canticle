@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/cache"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/purgeprovenance"
@@ -38,7 +38,7 @@ func writePurgeSidecar(t *testing.T, path, source string) {
 // wqStatus.
 func seedPurgeTrack(t *testing.T, ctx context.Context, dbPath, outdir, filename, wqStatus string) {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -90,7 +90,7 @@ func setupPurgeProvenance(t *testing.T) (ctx context.Context, cfgPath, dbPath, r
 		t.Fatalf("mkdir root: %v", err)
 	}
 	purgeProvenanceCfg(t, cfgPath, dbPath)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestPurgeProvenance_NoLibrariesConfigured(t *testing.T) {
 	dbPath := filepath.Join(dir, "test.db")
 	cfgPath := filepath.Join(dir, "config.toml")
 	purgeProvenanceCfg(t, cfgPath, dbPath)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -714,7 +714,7 @@ func TestPurgeProvenance_SummaryReportsCacheInvalidation(t *testing.T) {
 	writePurgeSidecar(t, target, "musixmatch")
 	seedPurgeTrack(t, ctx, dbPath, filepath.Dir(target), "one.lrc", "done")
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -855,7 +855,7 @@ func TestPurgeProvenance_ManualMarkedSidecarIsSkippedInSummary(t *testing.T) {
 	writePurgeSidecar(t, plain, "musixmatch")
 	seedPurgeTrack(t, ctx, dbPath, dir, "marked.lrc", "done")
 	seedPurgeTrack(t, ctx, dbPath, dir, "plain.lrc", "done")
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/normalize"
 )
@@ -96,7 +96,7 @@ func writeLRCFile(t *testing.T, path string) {
 
 func TestProvenanceSchemaQuery(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestProvenanceSchemaQuery(t *testing.T) {
 // returned 0 rows and the file was silently counted as skipped.
 func TestLookupPlan_OutdirNormalization(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestLookupPlan_OutdirNormalization(t *testing.T) {
 
 func TestBackfillPlansFromPaths_Basic(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestBackfillPlansFromPaths_Basic(t *testing.T) {
 
 func TestBackfillPlansFromDB_Basic(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestBackfillPlansFromDB_Basic(t *testing.T) {
 func TestRunProvenanceBackfill_YesGuard(t *testing.T) {
 	ctx := context.Background()
 	tmpDB := filepath.Join(t.TempDir(), "test.db")
-	sqlDB, err := db.Open(ctx, tmpDB)
+	sqlDB, err := dbtest.OpenAt(ctx, t, tmpDB)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestRunProvenanceBackfill_YesGuard(t *testing.T) {
 func TestRunProvenanceBackfill_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	tmpDB := filepath.Join(t.TempDir(), "test.db")
-	sqlDB, err := db.Open(ctx, tmpDB)
+	sqlDB, err := dbtest.OpenAt(ctx, t, tmpDB)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestRunProvenanceBackfill_Idempotent(t *testing.T) {
 func TestRunProvenanceBackfill_LRCOnly(t *testing.T) {
 	ctx := context.Background()
 	tmpDB := filepath.Join(t.TempDir(), "test.db")
-	sqlDB, err := db.Open(ctx, tmpDB)
+	sqlDB, err := dbtest.OpenAt(ctx, t, tmpDB)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestRunProvenanceBackfill_LRCOnly(t *testing.T) {
 func TestRunProvenanceBackfill_PartialCoverage(t *testing.T) {
 	ctx := context.Background()
 	tmpDB := filepath.Join(t.TempDir(), "test.db")
-	sqlDB, err := db.Open(ctx, tmpDB)
+	sqlDB, err := dbtest.OpenAt(ctx, t, tmpDB)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestResolveOutputPaths(t *testing.T) {
 
 func TestBackfillPlansFromPaths_StatError(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -522,7 +522,7 @@ func TestBackfillPlansFromPaths_StatError(t *testing.T) {
 // matching DB row are counted as skipped, not silently dropped.
 func TestBackfillPlansFromPaths_SkippedCount(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -646,7 +646,7 @@ func seedAmbiguousDB(t *testing.T, sqlDB *sql.DB, outdir, lrcFilename string) {
 // lookupPlan returns false (warn+skip) instead of silently picking one.
 func TestLookupPlan_AmbiguousCollision(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -670,7 +670,7 @@ func TestLookupPlan_AmbiguousCollision(t *testing.T) {
 // correct provenance, matching what DB mode produces for the same data.
 func TestLookupPlan_DualFormatSingleTrack(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -706,7 +706,7 @@ func TestLookupPlan_DualFormatSingleTrack(t *testing.T) {
 // cross-attribution is possible even with two scan_results.
 func TestBackfillPlansFromDB_CollisionProducesOnePlan(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	dbpkg "github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/normalize"
 )
 
@@ -30,7 +30,7 @@ func (f fakeReader) read(path string) (string, string, error) {
 
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
-	sqlDB, err := dbpkg.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

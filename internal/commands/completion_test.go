@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/models"
 )
@@ -140,7 +140,7 @@ func TestRunComplete_LibraryNamesFromDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, cfg.DB.Path)
+	sqlDB, err := dbtest.OpenAt(ctx, t, cfg.DB.Path)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

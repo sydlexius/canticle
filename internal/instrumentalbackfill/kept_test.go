@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -34,7 +34,7 @@ func (d *countingDetector) Detect(context.Context, string) (detector.Result, err
 // re-detected (audio read + inference, a disk wake) every cycle forever.
 func TestRun_KeptBetterLyricsLeaveTheBacklog(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func (w *partialThenKeptWriter) WriteLRC(song models.Song, filename, outdir stri
 // beside the surviving marker; it stays unclassified for the next cycle.
 func TestRun_KeptBetterWithFailedRollbackDoesNotStamp(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

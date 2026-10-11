@@ -13,7 +13,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/petitlyrics"
 	"github.com/sydlexius/canticle/internal/providers"
@@ -28,7 +28,7 @@ import (
 func seedLibraryRows(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
-	d, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	d, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -334,7 +334,7 @@ var reasonShapes = []struct{ err, want string }{
 
 func openReasonDB(t *testing.T) *sql.DB {
 	t.Helper()
-	d, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	d, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

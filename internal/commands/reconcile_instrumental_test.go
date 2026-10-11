@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 )
@@ -44,7 +44,7 @@ func seedUnclassifiedDeferred(t *testing.T, ctx context.Context, dbPath, outdir 
 	if err := os.WriteFile(srcPath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestRunReconcileInstrumental_WritesMarkerForNeverScoredRow(t *testing.T) {
 		t.Fatalf("apply must write the instrumental marker: %v", err)
 	}
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRunReconcileInstrumental_HonorsPerItemOptOut(t *testing.T) {
 	if err := os.WriteFile(srcPath, []byte("audio"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestRunReconcileInstrumental_NotInstrumentalStampsAndLeavesDeferred(t *test
 		t.Errorf("output should report the disagreement:\n%s", buf.String())
 	}
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open verify: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestRunReconcileInstrumental_LimitReportsWhatItLeftBehind(t *testing.T) {
 	writeReconcileCfg(t, cfgPath, dbPath, srv.URL, fakeFFmpegCmd(t))
 
 	// Two never-classified deferred rows; --limit=1 must examine one and say so.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open seed: %v", err)
 	}

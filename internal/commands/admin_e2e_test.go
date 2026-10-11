@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/webauth"
 )
 
@@ -29,7 +29,7 @@ func adminTestEnv(t *testing.T) (cfgPath, user string) {
 	}
 
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -57,7 +57,7 @@ func openAdminSvc(t *testing.T, cfgPath string) (*webauth.Service, func()) {
 	}
 	dbPath := strings.ReplaceAll(parts[1], `\\`, `\`)
 
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

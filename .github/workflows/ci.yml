@@ -193,13 +193,12 @@ jobs:
   # restore-keys. That is the case where a primer genuinely earns its keep.
   #
   # Shards no longer `needs` this job; they restore whatever entry exists via
-  # the same key + restore-keys, read-only (no post-job save), so ten concurrent
+  # the same key + restore-keys, read-only (no post-job save), so concurrent
   # shards never race to write the same key.
   #
-  # This job also owns `make ui-validate` (the generated-CSS correctness gate,
-  # formerly on the Test job). It runs exactly once instead of once per shard,
-  # and because every shard `needs` this job, a broken Tailwind run still fails
-  # the pipeline before any shard starts.
+  # This job does NOT own `make ui-validate`: that gate runs in the required
+  # `Lint` job (see its step above), because this job is push-only and the gate
+  # must run on every code PR. No shard waits on this job.
   # ---------------------------------------------------------------------------
   go-cache-primer:
     name: Go Cache Primer
@@ -265,7 +264,7 @@ jobs:
 
   test:
     # Per-shard display names render as "Test Shard (commands-1)",
-    # "Test Shard (web)", etc. The bare required check name "Test" is owned by
+    # "Test Shard (rest)", etc. The bare required check name "Test" is owned by
     # the always-running `test-gate` job further down, so branch protection
     # keeps requiring ONE context instead of enumerating every shard.
     name: Test Shard
@@ -302,7 +301,7 @@ jobs:
       #   - pull_request (the common case): the exact key MISSES and the first
       #     restore-key warms from the last entry built against the same
       #     go.mod/go.sum -- normally the one push-to-main last published.
-      # Restore-only (no post-job save), so ten concurrent shards never race to
+      # Restore-only (no post-job save), so concurrent shards never race to
       # write the same key.
       - name: Restore Go module + build cache (read-only)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -323,7 +322,7 @@ jobs:
       # cross-job dependency, so regenerating is strictly simpler. Every shard
       # needs them: internal/web go:embed's the generated CSS and templ output,
       # so a shard without them fails to build even when it runs no web test.
-      # `make ui-validate` deliberately does NOT run here -- the primer owns it.
+      # `make ui-validate` deliberately does NOT run here -- the Lint job owns it.
       - name: Install Tailwind standalone CLI (v4.2.0)
         run: bash scripts/install-tailwind.sh "$RUNNER_TEMP/tailwindcss"
 
@@ -335,9 +334,8 @@ jobs:
       # SOURCE OF TRUTH for the split: the same script generated the matrix in
       # the `changes` job above, so the shard names and the package map cannot
       # drift apart. See that script's header for the measured per-package CI
-      # times the split is balanced against, and for why internal/commands and
-      # internal/queue are partitioned by test name rather than merely given
-      # their own shards.
+      # times the split is balanced against, and for why only internal/commands
+      # is partitioned by test name rather than given a shard of its own.
       #
       # `rest` is the DYNAMIC remainder: its package list is derived by
       # excluding every named shard's packages from `go list ./...`, so a newly

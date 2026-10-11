@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyricblock"
 )
 
 func (f *qiFixture) blockCount(t *testing.T) int {
 	t.Helper()
-	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	sqlDB, err := dbtest.OpenAt(f.ctx, t, f.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestScanMarkWrongRefusalMappingNeedsAZeroResult(t *testing.T) {
 // on the same title.
 func TestScanUnblockDryRunEmptyKeyCountsOnlyItsOwnBlocks(t *testing.T) {
 	f := newQIFixture(t)
-	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	sqlDB, err := dbtest.OpenAt(f.ctx, t, f.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestScanUnblockOrphans(t *testing.T) {
 	}); code != 0 {
 		t.Fatal("mark-wrong failed")
 	}
-	sqlDB, err := db.Open(f.ctx, f.dbPath)
+	sqlDB, err := dbtest.OpenAt(f.ctx, t, f.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

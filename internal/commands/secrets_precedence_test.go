@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/secrets"
@@ -21,7 +21,7 @@ import (
 // SQL-backed secret store. Real SQLite, no mocks, per repo convention.
 func newSecretStore(t *testing.T) *secrets.SQLStore {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "secrets.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestResolveSecretStore_DockerAutoCreatesKeyFile(t *testing.T) {
 	t.Setenv("MXLRC_MASTER_KEY", "")
 	keyFile := filepath.Join(t.TempDir(), "test.key")
 
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "secrets.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestResolveSecretStore_NativeAutoCreatesKeyFile(t *testing.T) {
 	t.Setenv("MXLRC_MASTER_KEY", "")
 	keyFile := filepath.Join(t.TempDir(), "test.key")
 
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "secrets.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestResolveSecretStore_MalformedMasterKey(t *testing.T) {
 	t.Setenv("MXLRC_DOCKER", "")
 	t.Setenv("MXLRC_MASTER_KEY", "not-valid-base64!!!")
 
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "secrets.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "secrets.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestResolveSecretStore_MalformedMasterKey(t *testing.T) {
 // returns a non-ErrNoRows error, exercising the helpers' read-error branches.
 func closedStore(t *testing.T) secrets.Store {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "closed.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "closed.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestRunServe_DBSecretsThenVerifierFailure(t *testing.T) {
 	dbPath := filepath.Join(dir, "serve.db")
 
 	// Seed both secrets into the DB encrypted with the SAME key runServe resolves.
-	sqlDB, err := db.Open(context.Background(), dbPath)
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

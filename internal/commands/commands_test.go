@@ -17,7 +17,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/innertube"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/lyrics"
@@ -296,7 +296,7 @@ func TestConfigureWorkerProviderRecorderWiresRecorder(t *testing.T) {
 	configureWorkerProviderRecorder(w, nil)
 	// A non-nil recorder must also be accepted without panic.
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "wiring.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "wiring.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -807,7 +807,7 @@ func TestServeScanIntervalPrecedence(t *testing.T) {
 }
 
 func TestSchedulerBuildsScanEnqueuer(t *testing.T) {
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -1386,7 +1386,7 @@ func TestRunQueueList_FiltersByStatus(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1431,7 +1431,7 @@ func TestRunQueueRetry_RejectsNonFailedRow(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1456,7 +1456,7 @@ func TestRunQueueRetry_ResetsFailedRow(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1483,7 +1483,7 @@ func TestRunQueueRetry_ResetsFailedRow(t *testing.T) {
 	}
 
 	// Verify state.
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -1501,7 +1501,7 @@ func TestRunQueueClear_DryRunDoesNotDelete(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1528,7 +1528,7 @@ func TestRunQueueClear_DryRunDoesNotDelete(t *testing.T) {
 	}
 
 	// Re-open and confirm row still there.
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -1555,7 +1555,7 @@ func TestRunQueueClear_DryRunDoesNotDelete(t *testing.T) {
 func TestRunScanResults_ResolvesLibraryByNameAndID(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1594,7 +1594,7 @@ func TestRunScanClear_DryRunAndConfirm(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1623,7 +1623,7 @@ func TestRunScanClear_DryRunAndConfirm(t *testing.T) {
 	}
 
 	// Confirm dry run did nothing.
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -1647,7 +1647,7 @@ func TestRunScanClear_DryRunAndConfirm(t *testing.T) {
 	}
 
 	// Confirm library still exists.
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -1661,7 +1661,7 @@ func TestRunScanClear_CancelsLinkedWorkQueueRow(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1713,7 +1713,7 @@ func TestRunScanClear_CancelsLinkedWorkQueueRow(t *testing.T) {
 		t.Fatalf("--yes output missing queue cancel count: %q", out.String())
 	}
 
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -1735,7 +1735,7 @@ func TestRunScan_LibrarySelectorScansOnlyTheNamedLibrary(t *testing.T) {
 	dirA := t.TempDir()
 	dirB := t.TempDir()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1787,7 +1787,7 @@ func TestRunScan_LibrarySelectorScansOnlyTheNamedLibrary(t *testing.T) {
 	// We assert behaviorally by checking both libraries still hold their seed
 	// row; the more meaningful assertion is that the run exited 0 with a
 	// non-existent Beta directory would have errored had it been scanned.
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -1811,7 +1811,7 @@ func TestRunScan_LibrarySelectorReportsScanFailure(t *testing.T) {
 
 	dir := t.TempDir()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1850,7 +1850,7 @@ func TestRunScan_LibrarySelectorRejectsAmbiguousName(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1957,7 +1957,7 @@ func TestRunQueueRetry_MissingIDSurfacesNotFound(t *testing.T) {
 func TestRunQueueClear_ConfirmDeletes(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2005,7 +2005,7 @@ func TestRunScanClear_RequiresLibrary(t *testing.T) {
 func TestResolveLibraryRejectsBlankRef(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2095,7 +2095,7 @@ func TestRunQueueClear_DryRunCountsZero(t *testing.T) {
 func TestRunScanClear_DryRunOnEmpty(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2127,7 +2127,7 @@ func TestRunScanClear_RequiresLibraryFlag(t *testing.T) {
 func TestRunScanResults_FilterByLibraryByID(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2161,7 +2161,7 @@ func TestRunScanResults_FilterByLibraryByID(t *testing.T) {
 func TestResolveLibrary_NumericNameLooksUpByName(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2184,7 +2184,7 @@ func TestResolveLibrary_NumericNameLooksUpByName(t *testing.T) {
 func TestResolveLibrary_NumericRefAmbiguousIDvsName(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2212,7 +2212,7 @@ func TestResolveLibrary_NumericRefAmbiguousIDvsName(t *testing.T) {
 func TestRunScanResults_FilterByStatus(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2251,7 +2251,7 @@ func TestRunScanResults_FilterByStatus(t *testing.T) {
 func TestRunScanResults_LimitTrimsResults(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2290,7 +2290,7 @@ func TestRunScanResults_LimitTrimsResults(t *testing.T) {
 func TestRunQueueRetry_ResetsLinkedScanResults(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2338,7 +2338,7 @@ func TestRunQueueRetry_ResetsLinkedScanResults(t *testing.T) {
 		t.Fatalf("queue retry: %d. out=%s", code, out.String())
 	}
 
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -2373,7 +2373,7 @@ func TestRunQueueRetry_RejectsDeferredRow(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2409,7 +2409,7 @@ func TestRunQueueCmd_DeferredRoutesToList(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2612,7 +2612,7 @@ func TestRunQueueRecheck_DryRun(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed one deferred row and one retired row.
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2666,7 +2666,7 @@ func TestRunQueueRecheck_DryRun(t *testing.T) {
 	}
 
 	// Rows must NOT have been changed.
-	sqlDB2, err := db.Open(ctx, dbPath)
+	sqlDB2, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -2686,7 +2686,7 @@ func TestRunQueueRecheck_Apply(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2727,7 +2727,7 @@ func TestRunQueueRecheck_ApplyRetired(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2760,7 +2760,7 @@ func TestRunQueueRecheck_ApplyRetired(t *testing.T) {
 	}
 
 	// The retired row must now be deferred again.
-	sqlDB2, err := db.Open(ctx, dbPath)
+	sqlDB2, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -2798,7 +2798,7 @@ func TestRunQueueRecheck_LibraryScoped(t *testing.T) {
 	cfg, dbPath := commandsTestEnv(t)
 	ctx := context.Background()
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -2951,7 +2951,7 @@ func (serveTestAuth) ValidateKey(_ context.Context, _ string, _ auth.Scope) (aut
 // /metrics returns 200 with the expected Prometheus metric families.
 func TestServeHandlerWiresMetricsReporter(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -3005,7 +3005,7 @@ func TestServeHandlerWiresMetricsReporter(t *testing.T) {
 // verify the fixture instead of the code.
 func TestSchedulerStampsProvidersVersionOnItsQueue(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -3050,7 +3050,7 @@ func TestSchedulerStampsProvidersVersionOnItsQueue(t *testing.T) {
 // `scan reconcile-identity` pass to recover it afterward.
 func TestSchedulerOnScanCompleteRepairsQueueDivergence(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
@@ -3128,7 +3128,7 @@ func TestSchedulerOnScanCompleteRepairsQueueDivergence(t *testing.T) {
 // unlike TriggerScheduler, which stays library-wide.
 func TestSchedulerOnScanCompleteWatcherTriggerScopesDivergenceToSubtree(t *testing.T) {
 	ctx := context.Background()
-	sqlDB, err := db.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(ctx, t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}

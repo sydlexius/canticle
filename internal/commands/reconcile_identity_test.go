@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/testutil"
@@ -35,7 +35,7 @@ func setupReconcileIdentity(t *testing.T) (ctx context.Context, cfgPath, dbPath,
 	}
 	filePath = filepath.Join(dir, "track.mp3")
 
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -55,7 +55,7 @@ func setupReconcileIdentity(t *testing.T) (ctx context.Context, cfgPath, dbPath,
 
 func scanArtist(t *testing.T, ctx context.Context, dbPath, filePath string) string {
 	t.Helper()
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestRunReconcileIdentity_ApplyAndBackup(t *testing.T) {
 // row to the corrected identity; none stay under the old one (#1399).
 func TestRunReconcileIdentity_ApplyMovesBlocks(t *testing.T) {
 	ctx, cfgPath, dbPath, _ := setupReconcileIdentity(t)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestRunReconcileIdentity_ApplyMovesBlocks(t *testing.T) {
 		t.Fatalf("exit=%d out=%s", code, buf.String())
 	}
 
-	sqlDB, err = db.Open(ctx, dbPath)
+	sqlDB, err = dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestRunReconcileIdentity_ApplyMovesBlocks(t *testing.T) {
 // row's prior identity, a different table than the scan_correction op's.
 func TestRunReconcileIdentity_DivergenceBackupRecordCarriesOp(t *testing.T) {
 	ctx, cfgPath, dbPath, _ := setupReconcileIdentity(t)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestRunReconcileIdentity_DivergenceBackupRecordCarriesOp(t *testing.T) {
 // effect was on album_artist, with no way to tell what happened.
 func TestRunReconcileIdentity_ReportLineShowsOpAndAlbumArtist(t *testing.T) {
 	ctx, cfgPath, dbPath, _ := setupReconcileIdentity(t)
-	sqlDB, err := db.Open(ctx, dbPath)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestRunScanCmd_DispatchesReconcileIdentity(t *testing.T) {
 
 func openBackfillDB(t *testing.T) *sql.DB {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

@@ -9,7 +9,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/auth"
 	"github.com/sydlexius/canticle/internal/config"
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/web"
 	"github.com/sydlexius/canticle/internal/webauth"
@@ -21,7 +21,7 @@ import (
 // NEVER removes the API-key requirement on the webhook/admin endpoints. Both
 // must still be rejected without a key, even from the same trusted source IP.
 func TestTrustedBypassNeverWeakensAPIKey(t *testing.T) {
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "bypass.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "bypass.db"))
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}

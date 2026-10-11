@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sydlexius/canticle/internal/db"
+	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/detector"
 	"github.com/sydlexius/canticle/internal/ffmpeg"
 	"github.com/sydlexius/canticle/internal/models"
@@ -34,7 +34,7 @@ func (d *failingDetector) Detect(context.Context, string) (detector.Result, erro
 
 func realFailureStore(t *testing.T) *scanfail.Store {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -82,7 +82,7 @@ func (d *pathDetector) Detect(_ context.Context, p string) (detector.Result, err
 // SQLite database and returns the queue and the detector failure store on it.
 func backlog(t *testing.T, srcs ...string) (*queue.DBQueue, *scanfail.Store) {
 	t.Helper()
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -276,7 +276,7 @@ func rememberedTail(t *testing.T, n int) (*sql.DB, *scanfail.Store, string) {
 	}
 	changed := filepath.Join(dir, "changed.flac")
 	srcs = append(srcs, changed)
-	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "t.db"))
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
