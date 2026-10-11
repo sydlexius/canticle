@@ -1065,7 +1065,7 @@ func TestSchedulerRepointsSettledRowAfterFormatSwap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed the swap: %v", err)
 	}
-	s := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 1}, nil, false, nil, nil, "", 0)
+	s := scheduler(sqlDB, scanner.ScanOptions{MaxDepth: 1}, nil, false, nil, nil, "", 0, nil)
 	if err := s.RunOnce(ctx); err != nil {
 		t.Fatalf("scan after the swap: %v", err)
 	}

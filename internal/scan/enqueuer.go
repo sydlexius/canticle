@@ -154,6 +154,11 @@ type Enqueuer struct {
 	// marking it done from a cache entry the writer would refuse. Optional: nil
 	// means no blocking.
 	Blocks lyrics.BlockChecker
+	// TitleInstrumental makes a cached entry read as a miss for a track whose
+	// title says it is an instrumental version (#1469), so the row is enqueued
+	// and reaches the worker's title gate instead of being marked done from a
+	// vocal entry cached under that key. Optional: nil means today's behavior.
+	TitleInstrumental func(track models.Track) bool
 }
 
 // shouldSuppress reports whether a track's stored timing verdict means this scan
@@ -316,6 +321,9 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			// cached provider track.
 			song.IdentityArtistKey, song.IdentityTitleKey = queue.IdentityKeys(res.Track)
 			if e.Blocks != nil && e.Blocks.SongBlocked(ctx, song) {
+				return false
+			}
+			if e.TitleInstrumental != nil && e.TitleInstrumental(res.Track) {
 				return false
 			}
 			if fileDurationKnown {
