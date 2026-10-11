@@ -263,6 +263,11 @@ const libraryPredicate = `EXISTS (SELECT 1 FROM work_queue_scan_results wqsr
         WHERE wqsr.work_queue_id = work_queue.id
           AND +wqsr.scan_result_id IN (SELECT id FROM scan_results WHERE library_id = ?))`
 
+// LibraryPredicate is libraryPredicate for packages that select work_queue
+// themselves (titlerepair), so they share this one fragment and its plan. It
+// names work_queue unaliased, so the caller's query must too. No leading AND.
+const LibraryPredicate = libraryPredicate
+
 // Libraries lists every configured library, by name then id, for the Library
 // filter's options.
 func (r *Repo) Libraries(ctx context.Context) ([]BucketLibrary, error) {
