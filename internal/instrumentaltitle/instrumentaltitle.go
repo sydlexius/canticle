@@ -632,6 +632,45 @@ func PlaceholderArtist(name string) bool {
 	return len(toks) == 0 || slices.Contains(placeholderArtists, strings.Join(toks, " "))
 }
 
+// Actionable reports the verdict of Classify(title, album) and whether the
+// title rule may act on it. Only a Strong verdict is acted on, and a bracketed
+// one needs nothing more. A Strong dash-suffix is acted on only once the text
+// before the separator is known not to be the track's artist ("Artist - Minus
+// One" is a song named Minus One whose title tag carries the artist), which
+// Classify cannot tell because it never sees the artist. Both tagged artists
+// are compared, the track artist and the album artist: a compilation carries
+// the performer in one and someone else in the other. (The resolved artist the
+// providers are asked for is always one of those two, so it is not a third
+// name.) With no real artist to compare against (none, or only a placeholder
+// such as "Various Artists") the answer is no: doubt withholds the verdict.
+//
+// Decide on ok alone. v is Classify's verdict unchanged, for reporting only: a
+// Strong v with ok false is a title the rule declines. Two callers agree only
+// when they pass the same inputs, so album must be the one the worker would
+// see (the audio file's tag where it re-reads it; a karaoke album turns a
+// Strong title into None), and whether the rule is on at all is the caller's
+// check.
+func Actionable(title, album, artist, albumArtist string) (v Verdict, ok bool) {
+	v = Classify(title, album)
+	if v.Tier != Strong {
+		return v, false
+	}
+	if v.Position != PositionSuffix {
+		return v, true
+	}
+	known := false
+	for _, name := range []string{artist, albumArtist} {
+		if PlaceholderArtist(name) {
+			continue
+		}
+		known = true
+		if SuffixBaseWithin(title, name) {
+			return v, false
+		}
+	}
+	return v, known
+}
+
 // placeholderArtists are PlaceholderArtist's fillers, as joined tokens.
 var placeholderArtists = []string{"various artists", "various", "va", "unknown artist", "unknown"}
 

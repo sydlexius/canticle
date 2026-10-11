@@ -27,39 +27,19 @@ type absentOnlyWriter interface {
 }
 
 // titleRuleSettles reports whether the rule settles this row as instrumental:
-// the rule is on and the title is Strong. A Strong dash-suffix is acted on only
-// once the text before the separator is known not to be the track's artist
-// ("Artist - Minus One" is a song named Minus One whose title tag carries the
-// artist); the classifier never sees the artist, so that check is here. Both
-// tagged artists are compared, the track artist and the album artist, plus the
-// resolved one the providers would be asked for: a compilation carries the
-// performer in one and someone else in the other. With no real artist to
-// compare against (none, or only a placeholder such as "Various Artists") the
-// answer is no: doubt keeps today's behavior. A bracketed qualifier needs no
-// artist check.
+// the rule is on and instrumentaltitle.Actionable says the title may be acted
+// on (Strong, and for a dash-suffix the text before the separator is known not
+// to be the track's artist). The artists handed over are the row's own tags,
+// which between them hold the resolved name RunOnce put in track.ArtistName.
+// The album is the refreshed one, so a caller outside the worker (the bulk
+// repair, #1470) agrees with this gate only if it passes the same album.
 func (w *Worker) titleRuleSettles(item queue.WorkItem, track models.Track) bool {
 	if !w.titleRule {
 		return false
 	}
-	v := instrumentaltitle.Classify(track.TrackName, track.AlbumName)
-	if v.Tier != instrumentaltitle.Strong {
-		return false
-	}
-	if v.Position != instrumentaltitle.PositionSuffix {
-		return true
-	}
-	known := false
 	tagged := item.Inputs.Track
-	for _, artist := range []string{tagged.ArtistName, tagged.AlbumArtist, track.ArtistName} {
-		if instrumentaltitle.PlaceholderArtist(artist) {
-			continue
-		}
-		known = true
-		if instrumentaltitle.SuffixBaseWithin(track.TrackName, artist) {
-			return false
-		}
-	}
-	return known
+	_, ok := instrumentaltitle.Actionable(track.TrackName, track.AlbumName, tagged.ArtistName, tagged.AlbumArtist)
+	return ok
 }
 
 // titleRuleGate settles a Strong instrumental-titled row without asking any
