@@ -3682,6 +3682,7 @@ func configKeys() []string {
 		"timing_validation.revalidate_batch",
 		"timing_validation.on_mis_synced",
 		"timing_validation.on_categorical",
+		"instrumental_title.mode",
 		"word_sync_recheck.enabled",
 		"word_sync_recheck.batch",
 		"upgrade_sweep.enabled",
@@ -3775,6 +3776,8 @@ func configValue(cfg config.Config, key string) (string, bool) {
 		return string(cfg.TimingValidation.OnMisSynced), true
 	case "timing_validation.on_categorical":
 		return string(cfg.TimingValidation.OnCategorical), true
+	case "instrumental_title.mode":
+		return string(cfg.InstrumentalTitle.Mode), true
 	case "word_sync_recheck.enabled":
 		return strconv.FormatBool(cfg.WordSyncRecheck.Enabled), true
 	case "word_sync_recheck.batch":
@@ -4030,6 +4033,12 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 			return fmt.Errorf("instrumental_detector.ordering must be \"front\" or \"demoted\"")
 		}
 		cfg.InstrumentalDetector.Ordering = m
+	case "instrumental_title.mode":
+		mode, ok := config.NormalizeInstrumentalTitleMode(value)
+		if !ok {
+			return fmt.Errorf("instrumental_title.mode must be one of off, strong, strong_weak")
+		}
+		cfg.InstrumentalTitle.Mode = mode
 	case "timing_validation.enabled":
 		b, err := strconv.ParseBool(value)
 		if err != nil {

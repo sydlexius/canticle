@@ -4029,3 +4029,23 @@ func TestRunServeWiresNoWordLane(t *testing.T) {
 		t.Errorf("runServe must pass %q to the handler options (#1350)", want)
 	}
 }
+
+func TestConfigInstrumentalTitleModeGetSetRoundTrip(t *testing.T) {
+	cfg := config.Config{InstrumentalTitle: config.InstrumentalTitleConfig{Mode: "strong"}}
+	got, ok := configValue(cfg, "instrumental_title.mode")
+	if !ok || got != "strong" {
+		t.Fatalf("configValue(instrumental_title.mode) = %q, %v; want strong, true", got, ok)
+	}
+	if !slices.Contains(configKeys(), "instrumental_title.mode") {
+		t.Fatal("configKeys missing instrumental_title.mode")
+	}
+	if err := setConfigValue(&cfg, "instrumental_title.mode", " Strong_Weak "); err != nil {
+		t.Fatalf("setConfigValue: %v", err)
+	}
+	if cfg.InstrumentalTitle.Mode != "strong_weak" {
+		t.Fatalf("mode = %q; want strong_weak", cfg.InstrumentalTitle.Mode)
+	}
+	if err := setConfigValue(&cfg, "instrumental_title.mode", "bogus"); err == nil {
+		t.Fatal("setConfigValue accepted bogus instrumental_title.mode")
+	}
+}
