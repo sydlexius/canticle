@@ -45,7 +45,7 @@ When the user says **"next"**, **"what's next"**, **"keep going"**, or any equiv
 - **No global mutable state.** Inject dependencies through interfaces and mock at the boundary.
 - **Integration tests use real SQLite** (in-memory `file::memory:?cache=shared` or a temp file), not mocks.
 - **Never `--no-verify`**, on a commit or a push. The only push override is `PUSH_GATE=full`, which is stricter.
-- **CI is authoritative** for the race suite and for golangci-lint findings that do not reproduce locally (the `gosec` taint analyzers such as `G704` are prone to version-specific phantoms). Do not chase local reproduction: apply a per-site `//nolint:gosec // reason: ...`. Bumping the CI pin needs a probe PR.
+- **CI is authoritative** for the race suite and for golangci-lint findings that do not reproduce locally (the `gosec` taint analyzers such as `G704` are prone to version-specific phantoms). Do not chase local reproduction, but read the finding: suppress with a per-site `//nolint:gosec // reason: ...` only after confirming a false positive, and fix a real one. Bumping the CI pin needs a probe PR.
 - **Every `//nolint` carries `// reason:`** (enforced by `nolintlint`). Do not add a path to the exclusion block in `.golangci.yml` to silence a new finding.
 - **Private library metadata stays off stdout.** A sidecar path, artist, title or lyric line is private; the aggregate-only commands print counts only.
 - Conventional commits: `feat:`, `fix:`, `docs:`, `ci:`, `chore:`, etc.
