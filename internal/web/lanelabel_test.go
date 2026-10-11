@@ -21,6 +21,7 @@ func TestLaneLabel(t *testing.T) {
 		{"innertube lane gets the full display name", "innertube", "YouTube Music"},
 		{"musixmatch gets its proper name", "musixmatch", "Musixmatch"},
 		{"petitlyrics gets its proper name", "petitlyrics", "PetitLyrics"},
+		{"title-rule lane gets a display name", "title-rule", "Title Rule"},
 		{"unmapped lane passes through rather than blanking", "somefuturelane", "somefuturelane"},
 		{"empty lane stays empty", "", ""},
 	}

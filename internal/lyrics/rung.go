@@ -140,6 +140,32 @@ func classifyOnDisk(fp string, l sidecar.Listing, companionRemoves []string) Kep
 	return best
 }
 
+// stemOccupant is WriteLRCIfAbsent's absence check (#1468): the best sidecar
+// of fp's stem under ANY extension case of every lyric extension, or OnDisk
+// RungNone when the stem is empty. classifyOnDisk cannot answer that, because
+// it judges only what a write destroys (the exact target and the opposite
+// extension's variants): on a case-sensitive filesystem a write to "song.txt"
+// leaves "song.TXT" alone, so the ordinary guard rightly ignores it, yet the
+// stem is not absent. A companion with no .lrc beside it, owned or foreign,
+// occupies the stem too; it is never read, so it reports the unjudged keep-it
+// rung. This only READS, and only when the write is about to be allowed, so it
+// can turn an accepted write into a refusal and nothing else.
+func stemOccupant(fp string, l sidecar.Listing) KeptError {
+	stem := sidecar.StemOf(fp)
+	best := KeptError{OnDisk: RungNone, Judged: true}
+	for _, kind := range []sidecar.Kind{sidecar.KindLineSynced, sidecar.KindUnsynced} {
+		for _, v := range l.Variants(stem + sidecar.Ext(kind)) {
+			if k := classifySidecar(v, kind == sidecar.KindLineSynced); k.OnDisk > best.OnDisk {
+				best = k
+			}
+		}
+	}
+	if best.OnDisk == RungNone && sidecar.Active(sidecar.KindWordSynced) && len(l.Variants(stem+sidecar.ExtWordSynced)) > 0 {
+		return KeptError{OnDisk: RungWord, Synced: true}
+	}
+	return best
+}
+
 func appendByKind(lrcs, txts []string, path string) ([]string, []string) {
 	if sidecar.KindOf(path) == sidecar.KindLineSynced {
 		return append(lrcs, path), txts
