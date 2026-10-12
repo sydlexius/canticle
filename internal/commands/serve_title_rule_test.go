@@ -93,5 +93,10 @@ func TestTitleRuleOn(t *testing.T) {
 		if got := titleRuleOn(cfg); got != want {
 			t.Errorf("titleRuleOn(mode %q) = %v, want %v", mode, got, want)
 		}
+		// The Weak tier is strong_weak's alone (#1471).
+		weak := strings.EqualFold(strings.TrimSpace(string(mode)), "strong_weak")
+		if got := titleRuleWeakOn(cfg); got != weak {
+			t.Errorf("titleRuleWeakOn(mode %q) = %v, want %v", mode, got, weak)
+		}
 	}
 }

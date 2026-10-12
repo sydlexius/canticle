@@ -728,8 +728,12 @@ on_categorical = "quarantine"
 #                 dash-suffixed "Instrumental" or "Off Vocal") is
 #                 settled with an instrumental marker without asking a lyric
 #                 provider
-#   strong_weak - reserved for weaker title or album signals confirmed by the
-#                 audio detector; today it acts exactly as strong
+#   strong_weak - as strong, and a track with a weaker title or album signal
+#                 (the word outside a qualifier, a "Piano Version", an album
+#                 named Instrumental) is put to the audio detector first and
+#                 settled with the detector's marker only if it agrees;
+#                 otherwise it is looked up as usual. Needs the detector and
+#                 ordered provider dispatch
 # An unrecognized value resets to "off".
 # Env: MXLRC_INSTRUMENTAL_TITLE_MODE.
 mode = "off"

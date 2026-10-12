@@ -398,6 +398,8 @@ type Worker struct {
 	detectorOrdering string
 	// titleRule is the instrumental title rule's switch (SetTitleRule, #1468).
 	titleRule bool
+	// titleRuleWeak adds the Weak tier (SetTitleRuleWeak, #1471).
+	titleRuleWeak bool
 	// detectorLane is the detector lane actually installed by the most recent
 	// rebuildOrchestrator, or nil when none was (no audioDetector, or parallel
 	// mode). It is kept here ONLY so the pre-dequeue availability gate can
@@ -1554,7 +1556,23 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// detector_version still matches the current model version. Cleared (nil) for
 	// a row with no prior detection so it runs live inference. (#582)
 	w.primeDetectorMemo(item)
-	song, cacheHit, err := w.song(ctx, resolvedTrack, detectorPath, bypassCache)
+	// A Weak instrumental title asks the detector before the cache and the
+	// providers (#1471). Agreement takes the detector settle below, exactly as a
+	// front-ordered positive does. An answer empties the path, which is how the
+	// dispatch is kept from dialing the detector a second time for this row.
+	song, agreed, answered, carried := w.weakTitleDetectorFirst(ctx, item, resolvedTrack, detectorPath)
+	if answered {
+		detectorPath = ""
+	}
+	cacheHit := false
+	if !agreed {
+		song, cacheHit, err = w.song(ctx, resolvedTrack, detectorPath, bypassCache)
+		// No provider had a lyric, so the early ask's not-ready or outage stands
+		// in for the one the dispatch's own detector lane would have reported.
+		if carried != nil && orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeBenignMiss {
+			err = carried
+		}
+	}
 	if orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeRefusedUntried {
 		// Stamp the detector's not-instrumental telemetry BEFORE parking, as the
 		// benign-miss branch does, so the re-dispatch after the wait re-decides from

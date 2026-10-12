@@ -142,7 +142,8 @@ real title: `(Instrumental)`, `- Off Vocal`, `[Backing Track]`, `(Inst)`,
 - any a cappella title: vocals only, so its lyrics are correct;
 - any karaoke title, or any track on a karaoke album: a karaoke track is for
   singing along, so it gets its lyrics (see "Karaoke and the detector" below);
-- weaker signals (an album named Instrumental, `Piano Version`, `Score`).
+- weaker signals (an album named Instrumental, `Piano Version`, `Score`),
+  unless the mode is `strong_weak` (see "Weaker signals" below).
 
 **The artist check.** A dash-suffix title is acted on only when the text before
 the last dash is known not to be the artist. It is compared against the track
@@ -155,6 +156,35 @@ Artist`, `Unknown`) both count as unknown. Every doubtful case resolves toward
 not acting. The cost is stated plainly: a genuine `Artist - Title -
 Instrumental` title is declined too, and that track is simply looked up like any
 other.
+
+**Weaker signals (`strong_weak`).** A weak signal is the word used inline or
+as the whole title, a qualifier beside other words, `Piano Version` or
+`Orchestral Version`, `Score`, or an album that carries the signal over a clean
+title. None of these is reliable enough to act on alone, so under `strong_weak`
+such a track is put to the audio detector before the cache and the providers.
+That order holds in the worker only: the scan's own title check is for strong
+titles, so a weak-titled track with a cached lyric can still be settled from the
+cache at scan time. In the worker:
+
+- the detector says instrumental: the track is settled exactly as any detector
+  verdict is (the detector's marker and lane, not `title-rule`), with no
+  provider asked;
+- the detector says not instrumental: the track is looked up as usual, and the
+  detector is not run again for it in that pass, whatever
+  `instrumental_detector.ordering` is.
+
+Everything else is left on the ordinary path, unchanged: no detector
+configured, detection off for the track's library, the detector's breaker open,
+parallel provider dispatch, an upgrade re-fetch, and any track that already has
+a lyric or a marker on disk. A detector that fails or is still starting settles
+nothing and the track is looked up as usual; the early ask still counts as a
+detector call, so a failing detector can open its breaker sooner.
+`strong` and `off` never ask the detector early. The tier inherits the
+detector's accuracy: a sung track with a weak title that the detector hears as
+instrumental gets a marker and no lyrics. With the upgrade sweep on and
+`instrumental_detector.ordering = "demoted"`, a marker settled this way is in
+the sweep's population like any detector marker, and a later provider lyric can
+replace it.
 
 **Karaoke and the detector.** Under `instrumental_detector.ordering = "front"`
 the detector answers before any provider, and a karaoke backing track sounds
@@ -187,7 +217,9 @@ canticle scan purge-provenance --source title-rule --yes  # remove the markers
 ```
 
 Only markers the rule wrote match, since it never restamps a marker that was
-already there. The tracks are then looked up again on the next scan.
+already there. The tracks are then looked up again on the next scan. This does
+not undo a weak-tier marker: the detector wrote it and it carries the detector's
+source, so it cannot be told apart from any other detector marker.
 
 **Residual risk.** A sung recording whose title carries a strong qualifier gets
 a marker and no lyrics while the mode is on, and nothing corrects it
