@@ -159,7 +159,6 @@ func (u *UI) crossFieldGroups() []crossFieldGroup {
 		{[]string{"providers.primary", "providers.disabled"}, u.checkProviderInvariantChanges},
 		{[]string{"server.tls.self_signed", "server.tls.cert_file", "server.tls.key_file"}, u.checkTLSInvariantChanges},
 		{[]string{"server.scan_schedule.frequency", "server.scan_schedule.at", "server.scan_schedule.day"}, u.checkScanScheduleInvariantChanges},
-		{[]string{"instrumental_detector.ordering", "providers.mode"}, u.checkDetectorOrderingInvariantChanges},
 	}
 }
 
@@ -288,39 +287,6 @@ func (u *UI) checkScanScheduleInvariantChanges(ctx context.Context, changes map[
 	var cfg config.Config
 	cfg.Server.ScanSchedule = cur
 	return config.ValidateScanSchedule(cfg)
-}
-
-// checkDetectorOrderingInvariantChanges folds the ordering/mode entries of a
-// batch save onto the current state and validates the result against
-// config.ValidateInstrumentalDetectorOrdering ("front" requires ordered
-// dispatch). It is the multi-field counterpart to the single-field
-// checkDetectorOrderingInvariant.
-//
-// The batch lane needs its own check for the reason the TLS pair does: judging
-// either field alone against the CURRENT config gets BOTH answers wrong. A batch
-// that switches to parallel WHILE demoting the ordering is legal and must be
-// accepted; a batch that sets both halves of the conflict at once is fatal and
-// must be refused, even though each value is individually valid. Only the
-// resulting combination distinguishes them. Returns nil when neither field is in
-// the batch.
-func (u *UI) checkDetectorOrderingInvariantChanges(ctx context.Context, changes map[string]string) error {
-	ordering, hasOrdering := changes["instrumental_detector.ordering"]
-	mode, hasMode := changes["providers.mode"]
-	if !hasOrdering && !hasMode {
-		return nil
-	}
-	// Read the config only once a relevant field is actually in the batch:
-	// currentConfig re-reads and re-parses the file on every call, so validating
-	// an untouched pair would cost a file read to re-confirm what the last boot
-	// already validated.
-	cur := u.currentConfig(ctx)
-	if hasOrdering {
-		cur.InstrumentalDetector.Ordering = ordering
-	}
-	if hasMode {
-		cur.Providers.Mode = mode
-	}
-	return config.ValidateInstrumentalDetectorOrdering(cur)
 }
 
 // checkProviderInvariantChanges folds the provider-selection entries of a

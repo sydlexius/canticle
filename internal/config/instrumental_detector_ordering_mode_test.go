@@ -1,80 +1,52 @@
 package config
 
 import (
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-// TestValidateInstrumentalDetectorOrdering covers the cross-field constraint
-// between instrumental_detector.ordering and providers.mode: "front" ordering
-// only delivers its zero-provider-request guarantee in ordered mode (findOrdered
-// walks lanes in slice order and short-circuits on a terminal-suitable result).
-// In parallel mode every lane is dispatched concurrently regardless of slice
-// order, so "front" combined with "parallel" is a contradictory configuration
-// that must be rejected at load rather than silently failing to deliver what
-// its name promises. "demoted" (the default ordering) must remain accepted
-// under both dispatch modes: it is the common case and must never regress.
-func TestValidateInstrumentalDetectorOrdering(t *testing.T) {
-	cases := []struct {
-		name     string
-		ordering string
-		mode     string
-		wantErr  bool
-	}{
-		{"front + parallel is rejected", detectorOrderingFront, providersModeParallel, true},
-		{"front + ordered is accepted", detectorOrderingFront, providersModeDefault, false},
-		{"demoted + parallel is accepted (default ordering must never regress)", detectorOrderingDemoted, providersModeParallel, false},
-		{"demoted + ordered is accepted", detectorOrderingDemoted, providersModeDefault, false},
+// assertFrontParallel fails unless cfg holds a detector-first ordering together
+// with parallel dispatch.
+func assertFrontParallel(t *testing.T, cfg Config) {
+	t.Helper()
+	if cfg.InstrumentalDetector.Ordering != detectorOrderingFront {
+		t.Errorf("instrumental_detector.ordering = %q, want %q", cfg.InstrumentalDetector.Ordering, detectorOrderingFront)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			cfg := defaults()
-			cfg.InstrumentalDetector.Ordering = c.ordering
-			cfg.Providers.Mode = c.mode
-			err := ValidateInstrumentalDetectorOrdering(cfg)
-			if (err != nil) != c.wantErr {
-				t.Fatalf("ValidateInstrumentalDetectorOrdering(ordering=%q, mode=%q) err=%v, wantErr=%v", c.ordering, c.mode, err, c.wantErr)
-			}
-		})
+	if cfg.Providers.Mode != providersModeParallel {
+		t.Errorf("providers.mode = %q, want %q", cfg.Providers.Mode, providersModeParallel)
 	}
 }
 
-// TestValidateInstrumentalDetectorOrdering_ErrorNamesBothKeys verifies the
-// rejection error names both config keys: an operator who cannot tell WHICH
-// two settings conflict cannot fix it.
-func TestValidateInstrumentalDetectorOrdering_ErrorNamesBothKeys(t *testing.T) {
-	cfg := defaults()
-	cfg.InstrumentalDetector.Ordering = detectorOrderingFront
-	cfg.Providers.Mode = providersModeParallel
+// TestLoad_AcceptsFrontOrderingWithParallelMode verifies a config file that
+// asks for the detector first under parallel dispatch loads with both values
+// intact. Parallel dispatch stages the detector outside the provider race
+// (#528), so the pair is a supported configuration.
+func TestLoad_AcceptsFrontOrderingWithParallelMode(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "[providers]\nmode = \"parallel\"\n\n[instrumental_detector]\nordering = \"front\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 
-	err := ValidateInstrumentalDetectorOrdering(cfg)
-	if err == nil {
-		t.Fatal("ValidateInstrumentalDetectorOrdering(front, parallel) = nil, want an error")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load with front ordering + parallel mode: %v", err)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "instrumental_detector.ordering") {
-		t.Errorf("error %q does not name instrumental_detector.ordering", msg)
-	}
-	if !strings.Contains(msg, "providers.mode") {
-		t.Errorf("error %q does not name providers.mode", msg)
-	}
+	assertFrontParallel(t, cfg)
 }
 
-// TestLoadWithSources_RejectsFrontOrderingWithParallelModeFromEnv verifies the
-// cross-field check fires through the full LoadWithSources path when BOTH
-// conflicting values arrive via env overrides (not just when constructed
-// directly on a Config in the unit test above), since validation must run
-// after env overrides are resolved, not only after TOML decode.
-func TestLoadWithSources_RejectsFrontOrderingWithParallelModeFromEnv(t *testing.T) {
+// TestLoadWithSources_AcceptsFrontOrderingWithParallelModeFromEnv is the same
+// pair arriving through the environment overrides.
+func TestLoadWithSources_AcceptsFrontOrderingWithParallelModeFromEnv(t *testing.T) {
 	isolateEnv(t)
 	t.Setenv("MXLRC_INSTRUMENTAL_DETECTOR_ORDERING", "front")
 	t.Setenv("MXLRC_PROVIDERS_MODE", "parallel")
 
-	_, _, err := LoadWithSources("")
-	if err == nil {
-		t.Fatal("LoadWithSources with front ordering + parallel mode via env = nil error, want rejection")
+	cfg, _, err := LoadWithSources("")
+	if err != nil {
+		t.Fatalf("LoadWithSources with front ordering + parallel mode via env: %v", err)
 	}
-	if !strings.Contains(err.Error(), "instrumental_detector.ordering") || !strings.Contains(err.Error(), "providers.mode") {
-		t.Errorf("error %q does not name both conflicting keys", err.Error())
-	}
+	assertFrontParallel(t, cfg)
 }
