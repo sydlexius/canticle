@@ -116,3 +116,16 @@ func TestReadProvenanceTags_MissingFile(t *testing.T) {
 		t.Error("expected an error for a missing file, got nil")
 	}
 }
+
+// ProvenanceFromBytes reads the tags of bytes already in hand, and untagged
+// bytes carry none.
+func TestProvenanceFromBytes(t *testing.T) {
+	pt, err := ProvenanceFromBytes([]byte("[source: innertube ]\n[upstream:lyricfind]\n[00:01.00]zorp the blent\n"))
+	if err != nil || pt.Source != "innertube" || pt.Upstream != "lyricfind" {
+		t.Errorf("tagged bytes = %+v, %v; want source innertube and upstream lyricfind", pt, err)
+	}
+	pt, err = ProvenanceFromBytes([]byte("zorp the blent\nfrabble on\n"))
+	if err != nil || pt != (ProvenanceTags{}) {
+		t.Errorf("untagged bytes = %+v, %v; want no tags and no error", pt, err)
+	}
+}

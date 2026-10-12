@@ -1,6 +1,7 @@
 package lyricblock
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
@@ -37,6 +39,10 @@ var ErrSymlinkedSidecar = errors.New("lyricblock: a lyric file is a symlink")
 // so the cull fails before anything changes.
 var ErrNoBackupSink = errors.New("lyricblock: lyric files to remove but no Report to back them up")
 
+// ErrChangedBeforeRemoval is returned by RemoveFiles when a path no longer holds
+// the bytes that were backed up for it. That file and every later one are kept.
+var ErrChangedBeforeRemoval = errors.New("lyricblock: a lyric file changed after it was backed up and was kept")
+
 // ErrOutsideRoots is returned when an output directory is not inside any of the
 // supplied library roots. Nothing is touched.
 var ErrOutsideRoots = errors.New("lyricblock: output is outside the library roots")
@@ -54,6 +60,9 @@ type Backup struct {
 	Path       string            `json:"path"`
 	Content    []byte            `json:"content"`
 	Meta       map[string]string `json:"meta,omitempty"`
+	// ModTime is the mtime of the handle Content was read from (zero if built
+	// another way). json:"-": a Vet reads it; the backup's records are unchanged.
+	ModTime time.Time `json:"-"`
 }
 
 // AppendBackup writes b to f as one JSON line and fsyncs it, so the record is
@@ -181,27 +190,38 @@ func leftover(artist, albumArtist, title string, outs []Output, files []string) 
 // ReadBackup captures path's bytes through one no-follow handle that must fstat
 // regular, so a file swapped for a symlink after the inventory is refused.
 func ReadBackup(op string, workItemID int64, path string) (Backup, error) {
-	b, err := lyrics.ReadRegularNoFollow(path, MaxBackupBytes)
+	b, fi, err := lyrics.ReadRegularNoFollowInfo(path, MaxBackupBytes)
 	if err != nil {
 		return Backup{}, fmt.Errorf("read lyric file (not regular, over the %d-byte backup limit, or unreadable): %w", MaxBackupBytes, stripPath(err))
 	}
-	return Backup{Op: op, WorkItemID: workItemID, Path: path, Content: b}, nil
+	return Backup{Op: op, WorkItemID: workItemID, Path: path, Content: b, ModTime: fi.ModTime()}, nil
 }
 
-// RemoveFiles unlinks paths, owned word-synced companions first (the writer's
+// RemoveFiles unlinks recs' paths, owned word-synced companions first (the writer's
 // rule: a failed companion removal leaves its .lrc too, so a pair is never
 // split). Each path is recorded with sw (nil is a no-op) immediately before its
 // own unlink, so the watcher ignores the deletions without a path that is never
 // attempted being marked. It stops at the first failure, reporting how many were
 // removed; a file already gone counts as removed.
-func RemoveFiles(paths []string, sw *selfwrite.Registry) (int, error) {
-	ordered := append([]string(nil), paths...)
+// Just before its unlink each path is read again through the no-follow handle
+// and must still hold its record's bytes, else ErrChangedBeforeRemoval. POSIX
+// has no compare-and-unlink, so a file replaced in the instant between that
+// read and the unlink is still removed.
+func RemoveFiles(recs []Backup, sw *selfwrite.Registry) (int, error) {
+	ordered := append([]Backup(nil), recs...)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return sidecar.KindOf(ordered[i]) == sidecar.KindWordSynced && sidecar.KindOf(ordered[j]) != sidecar.KindWordSynced
+		return sidecar.KindOf(ordered[i].Path) == sidecar.KindWordSynced && sidecar.KindOf(ordered[j].Path) != sidecar.KindWordSynced
 	})
-	for i, p := range ordered {
-		sw.Record(p)
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	for i, rec := range ordered {
+		cur, err := lyrics.ReadRegularNoFollow(rec.Path, MaxBackupBytes)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil || !bytes.Equal(cur, rec.Content) {
+			return i, ErrChangedBeforeRemoval
+		}
+		sw.Record(rec.Path)
+		if err := os.Remove(rec.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return i, stripPath(err)
 		}
 	}

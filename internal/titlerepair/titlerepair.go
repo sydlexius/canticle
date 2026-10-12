@@ -1,18 +1,21 @@
 // Package titlerepair finds the queue rows that settled with lyrics before the
 // instrumental title rule existed and that the rule would now settle as
-// instrumental (#1470). This file is the read-only half: select, classify and
-// count. A title, artist, album and path are private: nothing here logs or
-// returns them, and a row is named by its work item id only.
+// instrumental (#1470). This file selects, classifies and counts; evidence.go
+// vets and culls the candidates. A title, artist, album and path are private:
+// nothing here logs them, a row is named by its work item id only, and
+// Row.Files is the one place a path leaves the package.
 package titlerepair
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/instrumentaltitle"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
 )
@@ -21,14 +24,25 @@ import (
 const pageSize = 500
 
 // Dispositions of a Strong row. The first skip that matches wins, in this
-// order; the rest are candidates. Unreadable is first because the later ones
-// presume a verdict, and a failed read of the file's album leaves it unknown.
+// order; the rest are candidates, and the cull names what became of each.
+// Unreadable is first because the later ones presume a verdict, and a failed
+// read of the file's album leaves it unknown.
 const (
 	DispositionUnreadable     = "unreadable"
 	DispositionInFlight       = "in-flight"
 	DispositionHandMarked     = "hand-marked"
 	DispositionArtistPrefixed = "artist-prefixed"
-	DispositionCandidate      = "candidate"
+	// A candidate's outcome. WouldRepair is the dry run's Repaired.
+	DispositionSymlink         = "symlink"
+	DispositionOutsideRoots    = "outside-roots"
+	DispositionStemOccupied    = "stem-occupied"
+	DispositionNoFile          = "no-file"
+	DispositionSourceDisagrees = "source-disagrees"
+	DispositionNotProvable     = "not-provable"
+	DispositionNeedsManualMark = "needs-manual-mark"
+	DispositionError           = "error"
+	DispositionWouldRepair     = "would-repair"
+	DispositionRepaired        = "repaired"
 )
 
 // Options scopes one Run.
@@ -40,8 +54,16 @@ type Options struct {
 	// with where it re-reads it. ("", nil) is a file with no album tag: the row's
 	// album stands. An error counts the row Unreadable. Nil means no re-read.
 	FileAlbum func(sourcePath string) (album string, err error)
-	// OnRow, when set, is called once per Strong row.
+	// OnRow, when set, is called once per Strong row, after the row was acted on.
 	OnRow func(Row)
+	// Roots are the library roots a candidate's output directories must sit in.
+	Roots []string
+	// Apply repairs the candidates. Without it Run reads their files and vets
+	// them and changes nothing.
+	Apply bool
+	// Report makes one backup record durable before its file is removed (see
+	// lyricblock.MarkRequest.Report). Required with Apply, never called without.
+	Report func(lyricblock.Backup) error
 }
 
 // Row is one Strong row and what the repair makes of it. It carries no part of
@@ -50,6 +72,9 @@ type Row struct {
 	ID          int64
 	Verdict     instrumentaltitle.Verdict
 	Disposition string
+	// Files are the lyric files the repair read for a candidate. They are private
+	// paths, for the caller's --tail file only: never stdout, never a log.
+	Files []string
 }
 
 // StrongKey is one cell of the Strong breakdown.
@@ -58,8 +83,10 @@ type StrongKey struct {
 	Position instrumentaltitle.Position
 }
 
-// Result is the count of one Run. Examined = NoSignal + Weak + Strong, and
-// Strong = Unreadable + InFlight + HandMarked + ArtistPrefixed + Candidates.
+// Result is the count of one Run. Examined = NoSignal + Weak + Strong,
+// Strong = Unreadable + InFlight + HandMarked + ArtistPrefixed + Candidates, and
+// Candidates = Symlink + OutsideRoots + StemOccupied + NoFile + SourceDisagrees +
+// NotProvable + NeedsManualMark + Errors + WouldRepair + Repaired.
 type Result struct {
 	Examined int
 	// NoSignal includes the excluded a cappella and karaoke titles.
@@ -71,14 +98,35 @@ type Result struct {
 	DetectorInstrumental, DetectorNotInstrumental, DetectorUnscored int
 	// Unreadable: the file's album could not be read. InFlight: held by a worker.
 	// HandMarked: a hand edit or mark. ArtistPrefixed: the rule declines the title.
+	// InFlight and HandMarked include a row found so only when the cull reached it.
 	Unreadable, InFlight, HandMarked, ArtistPrefixed int
-	// Candidates are the rows the repair would act on.
+	// Candidates are the rows handed to the cull that it did not find in flight or
+	// hand-marked. Each lands in exactly one of the counters below.
 	Candidates int
+	// Skips that change nothing. Symlink: a lyric file is a symlink. OutsideRoots:
+	// an output directory is in no root, or is gone. StemOccupied: the cull would
+	// leave a file on the lyric stem, so no marker could land. NoFile: no lyric
+	// file, or none with words. SourceDisagrees: a .lrc names another lane in
+	// [source:]. NotProvable: a file not dated within two minutes of the row's settle.
+	Symlink, OutsideRoots, StemOccupied, NoFile, SourceDisagrees, NotProvable int
+	// NeedsManualMark: a file appeared or changed mid-repair and failed the vet.
+	// The row stays done with its words blocked and its cache entry gone, nothing
+	// was removed, and a rerun refuses it again: it needs a mark-wrong by hand.
+	NeedsManualMark int
+	// Errors: any other failure, logged with the work item id. A rerun retries it,
+	// unless the row changed under the repair: then the rerun counts it as it is now.
+	Errors int
+	// WouldRepair (dry run) or Repaired (Apply): the rows that pass every check.
+	WouldRepair, Repaired int
+	// BackedUp is the lyric files of those rows, one that appeared mid-repair too:
+	// backed up under Apply, what a dry run would back up. The rest are Apply only.
+	BackedUp, Removed, NewBlocks, CacheInvalidated, Reopened int
 }
 
 // Repairer runs the repair over one database.
 type Repairer struct {
 	db  *sql.DB
+	svc *lyricblock.Service
 	log *slog.Logger
 }
 
@@ -87,34 +135,46 @@ func New(db *sql.DB, log *slog.Logger) *Repairer {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Repairer{db: db, log: log}
+	// No self-write registry: this runs in a CLI process (see lyricblock.New).
+	return &Repairer{db: db, svc: lyricblock.New(db, log, nil), log: log}
 }
 
 // candidate is one selected row. The text fields never leave this package.
 type candidate struct {
 	id                                                int64
 	artist, title, album, albumArtist, source, status string
-	hand                                              bool
-	detector                                          sql.NullInt64
+	// What the vet reads: the lane that settled the row and when.
+	lane, completedAt string
+	hand              bool
+	detector          sql.NullInt64
 }
 
 // Run selects every row a provider lane settled with lyrics, classifies its
-// title as the worker's title rule would, and counts the outcome. Whether the
-// rule is switched on is the caller's check.
+// title as the worker's title rule would, and hands each candidate to the cull
+// (evidence.go), which changes nothing unless o.Apply. A row that fails is
+// counted and the run goes on. Whether the rule is switched on is the caller's
+// check.
 func (r *Repairer) Run(ctx context.Context, o Options) (Result, error) {
 	res := Result{StrongBy: map[StrongKey]int{}}
+	if o.Apply && o.Report == nil {
+		return res, errors.New("titlerepair: Apply needs a Report to back the lyric files up")
+	}
 	for after := int64(0); ; {
 		page, err := r.page(ctx, o.LibraryID, after)
 		if err != nil {
 			return res, err
 		}
 		for _, c := range page {
-			r.classify(c, o, &res)
+			r.classify(ctx, c, o, &res)
+			after = c.id
+			// After the row, so a cancel during the last row is not a clean finish.
+			if err := ctx.Err(); err != nil {
+				return res, fmt.Errorf("titlerepair: stopped after id %d: %w", after, err)
+			}
 		}
 		if len(page) < pageSize {
 			break
 		}
-		after = page[len(page)-1].id
 	}
 	r.log.Debug("titlerepair: classified", "examined", res.Examined, "strong", res.Strong, "candidates", res.Candidates)
 	return res, nil
@@ -132,7 +192,8 @@ func selector(libraryID *int64, after int64) (string, []any) {
 	for _, l := range lanes {
 		args = append(args, l)
 	}
-	query := `SELECT id, artist, title, album, album_artist, source_path, status, ` +
+	query := `SELECT id, artist, title, album, album_artist, source_path, status,
+                 provider_lane, COALESCE(completed_at, ''), ` +
 		queue.HandProtectedPredicate + `, instrumental_result
           FROM work_queue
          WHERE id > ? AND +status IN ('done', 'processing') AND outcome_type IN ('synced', 'unsynced')
@@ -156,7 +217,8 @@ func (r *Repairer) page(ctx context.Context, libraryID *int64, after int64) ([]c
 	var out []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.id, &c.artist, &c.title, &c.album, &c.albumArtist, &c.source, &c.status, &c.hand, &c.detector); err != nil {
+		if err := rows.Scan(&c.id, &c.artist, &c.title, &c.album, &c.albumArtist, &c.source, &c.status,
+			&c.lane, &c.completedAt, &c.hand, &c.detector); err != nil {
 			return nil, fmt.Errorf("titlerepair: scan row after id %d: %w", after, err)
 		}
 		out = append(out, c)
@@ -167,9 +229,9 @@ func (r *Repairer) page(ctx context.Context, libraryID *int64, after int64) ([]c
 	return out, nil
 }
 
-// classify counts one row. It decides on Actionable's ok alone; the verdict is
-// for the breakdown.
-func (r *Repairer) classify(c candidate, o Options, res *Result) {
+// classify counts one row and hands a candidate to the cull. It decides on
+// Actionable's ok alone; the verdict is for the breakdown.
+func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Result) {
 	res.Examined++
 	v, ok := instrumentaltitle.Actionable(c.title, c.album, c.artist, c.albumArtist)
 	// The worker replaces the row's album with the audio file's where the file
@@ -221,7 +283,7 @@ func (r *Repairer) classify(c candidate, o Options, res *Result) {
 		row.Disposition = DispositionArtistPrefixed
 	default:
 		res.Candidates++
-		row.Disposition = DispositionCandidate
+		row.Disposition, row.Files = r.cull(ctx, c, o, res)
 	}
 	if o.OnRow != nil {
 		o.OnRow(row)

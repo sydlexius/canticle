@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -79,22 +80,34 @@ func seed(t *testing.T, d *sql.DB, rows ...wq) []int64 {
 
 // run runs the repair and returns the count with the dispositions OnRow saw,
 // keyed by id. A row reported twice fails the test, and so does a count that
-// breaks either sum Result documents.
+// breaks any sum Result documents. The caller's own OnRow still runs.
 func run(t *testing.T, d *sql.DB, o Options) (Result, map[int64]string) {
 	t.Helper()
+	return runLog(t, d, o, nil)
+}
+
+// runLog is run with the repair logging to log.
+func runLog(t *testing.T, d *sql.DB, o Options, log *slog.Logger) (Result, map[int64]string) {
+	t.Helper()
 	seen := map[int64]string{}
+	inner := o.OnRow
 	o.OnRow = func(r Row) {
 		if _, dup := seen[r.ID]; dup {
 			t.Errorf("row %d reported twice", r.ID)
 		}
 		seen[r.ID] = r.Disposition
+		if inner != nil {
+			inner(r)
+		}
 	}
-	res, err := New(d, nil).Run(context.Background(), o)
+	res, err := New(d, log).Run(context.Background(), o)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if res.Examined != res.NoSignal+res.Weak+res.Strong || len(seen) != res.Strong ||
-		res.Strong != res.Unreadable+res.InFlight+res.HandMarked+res.ArtistPrefixed+res.Candidates {
+		res.Strong != res.Unreadable+res.InFlight+res.HandMarked+res.ArtistPrefixed+res.Candidates ||
+		res.Candidates != res.Symlink+res.OutsideRoots+res.StemOccupied+res.NoFile+res.SourceDisagrees+
+			res.NotProvable+res.NeedsManualMark+res.Errors+res.WouldRepair+res.Repaired {
 		t.Errorf("the counts do not add up: %+v, %d rows reported", res, len(seen))
 	}
 	return res, seen
@@ -136,7 +149,7 @@ func TestClassificationCounts(t *testing.T) {
 	)
 	res, seen := run(t, d, Options{})
 	want := Result{
-		Examined: 10, NoSignal: 4, Weak: 2, Strong: 4, Candidates: 4,
+		Examined: 10, NoSignal: 4, Weak: 2, Strong: 4, Candidates: 4, OutsideRoots: 4, // no root is named
 		StrongBy: map[StrongKey]int{
 			{it.FamilyInstrumental, it.PositionBracket}: 3,
 			{it.FamilyOffVocal, it.PositionSuffix}:      1,
@@ -157,7 +170,8 @@ func TestClassificationCounts(t *testing.T) {
 
 // The skips: a held row, a hand-protected row and a Strong title the rule
 // declines because the text before the dash is the artist. The first match
-// wins, in that order.
+// wins, in that order. The one candidate reaches the cull, which refuses it:
+// these runs name no library root.
 func TestSkips(t *testing.T) {
 	const prefixed = "Tin Lantern Band - Minus One"
 	d := dbtest.Open(t)
@@ -179,7 +193,7 @@ func TestSkips(t *testing.T) {
 	}
 	for i, want := range []string{
 		DispositionInFlight, DispositionInFlight, DispositionHandMarked, DispositionHandMarked, DispositionHandMarked,
-		DispositionArtistPrefixed, DispositionArtistPrefixed, DispositionArtistPrefixed, DispositionCandidate,
+		DispositionArtistPrefixed, DispositionArtistPrefixed, DispositionArtistPrefixed, DispositionOutsideRoots,
 	} {
 		if seen[ids[i]] != want {
 			t.Errorf("row %d: disposition %q, want %q", i, seen[ids[i]], want)
@@ -242,7 +256,7 @@ func TestFileAlbum(t *testing.T) {
 		t.Errorf("no signal %d, weak %d, strong %d, unreadable %d, candidates %d; want 3, 1, 7, 3, 4",
 			res.NoSignal, res.Weak, res.Strong, res.Unreadable, res.Candidates)
 	}
-	c, u := DispositionCandidate, DispositionUnreadable
+	c, u := DispositionOutsideRoots, DispositionUnreadable // no root is named, so the cull refuses a candidate
 	for i, want := range []string{"", c, "", "", c, "", u, u, u, c, c} {
 		if seen[ids[i]] != want {
 			t.Errorf("row %d: disposition %q, want %q", i, seen[ids[i]], want)
@@ -277,6 +291,25 @@ func TestPaging(t *testing.T) {
 	if res.Examined != n || res.InFlight != held || res.Candidates != n-held || len(seen) != n {
 		t.Errorf("examined %d, in flight %d, candidates %d, reported %d; want %d, %d, %d, %d",
 			res.Examined, res.InFlight, res.Candidates, len(seen), n, held, n-held, n)
+	}
+}
+
+// A cancel stops the run after the row in hand and names that row, not the
+// page cursor. One that lands in the last row is still not a clean finish.
+func TestCancelNamesTheLastRowHandled(t *testing.T) {
+	d := dbtest.Open(t)
+	ids := seed(t, d, wq{}, wq{}, wq{})
+	for _, at := range ids[1:] {
+		ctx, cancel := context.WithCancel(context.Background())
+		res, err := New(d, nil).Run(ctx, Options{OnRow: func(r Row) {
+			if r.ID == at {
+				cancel()
+			}
+		}})
+		if want := fmt.Sprintf("stopped after id %d:", at); !errors.Is(err, context.Canceled) || !strings.Contains(fmt.Sprint(err), want) ||
+			res.Examined != int(at-ids[0])+1 {
+			t.Errorf("cancel in row %d: %d examined, %v; want %q", at, res.Examined, err, want)
+		}
 	}
 }
 
