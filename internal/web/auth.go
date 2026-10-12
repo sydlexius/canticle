@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -34,6 +35,13 @@ type SessionService interface {
 	Logout(ctx context.Context, rawToken string) error
 }
 
+// PasswordChanger is the one capability the change-password card needs from
+// *webauth.Service: verify the current password, replace it, revoke the user's
+// sessions, and hand back the raw token of one fresh session.
+type PasswordChanger interface {
+	ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) (sessionToken string, err error)
+}
+
 // Auth wires browser session authentication onto the web UI: the RequireSession
 // middleware, the login/logout endpoints, the per-IP login rate limiter, and
 // session-cookie management. It is safe for concurrent use.
@@ -43,6 +51,9 @@ type Auth struct {
 	version   string
 	cookieTTL time.Duration
 	limiter   *loginLimiter
+	// passwords backs the change-password card. Nil unless WithPasswordChanger
+	// supplied one; the handler that uses it must refuse loudly on nil.
+	passwords PasswordChanger
 	// sleep applies the login backoff before responding to a failed attempt.
 	// Overridable in tests so backoff logic can be asserted without real delays.
 	sleep func(time.Duration)
@@ -59,6 +70,13 @@ func WithCookieTTL(ttl time.Duration) AuthOption {
 			a.cookieTTL = ttl
 		}
 	}
+}
+
+// WithPasswordChanger wires the service that changes the signed-in user's
+// password. Without it the Auth has no password changer at all: there is no
+// fallback.
+func WithPasswordChanger(pc PasswordChanger) AuthOption {
+	return func(a *Auth) { a.passwords = pc }
 }
 
 // withSleep overrides the backoff sleep (tests only).
@@ -196,12 +214,47 @@ func (a *Auth) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // hasValidSession reports whether r carries a currently valid session cookie.
 func (a *Auth) hasValidSession(r *http.Request) bool {
+	_, ok := a.currentUser(r)
+	return ok
+}
+
+// currentUser resolves the signed-in user from the session cookie. ok is false
+// for a missing cookie and for one that does not validate (unknown, expired or
+// revoked). A trusted-network request passes RequireSession without a session,
+// so it has no user here either unless it also carries a valid cookie: an
+// action that needs to know WHO is acting must not treat the bypass as an
+// identity. A store failure also reads as no user, but it is logged: a failing
+// database must not look like an ordinary signed-out request.
+func (a *Auth) currentUser(r *http.Request) (user *webauth.User, ok bool) {
 	cookie, err := r.Cookie(SessionCookieName)
 	if err != nil || cookie.Value == "" {
-		return false
+		return nil, false
 	}
-	_, verr := a.service.ValidateSession(r.Context(), cookie.Value)
-	return verr == nil
+	user, err = a.service.ValidateSession(r.Context(), cookie.Value)
+	if err != nil {
+		if !errors.Is(err, webauth.ErrInvalidSession) {
+			slog.Error("web: session validation failed", "path", r.URL.Path, "error", err)
+		}
+		return nil, false
+	}
+	return user, true
+}
+
+// passwordChangeKey is the limiter key for a password-change attempt by the
+// user with id userID. It lives in the login limiter's map under its own
+// namespace ("|" cannot occur in an address), so wrong current-password guesses
+// back off and lock out without locking /login, and a locked /login does not
+// block a signed-in user from changing a password.
+//
+// The key is the USER, not the client address: whoever guesses here already
+// holds a session, so the address is attacker-chosen (a routed IPv6 prefix buys
+// fresh guesses forever). The cost: a session thief can lock the real admin out
+// of the card for the lockout window; the CLI `admin set-password` remains.
+//
+// Callers resolve currentUser and pass CSRF BEFORE touching the limiter, so an
+// unauthenticated request can never create a "pw|" entry.
+func passwordChangeKey(userID string) string {
+	return "pw|" + userID
 }
 
 // clientKey resolves the limiter/bypass key for r: the real client IP under the

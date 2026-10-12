@@ -63,6 +63,13 @@ type UserStore interface {
 	// interfaces. Atomicity here is a correctness requirement of rotation, not an
 	// implementation detail of either table.
 	RotateCredential(ctx context.Context, username, passwordHash string) (revoked int64, err error)
+	// RotateCredentialIfCurrent is RotateCredential as a compare-and-swap: it
+	// rotates only while the stored hash is still currentHash, the one the caller
+	// verified a password against. If the hash changed underneath (a rotation
+	// committed in between) it returns ErrInvalidCredentials and writes nothing;
+	// an unknown user is ErrUserNotFound. The unconditional RotateCredential
+	// stays for the operator's override, which has no current password to compare.
+	RotateCredentialIfCurrent(ctx context.Context, username, currentHash, passwordHash string) (revoked int64, err error)
 }
 
 // SQLUserStore persists users in the SQLite `users` table.
@@ -175,6 +182,18 @@ func (s *SQLUserStore) HasUsers(ctx context.Context) (bool, error) {
 // update, inside the transaction, so a concurrent rename cannot leave the two
 // statements acting on different rows.
 func (s *SQLUserStore) RotateCredential(ctx context.Context, username, passwordHash string) (int64, error) {
+	return s.rotate(ctx, username, nil, passwordHash)
+}
+
+// RotateCredentialIfCurrent is the compare-and-swap form (see the interface
+// doc): the same transaction, with the UPDATE also matching on the stored hash.
+func (s *SQLUserStore) RotateCredentialIfCurrent(ctx context.Context, username, currentHash, passwordHash string) (int64, error) {
+	return s.rotate(ctx, username, &currentHash, passwordHash)
+}
+
+// rotate is the one rotation transaction. A nil onlyIf rotates unconditionally;
+// otherwise the hash is replaced only while it still equals *onlyIf.
+func (s *SQLUserStore) rotate(ctx context.Context, username string, onlyIf *string, passwordHash string) (int64, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return 0, fmt.Errorf("webauth: username must not be empty")
@@ -192,8 +211,8 @@ func (s *SQLUserStore) RotateCredential(ctx context.Context, username, passwordH
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE username = ? COLLATE NOCASE`,
-		passwordHash, username,
+		 WHERE username = ? COLLATE NOCASE AND (? IS NULL OR password_hash = ?)`,
+		passwordHash, username, onlyIf, onlyIf,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("webauth: rotate credential: update hash: %w", err)
@@ -203,7 +222,19 @@ func (s *SQLUserStore) RotateCredential(ctx context.Context, username, passwordH
 		return 0, fmt.Errorf("webauth: rotate credential: update rows: %w", err)
 	}
 	if n == 0 {
-		return 0, ErrUserNotFound
+		if onlyIf == nil {
+			return 0, ErrUserNotFound
+		}
+		// "No such user" or "the hash changed underneath": told apart in this tx.
+		var one int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE username = ? COLLATE NOCASE`, username).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrUserNotFound
+		}
+		if err != nil {
+			return 0, fmt.Errorf("webauth: rotate credential: recheck user: %w", err)
+		}
+		return 0, ErrInvalidCredentials
 	}
 
 	del, err := tx.ExecContext(ctx,

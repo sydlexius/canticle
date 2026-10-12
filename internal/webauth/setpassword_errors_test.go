@@ -37,6 +37,9 @@ func (s rotationStore) RotateCredential(context.Context, string, string) (int64,
 	}
 	return 0, s.updateErr
 }
+func (s rotationStore) RotateCredentialIfCurrent(ctx context.Context, username, _, hash string) (int64, error) {
+	return s.RotateCredential(ctx, username, hash)
+}
 
 // okSessionStore succeeds at everything.
 type okSessionStore struct{}
