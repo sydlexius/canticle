@@ -236,6 +236,129 @@ tag): such a title is treated as qualified. The mitigations are the switch
 itself, the purge above, and the fact that a file already on disk is never
 displaced. There is no per-track override.
 
+### Repairing rows already settled (`scan reconcile-instrumental-titles`)
+
+Turning the rule on changes nothing for a track that already has a lyric on
+disk. `scan reconcile-instrumental-titles` finds the tracks a provider settled
+with lyrics whose title the rule would now settle as instrumental, and repairs
+the ones it can prove it is safe to touch: the lyric file is saved to a backup
+and removed, its words are blocked for that track, and the track is queued
+again. The running worker then settles it with a `[source:title-rule]` marker.
+
+```sh
+canticle scan reconcile-instrumental-titles                                # dry run: counts only
+canticle scan reconcile-instrumental-titles --tail rows.tsv                # dry run, plus one line per row
+canticle scan reconcile-instrumental-titles --yes --backup repair.jsonl    # repair
+```
+
+**Dry run is the default.** Without `--yes` it reads and counts and changes no
+row and no file. Like every `scan` command it creates the database and applies
+pending migrations if needed. Read the counts first.
+
+**It reads audio tags.** With `enrichment.enabled` on, a strong-titled row's
+album comes from the metadata index when the index is current for the file, and
+from the audio file's tags otherwise. That read can log the existing
+duration-parse warning, which names a file path in the log (never on stdout).
+
+**Flags.**
+
+- `--yes` repairs. It needs `--backup`, and it is refused while
+  `instrumental_title.mode` is `off`: the reopened tracks would only be fetched
+  again. A dry run works in any mode and says when the mode is off. The command
+  reads `instrumental_title.mode` and `enrichment.enabled` from its own config:
+  if `serve` runs with the mode off, or with a different `enrichment.enabled`,
+  the reopened tracks are fetched again instead of settled with a marker.
+- `--backup <file>` is the JSONL file each lyric file is appended to, and
+  synced to disk, before it is removed. It is appended to if it exists. It may
+  not be a lyric file, sit inside a library, or be the database file. `--tail`
+  has the same limits and must be a different file.
+- `--tail <file>` appends one line per strong-titled row: the work item id, a
+  tab, and what became of the row (`repaired`, `would-repair`, `not-provable`
+  and so on). It holds no path, artist or title. With `--yes` it is always
+  written; the default is `<backup>.rows.tsv`.
+- `--library <name|id>` limits the rows examined to one library.
+
+**Output.** Counts only: no path, artist, title or lyric text is printed. Paths
+appear only inside the backup file.
+
+| Line | Meaning |
+|---|---|
+| `rows examined` | Tracks whose lyrics came from a provider: settled ones, and ones a worker holds right now (`processing`). Equals no signal + weak + strong. |
+| `no signal or excluded` | The title carries no qualifier, or is a cappella or karaoke. Never touched. |
+| `weak` | A weak signal only. Never touched. |
+| `strong` | A strong qualifier. The `strong <family> <position>` lines and the three detector lines break this number down. It equals the four `strong, skipped` lines plus `candidates`. |
+| `strong, skipped, audio file unreadable` | The audio file's album tag could not be read, so the title could not be judged the way the worker judges it. |
+| `strong, skipped, in flight` | A worker holds the row right now. |
+| `strong, skipped, hand-marked` | The lyrics were edited by hand, or the track was marked instrumental by hand. |
+| `strong, skipped, artist before the dash or no artist known` | The rule declines the title (see "The artist check"): the text before the dash could be the artist, or no real artist is known. |
+| `candidates` | Rows the repair examined on disk. Equals every line from here down to the repaired line. |
+| `skipped, symlinked lyric file` | A lyric file is a symlink. |
+| `skipped, outside library roots` | An output directory is in no configured library, or is gone. |
+| `skipped, a file the repair would leave on the stem` | Another file would stay where the marker goes (a hand-placed marker, a word-timing file Canticle does not own), so no marker could be written. |
+| `skipped, no lyric file on disk` | Nothing to remove: no lyric file, or one with no words in it. |
+| `skipped, source tag names another lane` | The `.lrc` says a different provider wrote it than the row records. |
+| `skipped, not provable` | See below. |
+| `needs a manual mark` | See below. |
+| `errors` | The row failed part-way or could not be handled. See the exit status. |
+| `rows that would be repaired` / `rows repaired` | Rows that passed every check. |
+| `lyric files that would be backed up` / `lyric files backed up` | Their lyric files. |
+| `lyric files removed`, `new blocks`, `cache entries invalidated`, `rows reopened` | Applied runs only: what the repair did. |
+
+**Not provable.** A lyric file is removed only when its modification time is
+within two minutes of the moment the row settled, before or after. That date is
+the only proof that the file is the one the provider wrote; the words matching
+are not proof, because a hand-edited file can still match. Expect this count to
+be large on an old library. The usual causes are:
+
+- the track was fetched again later and the file on disk was kept, which moves
+  the row's settle time and leaves the file's date alone;
+- the file was rewritten, edited, copied or restored with another date (a
+  library moved between disks, a sync tool, a tag editor);
+- the row's settle time is missing or unreadable;
+- the `.lrc` file's header cannot be parsed.
+
+These tracks keep their lyrics. To replace one by hand, use `scan mark-wrong`.
+
+**Needs a manual mark.** A file appeared or changed while its row was being
+repaired. The row is left settled with its files in place, but its words are
+already blocked. A rerun skips it again. Find the ids in the `--tail` file and
+run `canticle scan mark-wrong --id <id> --yes` for each.
+
+**One pass is not exhaustive.** A track waiting on an upgrade re-fetch or a
+word-timing re-check is not settled at that moment, so the command does not see
+it. Run the dry run again later to pick those up.
+
+**Restoring.** The backup has the same records as `scan mark-wrong` (`op` is
+`reconcile-instrumental-titles`; see [Mark a track's lyrics as wrong](USER_GUIDE.md#mark-a-tracks-lyrics-as-wrong)), one
+for every file that was about to be removed. That includes rows that were then
+refused or failed, whose files are still on disk. So restore only the records
+whose `work_item_id` has a `repaired` line in the `--tail` file:
+
+```sh
+awk -F'\t' '$2 == "repaired" { print $1 }' repair.jsonl.rows.tsv
+```
+
+A rerun appends to the same backup, so one path can have several records; the
+last one is the file as it was removed. A record whose id has no line at all in
+the `--tail` file belongs to the last row of a run that stopped because the
+tail could not be written. Stdout names that row (`row <id> (<disposition>) has
+no line in the --tail file`), and its file is gone if the disposition printed
+is `repaired`.
+
+Putting a file back does not undo the block or the marker: `scan unblock
+--work-item <id>` lifts the block, and the purge under "Provenance and undo"
+removes the markers.
+
+**Exit status.** 0 when the run finished and no row errored; skipped rows are
+not failures. 1 when a row errored, a row needs a manual mark, the run was
+interrupted (the counts printed are then partial, and the last row handled is
+named), the `--tail` file or a backup record could not be written (the run
+stops at that row), `--yes` was refused because the mode is off, no library
+root is configured, or the config, database or `--library` could not be used.
+2 for `--yes` without `--backup`, or an unsafe `--backup` or `--tail` path. A row that
+errored may be part-way: its files removed and the row not yet reopened. A rerun
+does not promise to finish it; it reports where each row stands now.
+
 ## The decision model (the core)
 
 A track is marked instrumental only when **all three** gates pass. Any gate

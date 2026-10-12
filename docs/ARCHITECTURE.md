@@ -57,7 +57,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `instrumentalmark` -- marks a track instrumental by hand through `LRCWriter.WriteManualMarker`.
 - `identityrepair` -- re-reads each `scan_results` file's tags (via the injected `IdentityReader` seam) to correct run-together multi-value artist rows, re-keying the coupled `work_queue` row; driven by the dry-run-by-default `scan reconcile-identity`.
 - `lyricblock` -- exact-words fingerprints of lyric bodies an operator marked wrong, in a `lyric_blocks` store keyed by normalized artist/title identity; driven by `scan mark-wrong`, `scan list-blocks` and `scan unblock`.
-- `titlerepair` -- finds rows that settled with lyrics but whose title the instrumental title rule would now settle as instrumental, for a bulk repair.
+- `titlerepair` -- finds rows that settled with lyrics but whose title the instrumental title rule would now settle as instrumental, and repairs the ones whose lyric file is provably the settle's own; driven by the dry-run-by-default `scan reconcile-instrumental-titles`.
 - `audiometa` -- store of per-file audio metadata read from the library's audio files.
 - `detectorbackfill` -- attributes historical instrumental detections to the detector lane for reporting.
 - `instrumentalbackfill` -- runs the audio detector over rows it never scored.

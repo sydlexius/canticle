@@ -356,6 +356,22 @@ canticle scan reconcile-remediated --yes
 - **Aggregate-only output,** and each applied row's prior outcome, tier, timing verdict and status are written to `<db-dir>/reconcile-remediated-backup-<timestamp>.jsonl` (or `--backup`) and fsynced before the row commits. That is enough to undo an `unsynced` or tier change by hand; for a reset it is an audit record only, since the reset also clears word-timing and upgrade state it does not save, and restoring it would bring back a row claiming a missing synced file.
 - **Busy database:** a row that hits `SQLITE_BUSY` is counted as `write_failed` (exit 1) and is not retried, so the backup never gets a duplicate record; rerun the command, which is idempotent.
 
+## Reconcile instrumental titles
+
+`scan reconcile-instrumental-titles` (#1470) repairs tracks a provider settled with lyrics whose title the [instrumental title rule](instrumental-detection.md#title-rule) would now settle as instrumental. Dry run by default; `--yes` applies.
+
+```sh
+canticle scan reconcile-instrumental-titles
+canticle scan reconcile-instrumental-titles --yes --backup repair.jsonl
+```
+
+- **What `--yes` does:** each lyric file is appended to `--backup` (required) before it is removed, its words are blocked for that track, and the track is reopened for the worker to settle with a marker. Refused while `instrumental_title.mode` is `off`.
+- **Only provable files are removed:** the lyric file must be dated within two minutes of the row's settle. Everything else is counted and skipped.
+- **Aggregate-only output.** `--tail <file>` appends one line per strong-titled row (work item id and disposition, nothing private); with `--yes` it defaults to `<backup>.rows.tsv`, and a restore needs it. `--library <name|id>` narrows the rows.
+- **Exit status:** 1 if a row errored or needs a manual mark, or the run was interrupted or stopped; 2 for a missing or unsafe `--backup` or `--tail`.
+
+Every counter, the restore steps and the limits are in [Repairing rows already settled](instrumental-detection.md#repairing-rows-already-settled-scan-reconcile-instrumental-titles).
+
 ## Reconcile upstream
 
 `scan reconcile-upstream` (#1298) fills `work_queue.upstream` (the licensor an `innertube` result was served from) for rows settled before the column existed, by reading the `[upstream:]` tag from each row's sidecar. Dry run by default; `--yes` applies. On demand only: there is no serve-startup pass or sweep.

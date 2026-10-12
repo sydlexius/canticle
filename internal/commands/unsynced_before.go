@@ -57,6 +57,7 @@ func scanSubcommandSelected(args ScanCmd) bool {
 		args.ReconcileEditorTag != nil ||
 		args.ReconcileUpstream != nil ||
 		args.ReconcileRemediated != nil ||
+		args.ReconcileInstrumentalTitles != nil ||
 		args.MarkWrong != nil ||
 		args.ListBlocks != nil ||
 		args.Unblock != nil
