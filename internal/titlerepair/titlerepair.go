@@ -99,6 +99,13 @@ type Result struct {
 	// The same split for the Weak rows, read from instrumental_result and never
 	// scored again. They sum to Weak, and inform whether a weak tier is worth building.
 	WeakDetectorInstrumental, WeakDetectorNotInstrumental, WeakDetectorUnscored int
+	// WeakAlbumInstrumental: the Weak rows whose verdict is the instrumental
+	// family in the album position, an upper bound on the instrumental releases.
+	// InstrumentalRelease: those of them that are a plain title on an
+	// instrumental release (instrumentaltitle.InstrumentalRelease) by their
+	// stored album and artists, a lower bound. So InstrumentalRelease <=
+	// WeakAlbumInstrumental <= Weak. Counts only: they change what happens to no row.
+	WeakAlbumInstrumental, InstrumentalRelease int
 	// Unreadable: the file's album could not be read. InFlight: held by a worker.
 	// HandMarked: a hand edit or mark. ArtistPrefixed: the rule declines the title.
 	// InFlight and HandMarked include a row found so only when the cull reached it.
@@ -264,6 +271,14 @@ func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Re
 			res.WeakDetectorInstrumental++
 		default:
 			res.WeakDetectorNotInstrumental++
+		}
+		// Both counts use what the row stores: no audio file is read for them,
+		// and nothing acts on a release yet (#1525).
+		if v.Family == instrumentaltitle.FamilyInstrumental && v.Position == instrumentaltitle.PositionAlbum {
+			res.WeakAlbumInstrumental++
+			if instrumentaltitle.InstrumentalRelease(c.title, c.album, c.artist, c.albumArtist) {
+				res.InstrumentalRelease++
+			}
 		}
 		return
 	case instrumentaltitle.Strong:

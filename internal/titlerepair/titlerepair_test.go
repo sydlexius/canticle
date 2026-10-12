@@ -157,6 +157,7 @@ func TestClassificationCounts(t *testing.T) {
 		},
 		DetectorInstrumental: 2, DetectorNotInstrumental: 1, DetectorUnscored: 1,
 		WeakDetectorInstrumental: 1, WeakDetectorNotInstrumental: 1, WeakDetectorUnscored: 1,
+		WeakAlbumInstrumental: 1, // the bare album word: the upper bound counts it, the lower does not
 	}
 	if sum := res.WeakDetectorInstrumental + res.WeakDetectorNotInstrumental + res.WeakDetectorUnscored; sum != res.Weak {
 		t.Errorf("weak detector split sums to %d, want Weak %d", sum, res.Weak)
@@ -170,6 +171,38 @@ func TestClassificationCounts(t *testing.T) {
 	}
 	if len(seen) != 4 {
 		t.Errorf("OnRow saw %d rows, want the 4 Strong ones", len(seen))
+	}
+}
+
+// A plain title on an instrumental release is counted from the row's stored
+// album and artists, and that is all: the row keeps the Weak album verdict it
+// always had, is no candidate, and no audio file is read for the count. It is
+// a lower bound; the Weak rows whose album carries the word are the upper one.
+func TestInstrumentalReleaseIsCountedOnly(t *testing.T) {
+	const release = "Low Tide (Instrumental)"
+	d := dbtest.Open(t)
+	seed(t, d,
+		wq{title: "Quiet Shelf", album: release},
+		wq{title: "Quiet Shelf", album: "Low Tide - Instrumentals", artist: "Copper Finch Trio"},
+		wq{title: "Quiet Shelf", album: release, status: "processing"},
+		wq{title: "Quiet Shelf (Vocal)", album: release},                              // the title guard
+		wq{title: "Quiet Shelf", album: "Low Tide Instrumentals"},                     // the bare trailing word
+		wq{title: "Quiet Shelf", album: release, artist: "Copper Finch feat. Wren"},   // a guest credit
+		wq{title: "Quiet Shelf", album: "Low Tide - Instrumental", artist: "Various"}, // dash form, no real artist
+		wq{title: "Quiet Shelf (Piano Version)", album: "Low Tide"},                   // weak by its title alone
+	)
+	res, seen := run(t, d, Options{FileAlbum: func(string) (string, error) {
+		t.Error("an audio file was read: the release count must use the stored album only")
+		return "", nil
+	}})
+	if res.InstrumentalRelease != 3 || res.WeakAlbumInstrumental != 7 || res.Examined != 8 || res.Weak != 8 ||
+		res.Strong != 0 || res.Candidates != 0 || len(seen) != 0 {
+		t.Errorf("instrumental release %d, weak album instrumental %d, examined %d, weak %d, strong %d, candidates %d, rows reported %d; want 3, 7, 8, 8, 0, 0, 0",
+			res.InstrumentalRelease, res.WeakAlbumInstrumental, res.Examined, res.Weak, res.Strong, res.Candidates, len(seen))
+	}
+	if res.InstrumentalRelease > res.WeakAlbumInstrumental || res.WeakAlbumInstrumental > res.Weak {
+		t.Errorf("lower bound %d, upper bound %d, weak %d; want lower <= upper <= weak",
+			res.InstrumentalRelease, res.WeakAlbumInstrumental, res.Weak)
 	}
 }
 
