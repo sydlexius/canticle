@@ -263,7 +263,9 @@ row whose own title carries no signal and whose stored album name says
 instrumental in any shape, the unrecognized shapes below included. The second
 is the lower bound: the rows of the first line that pass every check in this
 section. The second is never above the first, and the first is never above
-`weak`. The true number of tracks on instrumental releases is between the two.
+`weak`. Among the weak rows, the true number on instrumental releases is
+between the two. Rows outside `weak` are on neither line, so neither count
+bounds the library as a whole.
 
 Nothing acts on either count yet. The track is looked up like any other, keeps
 the lyrics it has, and its album stays the weaker signal it always was. The
@@ -452,8 +454,8 @@ appear only inside the backup file.
 | `no signal or excluded (a cappella, karaoke, sing-along)` | The title carries no qualifier, or is a cappella, or the title or album names karaoke or a sing-along product. Never touched. |
 | `weak` | A weak signal only. Never touched. |
 | `weak, detector says instrumental` / `weak, detector says not instrumental` / `weak, never scored` | The weak rows by the verdict the detector already stored for them; the three add up to `weak`. Nothing is run to get it. It sizes a possible weak-tier repair. |
-| `weak, album named as instrumental` | The weak rows whose own title carries no signal and whose stored album name says instrumental in any shape. An upper bound on the tracks of instrumental releases; never above `weak`. A count only. |
-| `weak, plain title on an instrumental release (counted only, a lower bound)` | The rows of the line above whose title is plain and whose stored album name ends in an instrumental marker, with every check passed (see "Instrumental releases" above). A lower bound, never above the line above; the truth is between the two. A count only: no such row is repaired, skipped or reported differently because of it, with or without `--yes`. The album and artists are the ones stored for the row; no audio file is read for these two lines. |
+| `weak, album named as instrumental` | The weak rows whose own title carries no signal and whose stored album name says instrumental in any shape. An upper bound on the weak rows that sit on instrumental releases, not on the library as a whole; never above `weak`. A count only. |
+| `weak, plain title on an instrumental release (counted only, a lower bound)` | The rows of the line above whose title is plain and whose stored album name ends in an instrumental marker, with every check passed (see "Instrumental releases" above). A lower bound on the same weak rows, never above the line above; the truth for the weak rows is between the two. A count only: no such row is repaired, skipped or reported differently because of it, with or without `--yes`. The album and artists are the ones stored for the row; no audio file is read for these two lines. |
 | `strong` | A strong qualifier. The `strong <family> <position>` lines and the three detector lines break this number down. It equals the four `strong, skipped` lines plus `candidates`. |
 | `strong, skipped, audio file unreadable` | The audio file's album tag could not be read, so the title could not be judged the way the worker judges it. |
 | `strong, skipped, in flight` | A worker holds the row right now. |
