@@ -89,7 +89,7 @@ type StrongKey struct {
 // NotProvable + NeedsManualMark + Errors + WouldRepair + Repaired.
 type Result struct {
 	Examined int
-	// NoSignal includes the excluded a cappella and karaoke titles.
+	// NoSignal includes the excluded a cappella, karaoke and sing-along titles.
 	NoSignal int
 	Weak     int
 	Strong   int

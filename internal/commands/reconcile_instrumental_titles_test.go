@@ -203,7 +203,7 @@ func TestReconcileInstrumentalTitlesDryRunThenApply(t *testing.T) {
 		t.Fatalf("dry run = %d:\n%s", code, out)
 	}
 	ritWant(t, "dry run", out, "dry run: nothing changed (pass --yes with --backup <file> to repair)", "instrumental_title.mode: strong",
-		"rows examined: 4", "no signal or excluded (a cappella, karaoke): 1", "weak: 1", "strong: 2", "strong instrumental bracket: 2", "candidates: 2",
+		"rows examined: 4", "no signal or excluded (a cappella, karaoke, sing-along): 1", "weak: 1", "strong: 2", "strong instrumental bracket: 2", "candidates: 2",
 		"skipped, not provable (file not dated at the settle): 1", "rows that would be repaired: 1", "lyric files that would be backed up: 1")
 	if strings.Contains(out, "rows repaired") || strings.Contains(out, "backup:") {
 		t.Errorf("dry run prints an applied line:\n%s", out)
@@ -226,7 +226,7 @@ func TestReconcileInstrumentalTitlesDryRunThenApply(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("apply = %d:\n%s", code, out)
 	}
-	ritWant(t, "apply", out, "rows examined: 4", "no signal or excluded (a cappella, karaoke): 1", "weak: 1", "candidates: 2", "skipped, not provable (file not dated at the settle): 1", "errors: 0", "rows repaired: 1",
+	ritWant(t, "apply", out, "rows examined: 4", "no signal or excluded (a cappella, karaoke, sing-along): 1", "weak: 1", "candidates: 2", "skipped, not provable (file not dated at the settle): 1", "errors: 0", "rows repaired: 1",
 		"lyric files backed up: 1", "lyric files removed: 1", "new blocks: 1", "rows reopened: 1", "backup: "+f.backup)
 	ritNoLeak(t, "apply stdout", out, f)
 	if _, err := os.Stat(goodLRC); err == nil {
@@ -365,6 +365,57 @@ func TestReconcileInstrumentalTitlesIgnoresAFilesystemRootLibrary(t *testing.T) 
 	}
 }
 
+// An applied repair keeps the lyric file of a sing-along product, named by the
+// title or by the album, byte for byte and with the row still settled. The
+// plain instrumental title beside them is repaired.
+func TestReconcileInstrumentalTitlesKeepsLyricsOnASingAlongRelease(t *testing.T) {
+	f := newRITFixture(t, "strong", "", false)
+	// seed is a settled row with the given title whose album, on the row and on
+	// the audio file, is the given one. title_key keeps the fixture's unique
+	// value, since two rows share a title.
+	seed := func(title, album string) (id, lrc string) {
+		id, lrc = f.titled(t, "", album, 0)
+		f.db(t, func(q func(string, ...any) string) {
+			q(`UPDATE work_queue SET title = ?, album = ? WHERE id = ? RETURNING id`, title, album, id)
+		})
+		return id, lrc
+	}
+	type row struct{ label, id, lrc string }
+	var kept []row
+	id, lrc := seed("Glass Harbor (Performance Track)", "Quiet Shelf")
+	kept = append(kept, row{"sing-along title", id, lrc})
+	id, lrc = seed("Glass Harbor (Instrumental)", "Quiet Shelf (Performance Tracks)")
+	kept = append(kept, row{"sing-along album", id, lrc})
+	good, goodLRC := seed("Glass Harbor (Instrumental)", "Quiet Shelf")
+
+	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup})
+	if code != 0 {
+		t.Fatalf("apply = %d:\n%s", code, out)
+	}
+	ritWant(t, "apply", out, "rows examined: 3", "no signal or excluded (a cappella, karaoke, sing-along): 2",
+		"strong: 1", "rows repaired: 1", "lyric files removed: 1", "rows reopened: 1")
+	for _, s := range []string{"Glass Harbor", "Quiet Shelf"} {
+		if strings.Contains(out, s) {
+			t.Errorf("apply stdout leaks %q:\n%s", s, out)
+		}
+	}
+	for _, r := range kept {
+		if _, err := os.Stat(r.lrc); err != nil {
+			t.Errorf("%s: the lyric file was removed: %v", r.label, err)
+			continue
+		}
+		if got := f.state(t, r.id); ritRead(t, r.lrc) != ritLRC || got != "done|musixmatch|1" {
+			t.Errorf("%s: row = %s, want it still settled with its lyric file as written", r.label, got)
+		}
+	}
+	if _, err := os.Stat(goodLRC); err == nil {
+		t.Error("the lyric file of the plain instrumental title was not removed")
+	}
+	if got := f.state(t, good); got != "pending|null|1" {
+		t.Errorf("plain instrumental row = %s, want it reopened with one block", got)
+	}
+}
+
 // The album is the audio FILE's, as the worker sees it: a karaoke album on the
 // file withdraws the Strong verdict whatever the row stores, and a file that
 // cannot be read is skipped as unreadable, never treated as having no album.
@@ -380,7 +431,7 @@ func TestReconcileInstrumentalTitlesClassifiesWithTheFilesAlbum(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("dry run = %d:\n%s", code, out)
 	}
-	ritWant(t, "enrichment on", out, "no signal or excluded (a cappella, karaoke): 1", "strong: 1",
+	ritWant(t, "enrichment on", out, "no signal or excluded (a cappella, karaoke, sing-along): 1", "strong: 1",
 		"strong, skipped, audio file unreadable: 1", "candidates: 0", "rows that would be repaired: 0")
 
 	off := newRITFixture(t, "strong", "[enrichment]\nenabled = false\n", false)
@@ -413,7 +464,7 @@ func TestReconcileInstrumentalTitlesReadsTheMetadataCacheLikeTheWorker(t *testin
 	if code != 0 {
 		t.Fatalf("dry run = %d:\n%s", code, out)
 	}
-	ritWant(t, "cache hit", out, "no signal or excluded (a cappella, karaoke): 1", "strong: 0", "candidates: 0")
+	ritWant(t, "cache hit", out, "no signal or excluded (a cappella, karaoke, sing-along): 1", "strong: 0", "candidates: 0")
 
 	// A row that no longer matches the file is a miss: the file's plain tag stands.
 	if err := os.Chtimes(audio, ritSettled, ritSettled); err != nil {

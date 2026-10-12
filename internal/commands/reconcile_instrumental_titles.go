@@ -289,7 +289,7 @@ func titleRepairExit(out io.Writer, res titlerepair.Result) int {
 func printTitleRepair(out io.Writer, res titlerepair.Result, applied bool) {
 	line := func(label string, n int) { _, _ = fmt.Fprintf(out, "%s: %d\n", label, n) }
 	line("rows examined", res.Examined)
-	line("no signal or excluded (a cappella, karaoke)", res.NoSignal)
+	line("no signal or excluded (a cappella, karaoke, sing-along)", res.NoSignal)
 	line("weak", res.Weak)
 	line("weak, detector says instrumental", res.WeakDetectorInstrumental)
 	line("weak, detector says not instrumental", res.WeakDetectorNotInstrumental)

@@ -148,19 +148,61 @@ the sidecar is absent or its breaker is open.
 A qualifier is strong only when it stands alone in brackets or after a dash,
 beside nothing but packaging words (`Version`, `Mix`, a year), and qualifies a
 real title: `(Instrumental)`, `- Off Vocal`, `[Backing Track]`, `(Inst)`,
-`- Minus One`, `(BGM)`, `(No Vocals)`. These are deliberately NOT acted on:
+`(BGM)`, `(No Vocals)`. These are deliberately NOT acted on:
 
 - a track that is only the word (`Instrumental`), or uses it inline: that is a
   song named with the word;
 - a dash-suffix title whose text before the dash could be the track's own
-  artist, such as `Artist - Minus One`: that is a title tag carrying the
+  artist, such as `Artist - Off Vocal`: that is a title tag carrying the
   artist, not a qualified title. The check is deliberately broad (see "The
   artist check" below). A bracketed qualifier is not subject to it;
 - any a cappella title: vocals only, so its lyrics are correct;
 - any karaoke title, or any track on a karaoke album: a karaoke track is for
   singing along, so it gets its lyrics (see "Karaoke and the detector" below);
+- any sing-along product, named by the title or by the album, exactly as
+  karaoke is (see "Sing-along products" below);
 - weaker signals (an album named Instrumental, `Piano Version`, `Score`),
   unless the mode is `all` (see "Weaker signals" below).
+
+**Sing-along products.** A recording sold for singing or playing over is
+treated exactly like karaoke: no verdict, in the title or in the album, so the
+track is looked up and keeps its lyrics. The phrases are:
+
+- `Accompaniment`, `Performance` or `Split`, directly followed by `Track`,
+  `Tracks` or `Trax`;
+- `Minus One`, `Minus 1`;
+- `Sing` or `Play` followed by `Along` or `Alongs`, or by `A Long` or `A Longs`
+  (`Sing-A-Long`, `Sing A Long`);
+- the karaoke-label phrases `Originally Performed By` and `In the Style Of`;
+- in the album name only: `Backing` directly followed by `Track`, `Tracks` or
+  `Trax`.
+
+`Backing Track` means two things, and where it stands tells them apart. In a
+track title it is an instrumental qualifier. In practice it labels a studio
+outtake, such as `(Backing Track)`, and that recording really has no vocal. A
+qualifier listed after a slash with other words, as in `(Take 14 / Instrumental
+Backing Track)`, is a weaker signal and is not acted on. On a release name, as in `Low Tide (Backing Tracks)`, it
+marks a sing-along product. Every track on that release keeps its lyrics, a
+track titled `(Backing Track)` included. Only the singular is the title
+qualifier: `Backing Tracks` in a title is no signal either way.
+
+`Minus One` is no longer an instrumental qualifier. It was, and a title
+carrying it was settled with a marker. Such a track is made for singing along,
+so its lyrics are wanted. A track already settled as instrumental under the old
+rule keeps its marker file. `scan purge-provenance --source title-rule` removes
+the markers the rule wrote (see "Provenance and undo" below), and the tracks are
+then looked up again. A title that carried the old `Minus One` term in an
+unusual spelling can now be judged by its other qualifier instead.
+
+The words of a phrase count only when they are separated by whitespace, by a
+a single dash of any kind with nothing around it, or written as one word (`SplitTrax`,
+`Singalong`, `Minus1`). Any other punctuation between them means no match:
+`Live Performance - Track 3` and `Performance, Track 2 (Instrumental)` are not
+excluded. `Performance`, `Backing` or `Split` alone excludes nothing.
+
+The over-match is deliberate. A song genuinely titled `Minus One` or `In the
+Style of ...` gets no verdict either. That costs one normal lookup, where the
+opposite mistake costs a track its lyrics.
 
 **The artist check.** A dash-suffix title is acted on only when the text before
 the last dash is known not to be the artist. It is compared against the track
@@ -207,7 +249,7 @@ replace it.
 
 **Karaoke and the detector.** Under `instrumental_detector.ordering = "front"`
 the detector answers before any provider, and a karaoke backing track sounds
-instrumental to it. So while the rule is on, a karaoke-titled track is not sent
+instrumental to it. So while the rule is on, a karaoke or sing-along track is not sent
 to the detector first: the providers are asked, and if none has lyrics the track
 is deferred like any other miss. It is not marked instrumental at that point.
 With the rule off, `front` behaves as it always has. Other orderings are
@@ -296,7 +338,7 @@ appear only inside the backup file.
 | Line | Meaning |
 |---|---|
 | `rows examined` | Tracks whose lyrics came from a provider: settled ones, and ones a worker holds right now (`processing`). Equals no signal + weak + strong. |
-| `no signal or excluded` | The title carries no qualifier, or is a cappella or karaoke. Never touched. |
+| `no signal or excluded (a cappella, karaoke, sing-along)` | The title carries no qualifier, or is a cappella, or the title or album names karaoke or a sing-along product. Never touched. |
 | `weak` | A weak signal only. Never touched. |
 | `weak, detector says instrumental` / `weak, detector says not instrumental` / `weak, never scored` | The weak rows by the verdict the detector already stored for them; the three add up to `weak`. Nothing is run to get it. It sizes a possible weak-tier repair. |
 | `strong` | A strong qualifier. The `strong <family> <position>` lines and the three detector lines break this number down. It equals the four `strong, skipped` lines plus `candidates`. |

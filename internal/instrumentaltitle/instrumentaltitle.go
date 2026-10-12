@@ -4,10 +4,14 @@
 // normalize.
 //
 // Two invariants are load-bearing. The exclusion wins: a title naming a
-// cappella or karaoke, or an album naming karaoke, in any spelling the
-// exclusion tables know, is None whatever else it carries. An a cappella
-// recording is vocals only, so its lyrics are correct, and a karaoke track must
-// get its lyrics: that is what it is for. The tables deliberately over-match
+// cappella, karaoke or a sing-along product ("Performance Tracks", "Minus
+// One", "Sing-Along", "Play-Along", "Originally Performed By"), or an album
+// naming karaoke or such a product ("Backing Tracks" too, there), in any
+// spelling the exclusion tables know, is None whatever else it carries. An a
+// cappella recording is vocals only, so its lyrics are correct, and a track sold
+// for singing over must get its lyrics: that is what it is for. "Backing Track"
+// in a title is the exception, an instrumental qualifier: there it labels a
+// studio outtake, not a product. The tables deliberately over-match
 // (a title about a chapel in a Romance language loses its verdict too), since a
 // false None only preserves today's behavior while a false Strong costs a track
 // its lyrics. And
@@ -21,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sydlexius/canticle/internal/normalize"
 )
@@ -29,8 +34,8 @@ import (
 type Tier int
 
 const (
-	// None means no signal, an excluded (a cappella or karaoke) title, or a
-	// karaoke album.
+	// None means no signal, an excluded (a cappella, karaoke or sing-along
+	// product) title, or a karaoke or sing-along album.
 	None Tier = iota
 	// Weak is a signal that needs corroboration (the audio detector). Its
 	// Position is descriptive only: a Weak verdict is not actionable on its own
@@ -68,7 +73,6 @@ const (
 	FamilyBackingTrack Family = "backing_track"
 	FamilyBGM          Family = "bgm"
 	FamilyOffVocal     Family = "off_vocal"
-	FamilyMinusOne     Family = "minus_one"
 	FamilyMR           Family = "mr"
 	FamilyNoVocal      Family = "no_vocal"
 	FamilyArrangement  Family = "arrangement"
@@ -138,7 +142,6 @@ var (
 		{FamilyBackingTrack, true, [][]string{{"backing"}, {"track"}}},
 		{FamilyBGM, true, [][]string{{"bgm"}}},
 		{FamilyOffVocal, true, [][]string{{"off"}, {"vocal", "vocals"}}},
-		{FamilyMinusOne, true, [][]string{{"minus"}, {"one"}}},
 		{FamilyMR, true, [][]string{{"mr"}, {"ver", "version"}}},
 		{FamilyNoVocal, true, [][]string{{"no", "without"}, {"vocal", "vocals"}}},
 		{FamilyArrangement, false, [][]string{{"orchestral", "piano"}, {"ver", "version"}}},
@@ -176,7 +179,7 @@ var (
 	}
 	instToken = "inst"
 
-	// The exclusions. Over-matching is the safe direction: it only ever
+	// The exclusions. Over-matching is the safe direction: it
 	// withholds a verdict. Stems match anywhere in the text; glued needles match
 	// after everything but letters and digits is removed, so a middle dot or a
 	// space inside the word does not hide it; whole tokens are the abbreviation.
@@ -193,6 +196,29 @@ var (
 	aCappellaParticle, aCappellaAfter = "\u0430", "капел"
 	karaokeStems                      = []string{"karaok", "kareok", "karoke", "karoak", "караоке"}
 	karaokeGlued                      = []string{"カラオケ", "からおけ", "가라오케", "卡拉ok"}
+	// The sing-along products and the karaoke label phrases, excluded exactly
+	// as karaoke is: a recording sold for singing or playing over. Each row is a
+	// phrase, one set of alternatives per word. Only the product form counts,
+	// the words directly adjacent (see adjacent) or glued into one token
+	// ("splittrax", "singalong"): "Performance", "Split", "Accompaniment" and
+	// "Sing" on their own are ordinary words.
+	//
+	// The sing-along phrases below count in a title or an album.
+	singAlongSet = phraseSet{rows: [][][]string{
+		{{"accompaniment", "performance", "split"}, {"track", "tracks", "trax"}},
+		{{"minus"}, {"one", "1"}},
+		{{"sing", "play"}, {"along", "alongs"}},
+		{{"sing", "play"}, {"a"}, {"long", "longs"}},
+		{{"originally"}, {"performed"}, {"by"}},
+		{{"in"}, {"the"}, {"style"}, {"of"}},
+	}}
+	// albumPhrases count in an album name only. On a release, "Backing Tracks"
+	// names a sing-along product. In a track title, "Backing Track" labels a
+	// studio outtake that really is instrumental, so there it stays the
+	// backing_track qualifier in terms.
+	albumPhrases = phraseSet{rows: [][][]string{
+		{{"backing"}, {"track", "tracks", "trax"}},
+	}}
 
 	yearToken = regexp.MustCompile(`^(19|20)[0-9]{2}$`)
 	// dressing is a token that numbers a track rather than names it: digits, a
@@ -236,10 +262,49 @@ func init() {
 	for _, list := range [][]string{aCappellaStems, aCappellaGlued, aCappellaTokens, karaokeStems, karaokeGlued} {
 		fold(list)
 	}
+	singAlongSet.build(fold)
+	albumPhrases.build(fold)
 	instToken = normalize.NormalizeKey(instToken)
 	for _, c := range closers {
 		closerSet[c] = true
 	}
+}
+
+// phraseSet is a table of product phrases and every phrase written as one
+// glued token ("splittrax", "singalong").
+type phraseSet struct {
+	rows  [][][]string
+	glued map[string]bool
+}
+
+// build folds the rows and fills the glued set; init calls it once.
+func (ps *phraseSet) build(fold func([]string)) {
+	ps.glued = map[string]bool{}
+	for _, phrase := range ps.rows {
+		joined := []string{""}
+		for _, alts := range phrase {
+			fold(alts)
+			var next []string
+			for _, head := range joined {
+				for _, alt := range alts {
+					next = append(next, head+alt)
+				}
+			}
+			joined = next
+		}
+		for _, j := range joined {
+			ps.glued[j] = true
+		}
+	}
+}
+
+// matches reports whether a phrase of the set starts at ws[i], or ws[i] is a
+// glued phrase.
+func (ps *phraseSet) matches(s string, ws []word, i int) bool {
+	if ps.glued[ws[i].text] {
+		return true
+	}
+	return slices.ContainsFunc(ps.rows, func(phrase [][]string) bool { return phraseAt(s, ws, i, phrase) })
 }
 
 // prepare normalizes one field and joins dotted initials.
@@ -251,15 +316,16 @@ func prepare(s string) string {
 
 // Classify reports the instrumental signal carried by a title and its album.
 // The title decides alone when it carries anything; a clean title falls back to
-// the album, whose signal is always Weak. An a cappella or karaoke title is None
-// outright, and so is any track on a karaoke album: a karaoke product is sold
-// for its lyrics, whatever its titles say. An a cappella album cancels only the
-// album's own signal.
+// the album, whose signal is always Weak. An a cappella, karaoke or sing-along
+// title is None outright, and so is any track on a karaoke or sing-along album:
+// such a product is sold for its lyrics, whatever its titles say, a "(Backing
+// Track)" title included. An a cappella album cancels only the album's own
+// signal.
 func Classify(title, album string) Verdict {
 	t, a := prepare(title), prepare(album)
-	titleOut, _ := excluded(t)
-	albumOut, karaokeAlbum := excluded(a)
-	if titleOut || karaokeAlbum {
+	titleOut, _ := excluded(t, false)
+	albumOut, singAlongAlbum := excluded(a, true)
+	if titleOut || singAlongAlbum {
 		return Verdict{}
 	}
 	if v := classifyField(t); v.Tier != None {
@@ -282,11 +348,61 @@ func tokens(s string) []string {
 	})
 }
 
-// excluded is the a cappella and karaoke check: out for either, karaoke for
-// that one. It runs on the whole field, whatever its length. Format runes
+// word is one token of a field with its byte offsets, so the text between two
+// tokens can be read.
+type word struct {
+	text       string
+	start, end int
+}
+
+// words is tokens with offsets.
+func words(s string) (out []word) {
+	start := -1
+	for i, r := range s {
+		in := unicode.IsLetter(r) || unicode.IsDigit(r)
+		if in && start < 0 {
+			start = i
+		} else if !in && start >= 0 {
+			out, start = append(out, word{s[start:i], start, i}), -1
+		}
+	}
+	if start >= 0 {
+		out = append(out, word{s[start:], start, len(s)})
+	}
+	return out
+}
+
+// adjacent is the one rule for what may stand between the words of a product
+// phrase: whitespace only, or a single dash of any kind (see isDash, plus the
+// non-breaking hyphen) with no space around it. Any other punctuation ends the phrase, so "Live Performance - Track 3" and
+// "Performance, Track 2" are not products.
+func adjacent(gap string) bool {
+	if r, n := utf8.DecodeRuneInString(gap); n == len(gap) && n > 0 && (isDash(r) || r == '\u2011') {
+		return true
+	}
+	return (gap != "" && strings.TrimFunc(gap, unicode.IsSpace) == "")
+}
+
+// phraseAt reports whether the phrase starts at ws[i], its words adjacent.
+func phraseAt(s string, ws []word, i int, phrase [][]string) bool {
+	if i+len(phrase) > len(ws) {
+		return false
+	}
+	for j, alts := range phrase {
+		if !slices.Contains(alts, ws[i+j].text) || (j > 0 && !adjacent(s[ws[i+j-1].end:ws[i+j].start])) {
+			return false
+		}
+	}
+	return true
+}
+
+// excluded is the a cappella, karaoke and sing-along check: out for any of
+// them, singAlong for karaoke, the sing-along products and the karaoke label
+// phrases. album says the field is an album name, where the album-only phrases
+// count as well. It runs on the whole field, whatever its length. Format runes
 // (zero-width space, soft hyphen) are dropped first so they cannot split the
 // word.
-func excluded(s string) (out, karaoke bool) {
+func excluded(s string, album bool) (out, singAlong bool) {
 	s = strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.Cf, r) {
 			return -1
@@ -305,15 +421,20 @@ func excluded(s string) (out, karaoke bool) {
 	if has(s, karaokeStems) || has(glued, karaokeGlued) {
 		return true, true
 	}
+	ws := words(s)
+	for i := range ws {
+		if singAlongSet.matches(s, ws, i) || (album && albumPhrases.matches(s, ws, i)) {
+			return true, true
+		}
+	}
 	if has(s, aCappellaStems) || has(glued, aCappellaGlued) {
 		return true, false
 	}
-	toks := tokens(s)
-	for i, tok := range toks {
-		if slices.Contains(aCappellaTokens, tok) {
+	for i, w := range ws {
+		if slices.Contains(aCappellaTokens, w.text) {
 			return true, false
 		}
-		if tok == aCappellaParticle && i+1 < len(toks) && strings.HasPrefix(toks[i+1], aCappellaAfter) {
+		if w.text == aCappellaParticle && i+1 < len(ws) && strings.HasPrefix(ws[i+1].text, aCappellaAfter) {
 			return true, false
 		}
 	}
@@ -420,7 +541,7 @@ type found struct {
 }
 
 // realBase reports whether text names something: a track number alone does
-// not, so "03 - Minus One" is a song named Minus One, not a qualified title.
+// not, so "03 - Off Vocal" is a song named Off Vocal, not a qualified title.
 func realBase(text string) bool {
 	return slices.ContainsFunc(tokens(text), func(tok string) bool { return !dressing.MatchString(tok) })
 }
@@ -551,20 +672,22 @@ func classifyField(s string) Verdict {
 }
 
 // KaraokeExcluded reports whether Classify withholds its verdict because the
-// title or the album names karaoke. Classify returns the same None for that as
-// for "no signal"; a caller that must tell them apart (to keep an audio
-// detector from settling a karaoke track ahead of the lyric providers) asks
-// here, so the exclusion tables stay in one place.
+// title or the album names karaoke or a sing-along product (the name predates
+// the products; they are excluded by the same path). "Backing Track" counts in
+// the album only. Classify returns the same
+// None for that as for "no signal"; a caller that must tell them apart (to keep
+// an audio detector from settling such a track ahead of the lyric providers)
+// asks here, so the exclusion tables stay in one place.
 func KaraokeExcluded(title, album string) bool {
-	_, t := excluded(prepare(title))
-	_, a := excluded(prepare(album))
+	_, t := excluded(prepare(title), false)
+	_, a := excluded(prepare(album), true)
 	return t || a
 }
 
 // SuffixBaseWithin reports whether the text before title's dash-suffix
 // separator could be name: the two are equal, or either holds the other as a
 // contiguous run of tokens. It is the check PositionSuffix asks of the caller:
-// "Artist - Minus One" is a song named Minus One whose title tag carries the
+// "Artist - Off Vocal" is a song named Off Vocal whose title tag carries the
 // artist, not a qualified title.
 //
 // Both sides are compared as normalized tokens (case, width, diacritics and
@@ -573,7 +696,7 @@ func KaraokeExcluded(title, album string) bool {
 // first comparison, so a name that starts with a number still matches.
 // Containment runs in BOTH directions: the prefix inside the name covers a
 // multi-artist tag, and the name inside the prefix covers a title tag that
-// credits more than the tag does ("Artist feat. Guest - Minus One"). A leading
+// credits more than the tag does ("Artist feat. Guest - Off Vocal"). A leading
 // "The" on either side needs no rule of its own: the shorter side is then a run
 // inside the longer one.
 //
@@ -635,8 +758,8 @@ func PlaceholderArtist(name string) bool {
 // Actionable reports the verdict of Classify(title, album) and whether the
 // title rule may act on it. Only a Strong verdict is acted on, and a bracketed
 // one needs nothing more. A Strong dash-suffix is acted on only once the text
-// before the separator is known not to be the track's artist ("Artist - Minus
-// One" is a song named Minus One whose title tag carries the artist), which
+// before the separator is known not to be the track's artist ("Artist - Off
+// Vocal" is a song named Off Vocal whose title tag carries the artist), which
 // Classify cannot tell because it never sees the artist. Both tagged artists
 // are compared, the track artist and the album artist: a compilation carries
 // the performer in one and someone else in the other. (The resolved artist the
