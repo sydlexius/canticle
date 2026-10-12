@@ -514,11 +514,11 @@ Quarantined files are moved under a quarantine root, preserving their path relat
 
 ### `[instrumental_title]`
 
-The instrumental title rule: in serve mode, a track whose title says it is an instrumental version is settled with an instrumental marker instead of being looked up. It is off by default, applies to serve mode only (one-shot `fetch` is unaffected), and never replaces a lyric file or an instrumental marker already on disk: it changes only tracks with nothing on disk yet. The mode is read at startup, so a change needs a restart. A sung track whose title carries a strong qualifier gets a marker and no lyrics while the rule is on; the rationale and that residual risk are in "Title rule" in [instrumental-detection.md](instrumental-detection.md). The bulk undo is to set the mode back to `off`, then run `scan purge-provenance --source title-rule`.
+The instrumental title rule: in serve mode, a track whose title says it is an instrumental version is settled with an instrumental marker instead of being looked up. It is on by default (`strong`); set `mode = "off"` to disable it. It applies to serve mode only (one-shot `fetch` is unaffected), and never replaces a lyric file or an instrumental marker already on disk: it changes only tracks with nothing on disk yet. The mode is read at startup, so a change needs a restart. A sung track whose title carries a strong qualifier gets a marker and no lyrics while the rule is on; the rationale and that residual risk are in "Title rule" in [instrumental-detection.md](instrumental-detection.md). The bulk undo is to set the mode back to `off`, then run `scan purge-provenance --source title-rule`.
 
 ```toml
 [instrumental_title]
-mode = "off"
+mode = "strong"
 ```
 
 | Key | Env | Default | Meaning |
