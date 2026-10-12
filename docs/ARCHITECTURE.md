@@ -32,7 +32,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `lrcnormalize` -- pure transform (`ParseBody`, `Expand`) that expands compressed multi-timestamp LRC lines (`[t1][t2]text`) into one cue per timestamp and classifies `[key:value]` ID-tag lines distinctly from cues; no I/O.
 - `normalize` -- NFKC cache-key normalization, duration bucketing, fuzzy-match confidence, album-artist resolution.
 - `langguard` -- Unicode-script classification/filtering of lyric text against a configured language allowlist.
-- `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`).
+- `scanner` -- parses CLI/text-file/directory input into the in-memory queue; skips files that consistently fail metadata read (via the injected `MetadataFailureStore`); serves and banks an unsettled file's identity through the injected `IdentityStore`.
 - `app` -- one-shot `fetch`-mode orchestration loop over the in-memory `InputsQueue`; depends on the `Fetcher`/`Writer` interfaces.
 - `lrcbackfill` -- rewrites existing `.lrc` sidecars that use compressed multi-timestamp lines into the expanded one-cue-per-line form.
 - `respdrift` -- detects a provider that answers many distinct queries with the same track.
@@ -58,11 +58,21 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `identityrepair` -- re-reads each `scan_results` file's tags (via the injected `IdentityReader` seam) to correct run-together multi-value artist rows, re-keying the coupled `work_queue` row; driven by the dry-run-by-default `scan reconcile-identity`.
 - `lyricblock` -- exact-words fingerprints of lyric bodies an operator marked wrong, in a `lyric_blocks` store keyed by normalized artist/title identity; driven by `scan mark-wrong`, `scan list-blocks` and `scan unblock`.
 - `titlerepair` -- finds rows that settled with lyrics but whose title the instrumental title rule would now settle as instrumental, and repairs the ones whose lyric file is provably the settle's own; driven by the dry-run-by-default `scan reconcile-instrumental-titles`.
-- `audiometa` -- store of per-file audio metadata read from the library's audio files.
+- `audiometa` -- store of per-file audio metadata read from the library's audio files; `Identity` is the scanner's read of it, `Record` the one write. See "Tag cache reads" below.
 - `detectorbackfill` -- attributes historical instrumental detections to the detector lane for reporting.
 - `instrumentalbackfill` -- runs the audio detector over rows it never scored.
 - `instrumentalrecalib` -- re-decides earlier detector rejections from stored detector scores.
 - `schedule` -- the periodic library scan's schedule: frequency, time of day and weekday.
+
+### Tag cache reads
+
+A scan of an unchanged library opens no file contents, apart from the cases the User Guide lists (an embedded-lyrics mode, a file whose duration parse fails). Three readers share the `audio_metadata` tag cache; this is what each does and the rules that keep them consistent. The operator view is "What a scan reads" in [User Guide](USER_GUIDE.md#what-a-scan-reads).
+
+- **Version stamps.** A row is current for a file when its path, mtime (nanoseconds), size and duration-reader version match. `scanner.TagReaderVersion` (migration 072, column `tag_reader_version`) is a second stamp for the code that extracts artist, album artist, title, album, ISRC and recording ID. Only the identity read checks it. A bump makes every existing row a miss for that read until the file is read and recorded again. A change to tag extraction that alters those values for an unchanged file must bump it, because mtime and size do not change when the reader does and artist + title key `scan_results` and `work_queue`.
+- **The identity read.** `audiometa.Store.Identity` returns the identity fields only when mtime, size, duration-reader version and tag-reader version all match. `scanner.cachedIdentity` uses it for an unsettled file, after the metadata-failure skip, and only when a store is wired, embedded lyrics are off and the file stat succeeds. A lookup error is a miss, never a failure. `Facts` (the worker's read) and `Lookup` do not compare the tag-reader stamp.
+- **Writers record the full read.** `Store.Record` replaces every column and stamps the row current, so a writer passes the complete `scanner.AudioFacts`, never a subset. The scan builds it with `audioFactsFromHandle`, the same builder `scan index-metadata` uses. The scan (`bankFacts`) and the worker (`readAndBankMetadata`) write only when the stamp from the read's own open handle equals the stat the lookup missed on, the duration parse did not fail and `AudioFacts.MultiValueErr` is nil. The scan also requires recording enrichment on. The worker requires the global enrichment default on.
+- **Key spelling per writer.** The scan keys by `RebaseUnderCanonicalRoot(absRoot, canonRoot, path)` and `scan index-metadata` by the path it walks under the canonical root: both resolve the library root once and leave a symlink inside the library alone. The worker keys by `pathutil.CanonicalPath`, which resolves the file itself. For a file reached through a symlink inside the library the worker's key is the target and the others' key is the link, so the same file can hold two rows. Readers validate by the caller's current mtime and size, so neither row serves a stale hit.
+- **Open counts.** On a four-file fixture with enrichment on, embedded lyrics off and an empty cache, three consecutive scans open `4, 4, 4` files before the scan banked its read and `4, 0, 0` after (`TestScanBank_OpenCountsBeforeAndAfter`). The counter covers the unsettled-file tag read and the skipped-file duration probe. It does not count the settled-file index read, and the fixture has no settled files. The method and the cases still opened are in `session-management.md`.
 
 ### Serve-mode HTTP surface and web UI
 
