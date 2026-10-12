@@ -46,7 +46,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `revalidate` -- re-judges `.lrc` files ALREADY on disk against their companion audio's exact duration and plans remediation: demote a `MisSynced` lyric's words to `.txt`, quarantine a `Categorical` one.
 - `queue` -- the in-memory `InputsQueue` (fetch mode) and the durable SQLite `DBQueue` (serve/worker mode) with priority tiers and randomized within-tier dequeue.
 - `library` -- library-root CRUD repository (`Add`/`List`/`Get`/`GetByName`/`Update`/`Remove`).
-- `scan` -- library scanning: `Enqueuer`, the `scan_results` `Repo`, and the periodic scheduler that enqueues missing lyrics.
+- `scan` -- library scanning: `Enqueuer`, the `scan_results` `Repo`, and the periodic scheduler that enqueues missing lyrics. After each scan the `Adopter` gives every settled (`done`, lyric file beside the audio) index row a `done` `work_queue` row, or links it to the existing row for the song, so queue-only readers see it; budgeted per scan, backed up to `adopt-settled-backup.jsonl` beside the database.
 - `worker` -- durable-queue `Worker` that drains work items through the providers/orchestrator and cache; a row with `word_timing_state='queued'` takes the word-recheck path (`runWordRecheck`).
 - `reports` -- read-only, run-on-demand reports over existing SQLite data; no write paths.
 - `secrets` -- encrypted-at-rest (AES-256-GCM) store for recoverable runtime secrets, persisted as opaque BLOBs.
