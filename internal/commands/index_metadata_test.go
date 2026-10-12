@@ -1125,6 +1125,64 @@ func TestIndexMetadataRefillsEmptyRecordingIDFromPreFixRow(t *testing.T) {
 	}
 }
 
+// A row written before migration 072 has a NULL tag_reader_version. Lookup
+// ignores that column, so `scan index-metadata` must keep treating the row as
+// current: the file is not opened and the row is not rewritten (#1573). The
+// file is overwritten with same-size garbage and its mtime restored, so a
+// re-read would fail to parse and count the file as unreadable.
+func TestIndexMetadataDoesNotReReadRowWithoutTagReaderVersion(t *testing.T) {
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	if err := testutil.WriteFLACFileWithComments(root, "track.flac", 44100, 44100, map[string]string{
+		"ARTIST": "Marlow Finch", "TITLE": "Quiet Harbor",
+	}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ctx := context.Background()
+	var first bytes.Buffer
+	if code := runIndexMetadata(ctx, &first, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("first pass exit=%d out=%s", code, first.String())
+	}
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE audio_metadata SET tag_reader_version = NULL`); err != nil {
+		t.Fatalf("seed pre-change row: %v", err)
+	}
+
+	flacPath := filepath.Join(root, "track.flac")
+	orig, err := os.Stat(flacPath)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	if err := os.WriteFile(flacPath, bytes.Repeat([]byte{0x00}, int(orig.Size())), 0o600); err != nil {
+		t.Fatalf("corrupt fixture: %v", err)
+	}
+	if err := os.Chtimes(flacPath, orig.ModTime(), orig.ModTime()); err != nil {
+		t.Fatalf("restore mtime: %v", err)
+	}
+	if now, err := os.Stat(flacPath); err != nil || now.Size() != orig.Size() || !now.ModTime().Equal(orig.ModTime()) {
+		t.Fatalf("fixture identity drifted (err %v); the cache hit under test would miss", err)
+	}
+
+	var second bytes.Buffer
+	if code := runIndexMetadata(ctx, &second, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("second pass exit=%d out=%s", code, second.String())
+	}
+	if out := second.String(); !strings.Contains(out, "(1 skipped unchanged, 0 unreadable,") {
+		t.Errorf("second pass did not skip the file as unchanged: %s", out)
+	}
+	var artist, title string
+	var stamp sql.NullInt64
+	if err := sqlDB.QueryRowContext(ctx, `SELECT artist, title, tag_reader_version FROM audio_metadata`).Scan(&artist, &title, &stamp); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if artist != "Marlow Finch" || title != "Quiet Harbor" || stamp.Valid {
+		t.Errorf("row = artist %q, title %q, tag_reader_version %+v; want it untouched with a NULL stamp", artist, title, stamp)
+	}
+}
+
 // seedScanRowForFill inserts a scan_results row for name under the library
 // root (keyed by the canonical path index-metadata uses) with the given
 // recording ID, and returns the row id.

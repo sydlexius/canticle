@@ -598,3 +598,163 @@ func TestFactsMissesOnLegacyNullReaderVersion(t *testing.T) {
 		}
 	}
 }
+
+// identityFacts is a fully populated row for the Identity tests. Every
+// identity field holds a distinct value so a swapped column cannot pass.
+var identityFacts = scanner.AudioFacts{
+	MTimeNano: 111, SizeBytes: 222,
+	MBID: "11111111-2222-4333-8444-555555555555", ISRC: "ZZXXX2600001",
+	Artist: "Marlow Finch; Odile Varga", AlbumArtist: "Marlow Finch",
+	Title: "Quiet Harbor", Album: "Low Tide", Genre: "G", TrackLength: 187,
+}
+
+var wantIdentity = audiometa.Identity{
+	Artist: identityFacts.Artist, AlbumArtist: identityFacts.AlbumArtist,
+	Title: identityFacts.Title, Album: identityFacts.Album,
+	ISRC: identityFacts.ISRC, MBID: identityFacts.MBID, TrackLength: identityFacts.TrackLength,
+}
+
+// Record stamps the current tag-reader version, so the identity read hits and
+// returns the recorded values. Each part of the validation key is then moved
+// in turn: any one of them changing is a miss, never an error.
+func TestIdentityHitsOnlyWhenEveryKeyMatches(t *testing.T) {
+	ctx := context.Background()
+	s, sqlDB := newTestDBWithHandle(t, testReaderVersion)
+	const path = "/lib/a.flac"
+	if err := s.Record(ctx, path, identityFacts); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, found, err := s.Identity(ctx, path, identityFacts.MTimeNano, identityFacts.SizeBytes)
+	if err != nil || !found {
+		t.Fatalf("Identity = found %v, err %v; want a hit on a row Record just wrote", found, err)
+	}
+	if got != wantIdentity {
+		t.Errorf("Identity = %+v, want %+v", got, wantIdentity)
+	}
+
+	other := audiometa.New(sqlDB, "other-parser@v2")
+	for _, tc := range []struct {
+		name        string
+		store       *audiometa.Store
+		path        string
+		mtime, size int64
+	}{
+		{"changed mtime", s, path, identityFacts.MTimeNano + 1, identityFacts.SizeBytes},
+		{"changed size", s, path, identityFacts.MTimeNano, identityFacts.SizeBytes + 1},
+		{"absent path", s, "/lib/missing.flac", identityFacts.MTimeNano, identityFacts.SizeBytes},
+		{"other duration reader", other, path, identityFacts.MTimeNano, identityFacts.SizeBytes},
+	} {
+		got, found, err := tc.store.Identity(ctx, tc.path, tc.mtime, tc.size)
+		if err != nil {
+			t.Errorf("%s: Identity error = %v, want a miss", tc.name, err)
+		}
+		if found || got != (audiometa.Identity{}) {
+			t.Errorf("%s: Identity = %+v, found %v; want a zero-value miss", tc.name, got, found)
+		}
+	}
+}
+
+// A row written before migration 072 has a NULL tag_reader_version. The
+// identity read must miss it, while Lookup and Facts keep serving it unchanged:
+// that is what keeps the worker and `scan index-metadata` from re-reading the
+// library because of the new column (#1573).
+func TestLegacyTagReaderRowMissesIdentityButStillHitsLookupAndFacts(t *testing.T) {
+	ctx := context.Background()
+	s, sqlDB := newTestDBWithHandle(t, testReaderVersion)
+	const path = "/lib/legacy.flac"
+	f := identityFacts
+	// The pre-change write: every column of the time, no tag_reader_version.
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO audio_metadata (file_path, mtime_nsec, size_bytes, mbid, isrc,
+		     artist, album_artist, title, album, genre, duration_seconds, reader_version)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		path, f.MTimeNano, f.SizeBytes, f.MBID, f.ISRC,
+		f.Artist, f.AlbumArtist, f.Title, f.Album, f.Genre, f.TrackLength, testReaderVersion,
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	if got, found, err := s.Identity(ctx, path, f.MTimeNano, f.SizeBytes); err != nil {
+		t.Fatalf("Identity: %v", err)
+	} else if found {
+		t.Errorf("Identity hit a NULL tag_reader_version row (%+v); a pre-change artist must not be served as identity", got)
+	}
+
+	if found, err := s.Lookup(ctx, path, f.MTimeNano, f.SizeBytes); err != nil || !found {
+		t.Errorf("Lookup = %v, %v; want a hit: Lookup must ignore tag_reader_version", found, err)
+	}
+	got, found, err := s.Facts(ctx, path, f.MTimeNano, f.SizeBytes)
+	if err != nil || !found {
+		t.Fatalf("Facts = found %v, err %v; want a hit: Facts must ignore tag_reader_version", found, err)
+	}
+	if got != f {
+		t.Errorf("Facts = %+v, want %+v", got, f)
+	}
+}
+
+// A row stamped by a different tag reader, older or newer, misses the identity
+// read. Lookup still hits: only Identity compares the column.
+func TestIdentityMissesOnOtherTagReaderVersion(t *testing.T) {
+	ctx := context.Background()
+	s, sqlDB := newTestDBWithHandle(t, testReaderVersion)
+	const path = "/lib/a.flac"
+	f := identityFacts
+	if err := s.Record(ctx, path, f); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	for _, v := range []int{scanner.TagReaderVersion - 1, scanner.TagReaderVersion + 1} {
+		if _, err := sqlDB.ExecContext(ctx, `UPDATE audio_metadata SET tag_reader_version = ?`, v); err != nil {
+			t.Fatalf("restamp to %d: %v", v, err)
+		}
+		if _, found, err := s.Identity(ctx, path, f.MTimeNano, f.SizeBytes); err != nil {
+			t.Fatalf("Identity at version %d: %v", v, err)
+		} else if found {
+			t.Errorf("Identity hit a row stamped tag_reader_version %d, current is %d", v, scanner.TagReaderVersion)
+		}
+		if found, err := s.Lookup(ctx, path, f.MTimeNano, f.SizeBytes); err != nil || !found {
+			t.Errorf("Lookup at version %d = %v, %v; want a hit", v, found, err)
+		}
+	}
+}
+
+// Record's UPDATE path restamps too: re-recording over a pre-change row makes
+// it servable as identity.
+func TestRecordRestampsTagReaderVersionOnExistingRow(t *testing.T) {
+	ctx := context.Background()
+	s, sqlDB := newTestDBWithHandle(t, testReaderVersion)
+	const path = "/lib/a.flac"
+	f := identityFacts
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO audio_metadata (file_path, mtime_nsec, size_bytes, artist, reader_version)
+		 VALUES (?,?,?,?,?)`, path, f.MTimeNano, f.SizeBytes, "Odile Varga", testReaderVersion,
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	if err := s.Record(ctx, path, f); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	var stamp sql.NullInt64
+	if err := sqlDB.QueryRowContext(ctx, `SELECT tag_reader_version FROM audio_metadata WHERE file_path = ?`, path).Scan(&stamp); err != nil {
+		t.Fatalf("read stamp: %v", err)
+	}
+	if !stamp.Valid || stamp.Int64 != scanner.TagReaderVersion {
+		t.Errorf("tag_reader_version after Record = %+v, want %d", stamp, scanner.TagReaderVersion)
+	}
+	got, found, err := s.Identity(ctx, path, f.MTimeNano, f.SizeBytes)
+	if err != nil || !found || got != wantIdentity {
+		t.Errorf("Identity after re-record = %+v, found %v, err %v; want %+v", got, found, err, wantIdentity)
+	}
+}
+
+// A store failure is an error, not a miss: the caller must be able to tell
+// "read the file" from "the cache is broken".
+func TestIdentityReturnsStoreError(t *testing.T) {
+	s, sqlDB := newTestDBWithHandle(t, testReaderVersion)
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, found, err := s.Identity(context.Background(), "/lib/a.flac", 1, 2); err == nil || found {
+		t.Errorf("Identity on a closed database = found %v, err %v; want an error", found, err)
+	}
+}
