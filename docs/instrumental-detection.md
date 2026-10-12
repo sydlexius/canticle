@@ -462,8 +462,9 @@ under both `providers.mode` values, `"ordered"` and `"parallel"`.
   instrumental costs no provider request and no pacing wait. A row it calls not
   instrumental goes on to the providers and pays their pacing as usual. The cost
   is twofold. A detector false positive can now override a provider lyric on a
-  fresh row. And the audio is read before any provider is asked, for every row
-  that has no stored scores to answer from.
+  fresh row. And the audio is read before any provider is asked, for each row
+  that reaches the detector with no stored scores to answer from. A row never
+  reaches it while detection is off or the detector's breaker is open.
 - **A Weak instrumental title.** With `instrumental_title.mode = "strong_weak"`,
   a row whose title carries only a weak instrumental signal is put to the
   detector first under either ordering, with the same costs as `front` for that
@@ -536,11 +537,13 @@ If you do tune:
 ### The background backfill sweep
 
 Under the default `demoted` ordering, detection is otherwise reached only after
-a provider miss, which is paced to the provider's rate limit (see "Which setting
-drains which backlog" for the settings that ask the detector first). A track the
-detector has never scored therefore waits on a throttle it does not use, and an
-install where nobody runs `scan reconcile-instrumental` drifts forever - on one
-real library that produced a backlog of over 7,000 never-scored tracks.
+a provider miss, which is paced to the provider's rate limit. The one exception
+is a Weak instrumental title under `instrumental_title.mode = "strong_weak"`,
+which is put to the detector first (see "Which setting drains which backlog"). A
+track the detector has never scored therefore waits on a throttle it does not
+use, and an install where nobody runs `scan reconcile-instrumental` drifts
+forever - on one real library that produced a backlog of over 7,000 never-scored
+tracks.
 
 Serve mode runs a bounded periodic sweep to fix that. It is **on by default**: the
 work is local, bounded, and makes no provider request.
