@@ -371,6 +371,14 @@ type Inputs struct {
 	// the row cannot be reopened. Set ONLY by scan.Enqueuer.EnqueuePending; the
 	// zero value keeps the verdict. Enqueue-time only; never persisted.
 	ReopenCategorical bool `json:"-"`
+	// ReopenAdopted marks a scan-origin enqueue of a file the scan itself forced
+	// back to pending under an operator reopen flag (--upgrade, --update and
+	// their cohort flags, #1586). Honored only with FromScan, it has Enqueue
+	// reopen the 'done' row settled-file adoption created for this same file,
+	// provided no fetch has touched it and it records no hand edit. Set ONLY by
+	// scan.Enqueuer for such a file; the zero value keeps every 'done' row.
+	// Enqueue-time only; never persisted.
+	ReopenAdopted bool `json:"-"`
 	// DetectInstrumental carries the per-item instrumental-detection decision
 	// resolved at enqueue time (CLI > per-library > global). It is stamped onto the
 	// work_queue row on initial insert. nil means "no decision" -> the worker falls

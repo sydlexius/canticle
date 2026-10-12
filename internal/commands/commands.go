@@ -3177,7 +3177,13 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			// queue row, so the queue-only readers cannot see it (#1409). Adopt
 			// them for the scanned path now, after the scan has walked it.
 			adoptSettledAfterScan(ctx, sqlDB, workQueue, lib, path, string(trigger))
-			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)
+			// Under a reopen flag the scan's own pending results are the files the
+			// flag selected, so their enqueue may reopen an adopted row (#1586).
+			var reopened []models.ScanResult
+			if opts.Update || opts.Upgrade {
+				reopened = found
+			}
+			enqueued, cacheHits, err := enq.EnqueueReopening(ctx, lib, reopened)
 			if err != nil {
 				// Counts are partial on an aborted enqueue; don't log "complete".
 				slog.Warn("scheduled scan incomplete (enqueue aborted)",

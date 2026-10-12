@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"testing"
 	"time"
@@ -468,5 +469,251 @@ func TestAdoptInsertFailsWhenTheJunctionWriteIsRefused(t *testing.T) {
 	}
 	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue`); n != 0 {
 		t.Errorf("work_queue rows = %d, want 0 (the insert rolled back with the refused link)", n)
+	}
+}
+
+// adoptedState reads the columns the #1586 reopen decides on and writes.
+func adoptedState(t *testing.T, dbh *sql.DB, c AdoptCandidate) (status string, adopted bool, outcome sql.NullString) {
+	t.Helper()
+	if err := dbh.QueryRow(`SELECT status, adopted_at IS NOT NULL, outcome_type FROM work_queue WHERE artist_key = ? AND title_key = ?`,
+		c.ArtistKey, c.TitleKey).Scan(&status, &adopted, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	return status, adopted, outcome
+}
+
+func scanInputsFor(c AdoptCandidate, reopen bool) models.Inputs {
+	return models.Inputs{Track: c.Track, Outdir: c.Outdir, Filename: c.Filename, SourcePath: c.FilePath,
+		ScanResultID: c.ScanResultID, FromScan: true, ReopenAdopted: reopen}
+}
+
+// Only an insert-adoption stamps adopted_at; a link to a row the worker
+// completed does not, and a reopen-flag enqueue keeps that row done.
+func TestOnlyAnInsertAdoptionIsMarkedAdopted(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	lib := seedLibrary(t, dbh, "/m")
+	ins := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	if res, err := q.InsertSettledDone(ctx, ins, AdoptClass{OutcomeType: "unsynced"}, adoptStamp, nil); err != nil || res != AdoptInserted {
+		t.Fatalf("insert = %v, %v", res, err)
+	}
+	var stamp string
+	if err := dbh.QueryRow(`SELECT adopted_at FROM work_queue WHERE title_key = ?`, ins.TitleKey).Scan(&stamp); err != nil || stamp != formatTime(adoptStamp) {
+		t.Errorf("inserted row adopted_at = %q, %v; want the adoption time", stamp, err)
+	}
+	link := seedSettled(t, dbh, lib, "done", "/m/b.flac", "Two")
+	seedQueueRow(t, dbh, link, "done")
+	if res, err := q.LinkSettled(ctx, link, adoptStamp, nil); err != nil || res != AdoptLinked {
+		t.Fatalf("link = %v, %v", res, err)
+	}
+	if _, err := q.Enqueue(ctx, scanInputsFor(link, true), PriorityScan); err != nil {
+		t.Fatal(err)
+	}
+	if status, adopted, _ := adoptedState(t, dbh, link); status != "done" || adopted {
+		t.Errorf("linked worker row = %s adopted=%v, want done and unmarked", status, adopted)
+	}
+}
+
+// claimAndSettle puts the row through one worker claim in the dequeue mode set
+// selects, then settles it back to done as an upgrade trip does.
+func claimAndSettle(set func(*DBQueue)) func(*testing.T, *DBQueue, *sql.DB, int64) {
+	return func(t *testing.T, q *DBQueue, dbh *sql.DB, id int64) {
+		t.Helper()
+		set(q)
+		if _, err := dbh.Exec(`UPDATE work_queue SET status = 'pending' WHERE id = ?`, id); err != nil {
+			t.Fatal(err)
+		}
+		if item, err := q.Dequeue(context.Background()); err != nil || item.ID != id {
+			t.Fatalf("Dequeue = %d, %v", item.ID, err)
+		}
+		if _, err := dbh.Exec(`UPDATE work_queue SET status = 'done' WHERE id = ?`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A scan enqueue carrying ReopenAdopted reopens the adopted row of its own
+// file; every guard in reopenAdoptedForScan keeps the row done instead.
+func TestEnqueueReopensAnAdoptedRowOnlyUnderItsGuards(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		prep   func(t *testing.T, q *DBQueue, dbh *sql.DB, id int64)
+		inputs func(c AdoptCandidate) models.Inputs
+		reopen bool
+	}{
+		"reopen flag":        {reopen: true},
+		"ordinary scan":      {inputs: func(c AdoptCandidate) models.Inputs { return scanInputsFor(c, false) }},
+		"not a scan enqueue": {inputs: func(c AdoptCandidate) models.Inputs { in := scanInputsFor(c, true); in.FromScan = false; return in }},
+		"another copy of the song": {inputs: func(c AdoptCandidate) models.Inputs {
+			in := scanInputsFor(c, true)
+			in.SourcePath, in.ScanResultID = "/m/other/a.flac", 0
+			return in
+		}},
+		"hand edit": {prep: func(t *testing.T, q *DBQueue, _ *sql.DB, id int64) {
+			if err := q.SetLyricEdit(ctx, id, 100); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		"manual instrumental mark": {prep: func(t *testing.T, q *DBQueue, _ *sql.DB, id int64) {
+			if _, err := q.MarkManualInstrumental(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// A trip a worker claimed and settled: fetched, so not reopened. One
+		// case per claim statement (batched, per-item random, deterministic).
+		"claimed, batched":       {prep: claimAndSettle(func(*DBQueue) {})},
+		"claimed, random":        {prep: claimAndSettle(func(q *DBQueue) { q.SetBatchSize(0) })},
+		"claimed, deterministic": {prep: claimAndSettle(func(q *DBQueue) { q.SetRandomized(false) })},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dbh := openQueueTestDB(t)
+			q := NewDBQueue(dbh)
+			c := seedSettled(t, dbh, seedLibrary(t, dbh, "/m"), "pending", "/m/a.flac", "One")
+			if res, err := q.InsertSettledDone(ctx, c, AdoptClass{OutcomeType: "unsynced"}, adoptStamp, nil); err != nil || res != AdoptInserted {
+				t.Fatalf("insert = %v, %v", res, err)
+			}
+			id := int64(countOf(t, dbh, `SELECT id FROM work_queue`))
+			if tc.prep != nil {
+				tc.prep(t, q, dbh, id)
+			}
+			in := scanInputsFor(c, true)
+			if tc.inputs != nil {
+				in = tc.inputs(c)
+			}
+			item, err := q.Enqueue(ctx, in, PriorityScan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, adopted, outcome := adoptedState(t, dbh, c)
+			if !tc.reopen {
+				if status != "done" || item.Status != StatusDone {
+					t.Errorf("status = %s (returned %s), want the row kept done", status, item.Status)
+				}
+				return
+			}
+			if status != "pending" || item.Status != StatusPending || adopted || outcome.Valid {
+				t.Errorf("status=%s returned=%s adopted=%v outcome=%v, want a pending row with the mark and outcome cleared", status, item.Status, adopted, outcome)
+			}
+			// The worker's completion makes it an ordinary row: never reopened again.
+			if _, err := q.Dequeue(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Complete(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := q.Enqueue(ctx, scanInputsFor(c, true), PriorityScan); err != nil {
+				t.Fatal(err)
+			}
+			if status, _, _ := adoptedState(t, dbh, c); status != "done" {
+				t.Errorf("after the worker completed it, a reopen flag set status %s, want done", status)
+			}
+		})
+	}
+}
+
+// adoptOne adopts a file with an unsynced lyric file and returns its candidate
+// and queue row id.
+func adoptOne(t *testing.T, q *DBQueue, dbh *sql.DB, lib int64, path string) (AdoptCandidate, int64) {
+	t.Helper()
+	c := seedSettled(t, dbh, lib, "processing", path, "One")
+	if res, err := q.InsertSettledDone(context.Background(), c, AdoptClass{OutcomeType: "unsynced"}, adoptStamp, nil); err != nil || res != AdoptInserted {
+		t.Fatalf("insert = %v, %v", res, err)
+	}
+	return c, int64(countOf(t, dbh, `SELECT id FROM work_queue WHERE title_key = ?`, c.TitleKey))
+}
+
+// An adopted row the upgrade sweep has armed is no longer done but still
+// carries the mark; a reopen-flag enqueue leaves it in its trip.
+func TestReopenFlagLeavesAnArmedUpgradeTripAlone(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	c, id := adoptOne(t, q, dbh, seedLibrary(t, dbh, "/m"), "/m/a.flac")
+	if armed, err := q.MarkUpgradeQueued(ctx, []int64{id}, adoptStamp.Add(time.Hour)); err != nil || len(armed) != 1 {
+		t.Fatalf("arm = %v, %v; want the adopted row armed", armed, err)
+	}
+	item, err := q.Enqueue(ctx, scanInputsFor(c, true), PriorityScan)
+	if err != nil {
+		t.Fatalf("enqueue onto an armed trip: %v", err)
+	}
+	status, adopted, outcome := adoptedState(t, dbh, c)
+	if status != "pending" || !item.UpgradeQueued || !adopted || outcome.String != "unsynced" {
+		t.Errorf("status=%s armed=%v adopted=%v outcome=%q, want the trip untouched", status, item.UpgradeQueued, adopted, outcome.String)
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM scan_results WHERE status = 'processing'`); n != 1 {
+		t.Errorf("scan row was settled against a row that is in flight")
+	}
+}
+
+// The mark follows the row to the same-stem file that replaced its source:
+// the flag reopens it at the new path, and not at the vanished one.
+func TestReopenFlagFollowsARepointedAdoptedRow(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	lib := seedLibrary(t, dbh, "/m")
+	old, _ := adoptOne(t, q, dbh, lib, "/m/a.mp3")
+	q.stat = func(p string) (fs.FileInfo, error) {
+		if p == old.FilePath {
+			return nil, fs.ErrNotExist
+		}
+		return nil, nil
+	}
+	moved := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	if ok, err := q.RepointGoneSource(ctx, models.Inputs{Track: moved.Track, SourcePath: moved.FilePath, LibraryID: lib}); err != nil || !ok {
+		t.Fatalf("repoint = %v, %v; want the row moved", ok, err)
+	}
+	gone := scanInputsFor(old, true)
+	gone.ScanResultID = 0 // the move removed the vanished file's scan row
+	if _, err := q.Enqueue(ctx, gone, PriorityScan); err != nil {
+		t.Fatal(err)
+	}
+	if status, adopted, _ := adoptedState(t, dbh, old); status != "done" || !adopted {
+		t.Fatalf("enqueue at the vanished path: status=%s adopted=%v, want done and still marked", status, adopted)
+	}
+	if _, err := q.Enqueue(ctx, scanInputsFor(moved, true), PriorityScan); err != nil {
+		t.Fatal(err)
+	}
+	if status, adopted, _ := adoptedState(t, dbh, old); status != "pending" || adopted {
+		t.Errorf("enqueue at the new path: status=%s adopted=%v, want pending with the mark spent", status, adopted)
+	}
+}
+
+// A scan enqueue that lands on a terminal row settles the scan row it was
+// reserved for, unless another live queue row still owns that scan row.
+func TestScanEnqueueOntoATerminalRowSettlesItsScanRow(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		status, want string
+		sibling      bool
+		webhook      bool
+	}{
+		"done":                    {status: "done", want: "done"},
+		"unavailable":             {status: "unavailable", want: "done"},
+		"live sibling owns it":    {status: "done", want: "processing", sibling: true},
+		"not a scan enqueue":      {status: "done", want: "processing", webhook: true},
+		"row that is not settled": {status: "failed", want: "processing"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dbh := openQueueTestDB(t)
+			q := NewDBQueue(dbh)
+			lib := seedLibrary(t, dbh, "/m")
+			c := seedSettled(t, dbh, lib, "processing", "/m/a.flac", "One")
+			seedQueueRow(t, dbh, c, tc.status)
+			if tc.sibling {
+				mustExec(t, dbh, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`,
+					seedQueueRow(t, dbh, seedSettled(t, dbh, lib, "done", "/m/b.flac", "Two"), "pending"), c.ScanResultID)
+			}
+			in := scanInputsFor(c, false)
+			in.FromScan = !tc.webhook
+			if _, err := q.Enqueue(ctx, in, PriorityScan); err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			if err := dbh.QueryRow(`SELECT status FROM scan_results WHERE id = ?`, c.ScanResultID).Scan(&got); err != nil || got != tc.want {
+				t.Errorf("scan row = %q, %v; want %q", got, err, tc.want)
+			}
+		})
 	}
 }
