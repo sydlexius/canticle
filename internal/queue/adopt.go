@@ -67,6 +67,10 @@ const (
 	AdoptInserted
 	// AdoptLinked means only the junction link was written to an existing row.
 	AdoptLinked
+	// AdoptAlreadyLinked means the identity's row is 'done' and the junction
+	// link already existed (another adopter, or Enqueue, linked it first):
+	// nothing was written and no backup record was produced.
+	AdoptAlreadyLinked
 	// AdoptNotSettled means the identity's row exists but is not 'done'
 	// (processing, pending, failed, deferred, unavailable...): nothing was
 	// written. Linking it would let RecheckRetired revive the settled file.
@@ -128,7 +132,8 @@ func (q *DBQueue) ListUnlinkedSettled(ctx context.Context, libraryID int64, path
 // is left alone (AdoptNotSettled). With no such row it writes nothing
 // (AdoptNoRow).
 // backup runs inside the transaction, before commit; its failure rolls the
-// link back.
+// link back. A link that already existed writes nothing and records nothing
+// (AdoptAlreadyLinked); the transaction rolls back unchanged.
 func (q *DBQueue) LinkSettled(ctx context.Context, c AdoptCandidate, now time.Time, backup func(AdoptRecord) error) (AdoptResult, error) {
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -159,8 +164,18 @@ func (q *DBQueue) linkExistingTx(ctx context.Context, tx *sql.Tx, c AdoptCandida
 	if status != StatusDone {
 		return AdoptNotSettled, nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, c.ScanResultID); err != nil {
+	ins, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, c.ScanResultID)
+	if err != nil {
 		return AdoptNoRow, fmt.Errorf("queue: link settled: %w", err)
+	}
+	n, err := ins.RowsAffected()
+	if err != nil {
+		return AdoptNoRow, fmt.Errorf("queue: link settled: rows affected: %w", err)
+	}
+	if n == 0 {
+		// The link pre-existed. A backup record here would let a restorer delete
+		// a junction row this call did not create.
+		return AdoptAlreadyLinked, nil
 	}
 	if backup != nil {
 		rec := AdoptRecord{WorkQueueID: id, ScanResultID: c.ScanResultID, Linked: true, SourcePath: c.FilePath, AdoptedAt: formatTime(now)}
@@ -186,7 +201,9 @@ func (q *DBQueue) linkExistingTx(ctx context.Context, tx *sql.Tx, c AdoptCandida
 //
 // ON CONFLICT DO NOTHING on the identity key: a racing adoption (or a worker
 // enqueue) that won the key makes this fall back to the link-only path inside
-// the same transaction, so two adoptions collapse to one row.
+// the same transaction, so two adoptions collapse to one row. If that
+// fallback finds the link already present it returns AdoptAlreadyLinked: the
+// transaction rolls back with nothing written and no backup record.
 //
 // TODO(#1559): the identity here is (artist_key, title_key). When the queue
 // identity gains an edition column this insert and the lookup in

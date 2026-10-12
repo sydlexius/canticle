@@ -171,8 +171,9 @@ func TestInsertSettledDoneWritesTheRowAndJunctionTogether(t *testing.T) {
 	ctx := context.Background()
 	dbh := openQueueTestDB(t)
 	q := NewDBQueue(dbh)
-	synced := seedSettled(t, dbh, seedLibrary(t, dbh, "/m"), "done", "/m/a.flac", "One")
-	text := seedSettled(t, dbh, 1, "done", "/m/b.flac", "Two")
+	lib := seedLibrary(t, dbh, "/m")
+	synced := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	text := seedSettled(t, dbh, lib, "done", "/m/b.flac", "Two")
 
 	var rec AdoptRecord
 	got, err := q.InsertSettledDone(ctx, synced, AdoptClass{OutcomeType: "synced", SyncTier: "line"}, adoptStamp, func(r AdoptRecord) error { rec = r; return nil })
@@ -316,5 +317,53 @@ func TestAdoptedRowIsNeverDequeuedAndEnqueueKeepsItDone(t *testing.T) {
 	}
 	if status != "done" || outcome != "synced" {
 		t.Errorf("after Enqueue status=%q outcome=%q, want the row kept done/synced", status, outcome)
+	}
+}
+
+func TestLinkSettledAlreadyLinkedWritesNoBackup(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	c := seedSettled(t, dbh, seedLibrary(t, dbh, "/m"), "done", "/m/a.flac", "One")
+	rowID := seedQueueRow(t, dbh, c, StatusDone)
+
+	var recs []AdoptRecord
+	backup := func(r AdoptRecord) error { recs = append(recs, r); return nil }
+	if got, err := q.LinkSettled(ctx, c, adoptStamp, backup); err != nil || got != AdoptLinked {
+		t.Fatalf("first link = %v, %v; want AdoptLinked", got, err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("backup calls after first link = %d, want 1", len(recs))
+	}
+	if got, err := q.LinkSettled(ctx, c, adoptStamp, backup); err != nil || got != AdoptAlreadyLinked {
+		t.Fatalf("second link = %v, %v; want AdoptAlreadyLinked", got, err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("backup calls after already-linked = %d, want still 1", len(recs))
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue_scan_results WHERE work_queue_id = ? AND scan_result_id = ?`, rowID, c.ScanResultID); n != 1 {
+		t.Errorf("junction rows = %d, want exactly 1", n)
+	}
+}
+
+func TestInsertSettledDoneConflictFallbackAlreadyLinked(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	c := seedSettled(t, dbh, seedLibrary(t, dbh, "/m"), "done", "/m/a.flac", "One")
+	rowID := seedQueueRow(t, dbh, c, StatusDone)
+	if _, err := dbh.Exec(`INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, rowID, c.ScanResultID); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	got, err := q.InsertSettledDone(ctx, c, AdoptClass{OutcomeType: "synced"}, adoptStamp, func(AdoptRecord) error { calls++; return nil })
+	if err != nil || got != AdoptAlreadyLinked {
+		t.Fatalf("InsertSettledDone = %v, %v; want AdoptAlreadyLinked", got, err)
+	}
+	if calls != 0 {
+		t.Errorf("backup calls = %d, want 0", calls)
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue_scan_results WHERE scan_result_id = ?`, c.ScanResultID); n != 1 {
+		t.Errorf("junction rows = %d, want 1", n)
 	}
 }
