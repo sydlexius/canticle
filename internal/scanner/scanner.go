@@ -1105,7 +1105,7 @@ func (sc *Scanner) isInstrumentalTxt(path string) bool {
 	if read == nil {
 		read = os.ReadFile
 	}
-	data, err := read(path) //nolint:gosec // path is constructed from directory scan within a validated root
+	data, err := read(path) //nolint:gosec // reason: path is constructed from directory scan within a validated root
 	if err != nil {
 		return false
 	}
