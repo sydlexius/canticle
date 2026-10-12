@@ -9,6 +9,7 @@ import (
 	"github.com/sydlexius/canticle/internal/instrumentaltitle"
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/queue"
 )
 
@@ -178,6 +179,88 @@ func (w *Worker) completeTitleInstrumental(ctx context.Context, item queue.WorkI
 	slog.Info("worker title rule: instrumental-titled track settled with a marker", "id", item.ID)
 	w.consecutiveFailures = 0
 	return nil
+}
+
+// SetTitleRuleWeak turns the Weak tier on or off (#1471). The caller sets it
+// only for instrumental_title.mode = strong_weak: under strong and off a Weak
+// title is looked up like any other.
+func (w *Worker) SetTitleRuleWeak(enabled bool) { w.titleRuleWeak = enabled }
+
+// weakTitleEligible reports whether this row's Weak title is to be put to the
+// detector ahead of the cache and the providers. Every "no" leaves the row on
+// the path it takes today:
+//
+//   - the tier is off, or dispatch is parallel (detector-first under parallel
+//     is #528's to design; this is the one condition to change there);
+//   - no detector lane is held, or detection is off for this item (an empty
+//     path: disabled, no source file, or the karaoke skip);
+//   - an upgrade trip, which has a file by definition (a word-recheck row
+//     never gets here: RunOnce hands it to runWordRecheck first);
+//   - the title is not Weak. A Strong one is the gate's, acted on or declined;
+//   - any output already holds a lyric or a marker, or cannot be probed: the
+//     detector settle uses the ordinary write, so the stem rule is enforced
+//     here, before the detector is asked at all.
+func (w *Worker) weakTitleEligible(item queue.WorkItem, track models.Track, detectorPath string) bool {
+	if !w.titleRuleWeak || w.mode != orchestrator.ModeOrdered {
+		return false
+	}
+	if w.detectorLane == nil || detectorPath == "" || item.UpgradeQueued {
+		return false
+	}
+	if instrumentaltitle.Classify(track.TrackName, track.AlbumName).Tier != instrumentaltitle.Weak {
+		return false
+	}
+	guarded, ok := w.writer.(absentOnlyWriter)
+	if !ok {
+		slog.Error("worker title rule: writer lacks Occupant; a Weak title takes the ordinary path", "id", item.ID)
+		return false
+	}
+	track.Instrumental = 1
+	for _, p := range outputPaths(item.Inputs) {
+		if kept, err := guarded.Occupant(models.Song{Track: track}, p.Filename, p.Outdir); err != nil || kept != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// weakTitleDetectorFirst asks the held detector lane about a Weak
+// instrumental-titled row before anything else is consulted (#1145 D2, Weak
+// tier). The title alone is not trusted: only the detector agreeing settles
+// the row, and it settles as any detector positive does (lane "detector",
+// through completeDetectorInstrumental), never as title-rule.
+//
+// agreed carries the lane's song, attributed as the orchestrator attributes a
+// front-ordered positive, for RunOnce's detector branch. answered means the
+// dispatch must not dial the detector again this pass: it gave a verdict, yes
+// or no, or it is still booting. A second not-ready dial would spend the
+// lane's boot grace twice per pass.
+//
+// carried is the lane's own error for a booting sidecar or an outage. RunOnce
+// surfaces it in place of a dispatch that ends as a benign miss, which is what
+// the dispatch's detector lane would have reported: a not-ready row is
+// released with no miss charged, and an outage is named in last_error. An open
+// breaker is nothing: the dispatch meets it exactly as it would have.
+func (w *Worker) weakTitleDetectorFirst(ctx context.Context, item queue.WorkItem, track models.Track, detectorPath string) (song models.Song, agreed, answered bool, carried error) {
+	if !w.weakTitleEligible(item, track, detectorPath) {
+		return models.Song{}, false, false, nil
+	}
+	lane := w.detectorLane
+	song, err := lane.FindLyrics(ctx, track, detectorPath)
+	switch outcome := orchestrator.ClassifyOutcome(err); {
+	case err == nil && song.Track.Instrumental == 1:
+		song.WinningLane = lane.Name()
+		song.LaneAttempts = []models.LaneAttempt{{Lane: lane.Name(), Hit: true, Local: lane.Local()}}
+		return song, true, true, nil
+	case errors.Is(err, orchestrator.ErrLaneBenignMiss):
+		answered = true
+	case outcome == orchestrator.OutcomeLaneNotReady:
+		answered, carried = true, err
+	case outcome == orchestrator.OutcomeLaneOutage:
+		carried = err
+	}
+	slog.Debug("worker title rule: weak title, detector asked first", "id", item.ID, "answered", answered, "carried", carried != nil)
+	return models.Song{}, false, answered, carried
 }
 
 // skipDetectorFirst reports whether the detector must not be asked for this

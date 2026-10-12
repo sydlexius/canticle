@@ -551,7 +551,8 @@ const (
 // (the default) ignores the track title, which is today's behavior; Strong
 // settles a title carrying a strong instrumental qualifier without a provider
 // request; StrongWeak additionally honors weaker title or album signals when
-// the audio detector agrees. The key is reserved: nothing reads it yet.
+// the audio detector agrees. Serve mode reads it once at startup
+// (commands.titleRuleOn and titleRuleWeakOn).
 type InstrumentalTitleMode string
 
 const (

@@ -999,6 +999,12 @@ func titleRuleOn(cfg config.Config) bool {
 	return cfg.InstrumentalTitleMode() != config.InstrumentalTitleOff
 }
 
+// titleRuleWeakOn reports whether the rule's Weak tier is on (#1471): only
+// strong_weak asks the detector first for a weakly instrumental-titled track.
+func titleRuleWeakOn(cfg config.Config) bool {
+	return cfg.InstrumentalTitleMode() == config.InstrumentalTitleStrongWeak
+}
+
 func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
 	cfg, envSrc, err := config.LoadWithSources(args.ConfigPath)
 	if err != nil {
@@ -1230,6 +1236,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	w := worker.New(workQ, cacheRepo, fetcher, writer)
 	w.SetBlockChecker(blocks)
 	w.SetTitleRule(titleRuleOn(cfg)) // read once: a mode change needs a restart
+	w.SetTitleRuleWeak(titleRuleWeakOn(cfg))
 	// Heal stale output_paths and wait out an offline library root (#1430).
 	w.SetOutputHealer(prune.New(sqlDB))
 	w.SetDurationStore(audiodur.New(sqlDB, scanner.DurationReaderVersion))
