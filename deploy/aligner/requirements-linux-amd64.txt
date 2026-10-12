@@ -31,11 +31,11 @@
 #       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
 #       --only-binary :all: --no-binary demucs \
 #       --no-binary antlr4-python3-runtime \
-#       --exclude-newer 2026-10-07T07:00:00Z \
+#       --exclude-newer 2026-10-08T13:00:00Z \
 #       requirements.in -o requirements-linux-amd64.txt'
 #   (then re-add this header block)
 #
-# Generated: --exclude-newer 2026-10-07T07:00:00Z (verified to reproduce this
+# Generated: --exclude-newer 2026-10-08T13:00:00Z (verified to reproduce this
 # exact lock, including filelock==4.0.12, byte-for-byte).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
@@ -142,9 +142,9 @@ einops==0.8.2 \
     --hash=sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193 \
     --hash=sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827
     # via demucs
-fastapi==0.142.2 \
-    --hash=sha256:06366626f2e70576367714d9ab2fe8472e6c8456dba69b399f9f797ab5e92570 \
-    --hash=sha256:bd5f4d81f1e93a88bcd77caf4dfe3c2dbffc3805407a0007e9a114c18b3a670b
+fastapi==0.143.0 \
+    --hash=sha256:1acffe48206a80917cf7dac21992b5c44b25384e8902bf745c1fd9dabcf6c51f \
+    --hash=sha256:3e9395fd35276425b61b516a31fdd7c77fe2af83e41b4da22e30696fb1304c5d
     # via -r requirements.in
 faster-whisper==1.2.1 \
     --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
