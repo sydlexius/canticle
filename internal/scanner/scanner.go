@@ -484,6 +484,10 @@ type Scanner struct {
 	// wire it: serve mode and the one-shot `scan` CLI share one constructor and
 	// one persistence path, so both index settled files.
 	index IndexStore
+	// readTxt reads a .txt sidecar for the instrumental-marker classification.
+	// Nil means os.ReadFile; tests inject a counting reader to prove an ordinary
+	// scan performs no read (#1572).
+	readTxt func(string) ([]byte, error)
 }
 
 // Option configures a Scanner at construction.
@@ -1096,8 +1100,12 @@ func multiValueTag(m tag.Metadata, desc string) string {
 // marker. Uses substring match rather than exact equality because files renamed
 // from .lrc carry LRC tag headers before the marker line. Returns false on any
 // read error so a scan failure never silently drops a track.
-func isInstrumentalTxt(path string) bool {
-	data, err := os.ReadFile(path) //nolint:gosec // path is constructed from directory scan within a validated root
+func (sc *Scanner) isInstrumentalTxt(path string) bool {
+	read := sc.readTxt
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path) //nolint:gosec // path is constructed from directory scan within a validated root
 	if err != nil {
 		return false
 	}
@@ -1270,7 +1278,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 			slog.Debug("skipping file, lyrics exist", "file", file.Name())
 			continue
-		case txtExists && !lrcExists && isInstrumentalTxt(txtPath):
+		case txtExists && !lrcExists && reopen.Unsynced && sc.isInstrumentalTxt(txtPath):
 			// An instrumental marker is not terminal whoever wrote it (#553): it
 			// reopens on --upgrade like any .txt, and on nothing else. A detector
 			// version bump deliberately does NOT reopen it here (#1106): for a
@@ -1286,7 +1294,12 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// inference runs again) or scan reconcile, not a scan side effect.
 			// A manual marker (#1218) is never reopened; the probe runs only once
 			// a reopen is granted, so an ordinary scan reads nothing extra.
-			if !reopen.Unsynced || manualMarkerAmong(dir, stem, txtPath, listing) {
+			//
+			// The case guard above also requires reopen.Unsynced (#1572): without
+			// a reopen a marker and a plain .txt are both indexed and skipped, so
+			// classifying the .txt would be a file read whose result is unused. A
+			// non-reopen scan therefore takes the plain .txt arm below.
+			if manualMarkerAmong(dir, stem, txtPath, listing) {
 				// Index it if the scan index has never seen this path (#786). In
 				// serve mode this is the FIRST branch a lone .txt matches, so
 				// leaving it unwired would keep every moved instrumental track
