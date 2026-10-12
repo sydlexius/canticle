@@ -367,3 +367,106 @@ func TestInsertSettledDoneConflictFallbackAlreadyLinked(t *testing.T) {
 		t.Errorf("junction rows = %d, want 1", n)
 	}
 }
+
+func TestAdoptWritersReturnTheContextErrorAndWriteNothing(t *testing.T) {
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	lib := seedLibrary(t, dbh, "/m")
+	c := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	seedQueueRow(t, dbh, c, StatusDone)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := q.ListUnlinkedSettled(ctx, lib, "", 0, 10); !errors.Is(err, context.Canceled) {
+		t.Errorf("list err = %v, want context.Canceled", err)
+	}
+	if res, err := q.LinkSettled(ctx, c, adoptStamp, nil); !errors.Is(err, context.Canceled) || res != AdoptNoRow {
+		t.Errorf("link = %v, %v, want AdoptNoRow and context.Canceled", res, err)
+	}
+	if res, err := q.InsertSettledDone(ctx, c, AdoptClass{OutcomeType: "synced"}, adoptStamp, nil); !errors.Is(err, context.Canceled) || res != AdoptNoRow {
+		t.Errorf("insert = %v, %v, want AdoptNoRow and context.Canceled", res, err)
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue_scan_results`); n != 0 {
+		t.Errorf("links after canceled writers = %d, want 0", n)
+	}
+}
+
+func TestLinkSettledWithNoQueueRowWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	lib := seedLibrary(t, dbh, "/m")
+	c := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	called := false
+	res, err := q.LinkSettled(ctx, c, adoptStamp, func(AdoptRecord) error { called = true; return nil })
+	if err != nil || res != AdoptNoRow || called {
+		t.Fatalf("link = %v, %v, backup called=%v, want AdoptNoRow, nil, false", res, err, called)
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue_scan_results`); n != 0 {
+		t.Errorf("links = %d, want 0", n)
+	}
+}
+
+func TestListUnlinkedSettledDerivesMissingIdentityKeys(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	lib := seedLibrary(t, dbh, "/m")
+	c := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	if _, err := dbh.Exec(`UPDATE scan_results SET artist_key = '', title_key = '' WHERE id = ?`, c.ScanResultID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.ListUnlinkedSettled(ctx, lib, "", 0, 10)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("list = %v, %v, want one candidate", got, err)
+	}
+	if got[0].ArtistKey != c.ArtistKey || got[0].TitleKey != c.TitleKey {
+		t.Errorf("keys = %q/%q, want derived %q/%q", got[0].ArtistKey, got[0].TitleKey, c.ArtistKey, c.TitleKey)
+	}
+}
+
+func TestAdoptWritersSurfaceAJunctionOrInsertFailure(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	lib := seedLibrary(t, dbh, "/m")
+	c := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	seedQueueRow(t, dbh, c, StatusDone)
+	// A scan_results id that does not exist violates the junction foreign key.
+	orphan := c
+	orphan.ScanResultID = 987654
+	if res, err := q.LinkSettled(ctx, orphan, adoptStamp, nil); err == nil || res != AdoptNoRow {
+		t.Errorf("link orphan = %v, %v, want AdoptNoRow and an error", res, err)
+	}
+	fresh := seedSettled(t, dbh, lib, "done", "/m/b.flac", "Two")
+	fresh.ScanResultID = 987655
+	if res, err := q.InsertSettledDone(ctx, fresh, AdoptClass{OutcomeType: "synced"}, adoptStamp, nil); err == nil || res != AdoptNoRow {
+		t.Errorf("insert orphan = %v, %v, want AdoptNoRow and an error", res, err)
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue`); n != 1 {
+		t.Errorf("work_queue rows = %d, want 1 (only the seeded row)", n)
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue_scan_results`); n != 0 {
+		t.Errorf("links = %d, want 0", n)
+	}
+}
+
+func TestAdoptInsertFailsWhenTheJunctionWriteIsRefused(t *testing.T) {
+	ctx := context.Background()
+	dbh := openQueueTestDB(t)
+	q := NewDBQueue(dbh)
+	lib := seedLibrary(t, dbh, "/m")
+	c := seedSettled(t, dbh, lib, "done", "/m/a.flac", "One")
+	if _, err := dbh.Exec(`CREATE TEMP TRIGGER refuse_link BEFORE INSERT ON work_queue_scan_results
+        BEGIN SELECT RAISE(ABORT, 'link refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	res, err := q.InsertSettledDone(ctx, c, AdoptClass{OutcomeType: "synced"}, adoptStamp, func(AdoptRecord) error { called = true; return nil })
+	if err == nil || res != AdoptNoRow || called {
+		t.Fatalf("insert = %v, %v, backup called=%v, want AdoptNoRow, an error, no backup", res, err, called)
+	}
+	if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue`); n != 0 {
+		t.Errorf("work_queue rows = %d, want 0 (the insert rolled back with the refused link)", n)
+	}
+}
