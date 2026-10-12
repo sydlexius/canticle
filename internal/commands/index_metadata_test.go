@@ -1288,3 +1288,64 @@ func TestIndexMetadataDryRunCountEqualsRealCountForSharedPath(t *testing.T) {
 		}
 	}
 }
+
+// A library root that is a symlink: the scanner stores file_path under the
+// root as configured (the symlink spelling), not the resolved one, and the
+// fill must still find the row. The row is inserted with the symlink-rooted
+// path, which is how ScanLibrary spells it (filepath.Join(root, name)).
+func TestIndexMetadataFillsScanRowStoredUnderSymlinkedRoot(t *testing.T) {
+	const recordingID = "11111111-2222-4333-8444-555555555555"
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	real := filepath.Join(dir, "array")
+	link := filepath.Join(dir, "music")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	reconcilePathsCfg(t, cfgPath, dbPath)
+	if err := testutil.WriteFLACFileWithComments(real, "linked.flac", 44100, 44100, map[string]string{
+		"TITLE": "Quiet Harbor", "MUSICBRAINZ_TRACKID": recordingID,
+	}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ctx := context.Background()
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	if _, err := library.New(sqlDB).Add(ctx, link, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+	key := filepath.Join(link, "linked.flac")
+	res, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO scan_results (library_id, file_path, artist, title, outdir, filename, status, recording_mbid)
+		 VALUES ((SELECT id FROM libraries LIMIT 1), ?, 'Artist', 'Title', ?, 'linked.flac', 'done', '')`,
+		key, link)
+	if err != nil {
+		t.Fatalf("insert scan row: %v", err)
+	}
+	id, _ := res.LastInsertId()
+
+	var dry bytes.Buffer
+	if code := runIndexMetadata(ctx, &dry, ScanIndexMetadataCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("dry run exit=%d out=%s", code, dry.String())
+	}
+	if !strings.Contains(dry.String(), "would fill the recording ID on 1 empty scan row(s)") {
+		t.Errorf("dry run output lacks a count of 1: %s", dry.String())
+	}
+	if got := scanRowRecordingID(t, dbPath, id); got != "" {
+		t.Errorf("dry run wrote the scan row's recording ID: %q", got)
+	}
+	var yes bytes.Buffer
+	if code := runIndexMetadata(ctx, &yes, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("yes run exit=%d out=%s", code, yes.String())
+	}
+	if got := scanRowRecordingID(t, dbPath, id); got != recordingID {
+		t.Errorf("symlink-rooted scan row recording ID = %q, want %q", got, recordingID)
+	}
+}
