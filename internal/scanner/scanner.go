@@ -306,6 +306,12 @@ type AudioFacts struct {
 	// signal. Reading this is optional -- TrackLength is still 0 either way, so a
 	// caller that ignores it behaves exactly as before.
 	DurationErr error
+
+	// MultiValueErr is non-nil when the Vorbis multi-value re-read of a FLAC/OGG
+	// file hit an I/O error, so Artist and AlbumArtist are the tag library's
+	// single-value fallback. It may be transient and artist is half of the queue's
+	// unique key, so the unattended writers (scan, worker) do not cache the read.
+	MultiValueErr error
 }
 
 // ReadAudioFacts opens the audio file at path and returns every fact the tag
@@ -328,7 +334,7 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 	// seeks can run in either order with no effect on the other. A no-op
 	// (nil, cheaply, on the FileType() check alone) for every non-FLAC/OGG
 	// file.
-	vorbisFields := vorbisMultiValueFields(f, m)
+	vorbisFields, multiErr := vorbisFieldsChecked(f, m)
 
 	// audioduration seeks to 0 internally, so f may sit at any offset after
 	// tag.ReadFrom; no rewind is needed. A parse failure degrades to the
@@ -350,9 +356,58 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 		}
 	}
 
+	return audioFactsFromHandle(f, m, vorbisFields, multiErr, dur, durationErr), nil
+}
+
+// ErrVorbisMultiValue is a Vorbis multi-value re-read I/O failure; no path.
+var ErrVorbisMultiValue = errors.New("vorbis comment block re-read failed")
+
+// ioErrRecorder remembers a read (other than EOF) or seek error from r.
+type ioErrRecorder struct {
+	io.ReadSeeker
+	err error
+}
+
+func (r *ioErrRecorder) Read(p []byte) (int, error) {
+	n, err := r.ReadSeeker.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.err = err
+	}
+	return n, err
+}
+
+func (r *ioErrRecorder) Seek(offset int64, whence int) (int64, error) {
+	n, err := r.ReadSeeker.Seek(offset, whence)
+	if err != nil {
+		r.err = err
+	}
+	return n, err
+}
+
+// vorbisFieldsChecked is vorbisMultiValueFields with an I/O failure reported.
+// That function returns nil alike for a file that is not FLAC/OGG, for a
+// comment block it rejects or cannot find, and for a read that failed. Only the
+// last can differ on the next read of the same bytes, so only it is an error.
+func vorbisFieldsChecked(r io.ReadSeeker, m tag.Metadata) (map[string][]string, error) {
+	rec := &ioErrRecorder{ReadSeeker: r}
+	fields := vorbisMultiValueFields(rec, m)
+	if rec.err != nil {
+		return fields, ErrVorbisMultiValue
+	}
+	return fields, nil
+}
+
+// audioFactsFromHandle is the ONE builder of an AudioFacts: ReadAudioFacts and
+// the scan loop both end here, so a row that BOTH the scan (#1575) and `scan
+// index-metadata` write has identical columns, from the same extractors. They
+// do not write the same SET of rows: the scan skips a file whose duration parse
+// or multi-value re-read failed, which index-metadata records. The caller
+// supplies what it read from f (tags, multi-value recovery, duration, and the
+// two errors); the stamp is f's own fstat, taken while the handle is open.
+func audioFactsFromHandle(f *os.File, m tag.Metadata, vorbisFields map[string][]string, multiErr error, dur int, durationErr error) AudioFacts {
 	var mtimeNano, sizeBytes int64
 	if info, serr := f.Stat(); serr != nil {
-		slog.Debug("could not stat open handle for identity; using zero sentinel", "file", path, "error", serr)
+		slog.Debug("could not stat open handle for identity; using zero sentinel", "error_type", fmt.Sprintf("%T", serr))
 	} else {
 		mtimeNano, sizeBytes = info.ModTime().UnixNano(), info.Size()
 	}
@@ -380,7 +435,9 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 		FileType:    string(m.FileType()),
 		TrackLength: dur,
 		DurationErr: durationErr,
-	}, nil
+
+		MultiValueErr: multiErr,
+	}
 }
 
 // audioFileTypeForExt returns the audioduration type constant for a lower-case
@@ -491,6 +548,23 @@ type Scanner struct {
 	// identities, when set, is the tag cache an unsettled file's identity is
 	// served from instead of opening the file (#1574). Nil disables it.
 	identities IdentityStore
+	// openAudio opens an audio file for the scan's tag read of an unsettled file
+	// and for the skipped-file duration probe. It is NOT every audio open in a
+	// scan: indexSettledFile reads a settled, never-indexed file through
+	// openAndReadTags, which calls os.Open directly. Nil means os.Open; tests
+	// inject a counting opener to measure those two opens (#1575).
+	openAudio func(string) (*os.File, error)
+	// vorbisReader, when set, wraps the open handle for the scan loop's Vorbis
+	// multi-value re-read. Tests use it to fail that read alone.
+	vorbisReader func(*os.File) io.ReadSeeker
+}
+
+// open opens an audio file through the openAudio seam (see its scope there).
+func (sc *Scanner) open(path string) (*os.File, error) {
+	if sc.openAudio != nil {
+		return sc.openAudio(path)
+	}
+	return os.Open(path) //nolint:gosec // reason: G304 -- every caller passes a path from the directory scan of a configured library root
 }
 
 // Option configures a Scanner at construction.
@@ -935,7 +1009,7 @@ func (sc *Scanner) bankDurationForSkippedFile(ctx context.Context, path, ext str
 		return
 	}
 
-	f, err := os.Open(path) //nolint:gosec // reason: path from directory scan, same provenance as the enrichment open below
+	f, err := sc.open(path)
 	if err != nil {
 		slog.Debug("could not open to bank duration; skipping", "file", path, "error", err)
 		return
@@ -1404,13 +1478,14 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		// file (#1574), so the file is not opened at all. Placed AFTER the
 		// metadata-failure skip above, which still decides first, and before the
 		// open; every other outcome falls through to the read below.
-		if id, hit := sc.cachedIdentity(ctx, opts, file, lstat, fullPath,
-			pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, fullPath), stats); hit {
+		cacheKey := pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, fullPath)
+		id, hit, miss := sc.cachedIdentity(ctx, opts, file, lstat, fullPath, cacheKey, stats)
+		if hit {
 			*results = append(*results, pendingRow(dir, fullPath, stem, id, opts))
 			continue
 		}
 
-		f, err := os.Open(fullPath) //nolint:gosec // reason: path from directory scan
+		f, err := sc.open(fullPath)
 		if err != nil {
 			slog.Warn("error reading file", "error", err)
 			continue
@@ -1521,7 +1596,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		// track keep the duration_bucket=0 fallback.
 		filePath := filepath.Join(dir, file.Name())
 		var dur int
-		var isrc, recordingMBID string
+		var durationErr error
 		if opts.EnrichRecording {
 			// Duration: audioduration reads only the file header (no audio decode).
 			// The library seeks to 0 internally, so f may be at any position from
@@ -1537,6 +1612,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 					// See ReadAudioFacts: a parser that RAN and FAILED is a defect
 					// worth surfacing, and Debug is off in production (#651).
 					slog.Warn("duration parse failed; using unknown duration", "file", file.Name(), "error", durErr)
+					durationErr = durErr
 				}
 			}
 			// Bank the duration we just paid a header read for (#441). The stamp
@@ -1545,8 +1621,6 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// re-opening it later is the whole point. Best-effort: a cache write
 			// must never fail a scan.
 			sc.recordDuration(ctx, pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, filePath), f, dur)
-			isrc = extractISRC(m)
-			recordingMBID = extractRecordingMBID(m)
 		}
 		// Vorbis-comment multi-value recovery (#969), f is still open (every
 		// branch above that closes it early also `continue`s, so reaching
@@ -1555,18 +1629,28 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		// ordering the two calls either way is safe, but running last means
 		// this read never disturbs an offset a future insertion between here
 		// and probeDuration might otherwise rely on.
-		vorbisFields := vorbisMultiValueFields(f, m)
+		var reread io.ReadSeeker = f
+		if sc.vorbisReader != nil {
+			reread = sc.vorbisReader(f)
+		}
+		vorbisFields, multiErr := vorbisFieldsChecked(reread, m)
+		// The full fact set, from the handle still open: the scan row below and
+		// the tag-cache row banked from this same read (#1575) are both cut from
+		// it. pendingRow drops ISRC, recording ID and duration with enrichment
+		// off, so extracting them here from tags already in memory changes no row.
+		facts := audioFactsFromHandle(f, m, vorbisFields, multiErr, dur, durationErr)
 		_ = f.Close()
+		sc.bankFacts(ctx, opts, cacheKey, fullPath, facts, miss, stats)
 
 		slog.Debug("adding file", "file", file.Name(), "enrich", opts.EnrichRecording)
 		*results = append(*results, pendingRow(dir, filePath, stem, CachedIdentity{
-			Artist:      extractArtist(m, vorbisFields),
-			AlbumArtist: extractAlbumArtist(m, vorbisFields),
-			Title:       m.Title(),
-			Album:       m.Album(),
-			ISRC:        isrc,
-			MBID:        recordingMBID,
-			TrackLength: dur,
+			Artist:      facts.Artist,
+			AlbumArtist: facts.AlbumArtist,
+			Title:       facts.Title,
+			Album:       facts.Album,
+			ISRC:        facts.ISRC,
+			MBID:        facts.MBID,
+			TrackLength: facts.TrackLength,
 		}, opts))
 	}
 	return nil

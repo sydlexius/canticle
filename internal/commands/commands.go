@@ -3019,7 +3019,7 @@ func strongTitlePredicate(cfg config.Config) func(models.Track) bool {
 }
 
 // scanIdentityCache adapts the tag cache to the scanner's identity read
-// (#1574). The scanner cannot import audiometa, so it declares its own result
+// (#1574) and row write (#1575). The scanner cannot import audiometa, so it declares its own result
 // type; the conversion below compiles only while the two structs have the same
 // fields in the same order, so neither can drift from the other silently.
 type scanIdentityCache struct{ store *audiometa.Store }
@@ -3027,6 +3027,11 @@ type scanIdentityCache struct{ store *audiometa.Store }
 func (c scanIdentityCache) Identity(ctx context.Context, path string, mtimeNano, size int64) (scanner.CachedIdentity, bool, error) {
 	id, found, err := c.store.Identity(ctx, path, mtimeNano, size)
 	return scanner.CachedIdentity(id), found, err
+}
+
+// Record banks the scan's own read as the file's tag-cache row (#1575).
+func (c scanIdentityCache) Record(ctx context.Context, path string, facts scanner.AudioFacts) error {
+	return c.store.Record(ctx, path, facts)
 }
 
 // scheduler builds the scan scheduler. cacheRepo is the cache used to skip
@@ -3103,8 +3108,8 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			// and has no database to index into.
 			scanner.WithIndexStore(results),
 			// Serve an unsettled file's identity from the tag cache when its row is
-			// current, so the file is not opened (#1574). Read-only here: the scan
-			// does not write audio_metadata.
+			// current, so the file is not opened (#1574), and bank a row from the
+			// read of a file that had none (#1575).
 			scanner.WithIdentityStore(scanIdentityCache{store: audiometa.New(sqlDB, scanner.DurationReaderVersion)}),
 		),
 		Options: opts,

@@ -46,11 +46,20 @@ func (a storeAdapter) Identity(ctx context.Context, path string, mtimeNano, size
 	return scanner.CachedIdentity(id), found, err
 }
 
+func (a storeAdapter) Record(ctx context.Context, path string, facts scanner.AudioFacts) error {
+	return a.store.Record(ctx, path, facts)
+}
+
 // errStore is an identity store whose every lookup fails with mk(path).
 type errStore struct{ mk func(path string) error }
 
 func (e errStore) Identity(_ context.Context, path string, _, _ int64) (scanner.CachedIdentity, bool, error) {
 	return scanner.CachedIdentity{}, false, e.mk(path)
+}
+
+// Record fails the test's scan loudly: nothing may be banked after a lookup error.
+func (e errStore) Record(context.Context, string, scanner.AudioFacts) error {
+	panic("Record called after a lookup error")
 }
 
 // hitEnv is one library root, one real database, and a scanner wired to the

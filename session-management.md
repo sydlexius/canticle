@@ -5,6 +5,13 @@ Read it on resume, after the gitignored `SESSION-STATE.md` (which holds transien
 Durable rules live in the root `CLAUDE.md` and the nested `internal/<pkg>/CLAUDE.md` files, and the one-line-per-package catalog lives in `docs/ARCHITECTURE.md`; this file holds the point-in-time detail behind them.
 Add a dated `##` section at the top for new material. Do not edit history except to correct it.
 
+## 2026-10-12 - audio files opened per scan, before and after the scan banks the tag cache (#1575)
+
+Fixture: four invented FLAC files in one directory, recording enrichment on, embedded lyrics off, `audio_metadata` empty (no `scan index-metadata` run), three consecutive scans of the unchanged library.
+Audio files opened per scan: before `4, 4, 4`; after `4, 0, 0`.
+Measured by `TestScanBank_OpenCountsBeforeAndAfter` (`internal/scanner/identity_cache_bank_test.go`) through the scanner's `openAudio` seam, which counts the unsettled-file tag read and the skipped-file duration probe. The settled-file index read (`indexSettledFile`, via `openAndReadTags`) is not counted; the fixture has no lyric files beside the audio, so it never runs here. "Before" is the same scanner with the cache write dropped, which is what `main` did; "after" is the production wiring.
+Not banked, so still opened by every scan: a file whose duration parse fails, any file while an embedded-lyrics mode is on, and every file while recording enrichment is off.
+
 ## 2026-10-11 - detector-settled rows and provider pacing pinned (#568)
 
 `TestPacingContract` (`internal/worker/pacing_contract_test.go`) pins, for ordered and parallel x demoted and front, how many provider requests, detector calls and pacing waits a detector-settled, a provider-hit and an all-miss row cost. The code already delivered it; `front` settles a gate-positive row with no request and no wait, `demoted` spends the request first by design.

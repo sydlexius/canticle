@@ -391,6 +391,23 @@ func TestFetchTimeBankSkipsAReadWhoseDurationParseFailed(t *testing.T) {
 	}
 }
 
+// A read whose Vorbis multi-value re-read failed is returned to the attempt and
+// not banked: its artist is a fallback that a row stamped current would pin.
+func TestFetchTimeBankSkipsAReadWhoseMultiValueReadFailed(t *testing.T) {
+	cache := &fakeMetaCache{}
+	w, _ := newCacheTestWorker(t, cache, 100, 200)
+	facts := scanner.AudioFacts{MTimeNano: 100, SizeBytes: 200, TrackLength: 210, MultiValueErr: scanner.ErrVorbisMultiValue}
+	w.readFacts = func(string) (scanner.AudioFacts, error) { return facts, nil }
+	meta, err := w.resolveMetadata(context.Background(), "/music/song.flac")
+	if err != nil || meta.TrackLength != 210 || len(cache.recorded) != 0 {
+		t.Fatalf("failed re-read: meta %+v, err %v, %d row(s) written; want the read returned and no row", meta, err, len(cache.recorded))
+	}
+	facts.MultiValueErr = nil
+	if _, err := w.resolveMetadata(context.Background(), "/music/song.flac"); err != nil || len(cache.recorded) != 1 {
+		t.Errorf("clean read: err %v, %d row(s) written; want one", err, len(cache.recorded))
+	}
+}
+
 // The production wiring: a worker built by New with only SetMetadataCache, and
 // no field replaced, must bank a miss through RunOnce. Every other test here
 // swaps readFacts for a counting wrapper, so without this one New could lose
