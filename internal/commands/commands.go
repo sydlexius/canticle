@@ -147,6 +147,7 @@ type ScanCmd struct {
 	DetectInstrumental   bool     `arg:"--detect-instrumental" help:"force instrumental detection on for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --no-detect-instrumental"`
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
+	BareMarkers          bool     `arg:"--bare-markers" help:"with --upgrade, reopen only instrumental markers that have no [source:] header (written before provenance stamping, or typed by hand) and no unsynced lyrics; refused without --upgrade and with --update; protect a hand-typed marker with queue mark-instrumental; composes with --unsynced-before"`
 	UnsyncedBefore       string   `arg:"--unsynced-before" help:"with --upgrade, reopen only .txt sidecars (unsynced lyrics and instrumental markers) last modified before this cutoff; for a one-time repair of a historical cohort (issue #617). Refused with --update, which re-fetches every settled .lrc regardless of the cutoff. Accepts a date (2026-04-01, read as midnight UTC) or an RFC3339 instant; the comparison is strict, so a sidecar stamped exactly at the cutoff is excluded"`
 
 	Results                          *ScanResultsCmd                          `arg:"subcommand:results" help:"list persisted scan_results rows"`
@@ -2735,6 +2736,10 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 		_, _ = fmt.Fprintln(out, "--unsynced-before applies only to `scan` itself, not to a scan subcommand; it narrows which sidecars a re-fetch reopens")
 		return 1
 	}
+	if args.BareMarkers && scanSubcommandSelected(args) {
+		_, _ = fmt.Fprintln(out, "--bare-markers applies only to `scan` itself, not to a scan subcommand; it narrows which sidecars a re-fetch reopens")
+		return 1
+	}
 	switch {
 	case args.Results != nil:
 		sub := *args.Results
@@ -2868,6 +2873,10 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 }
 
 func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
+	if err := resolveBareMarkers(args.BareMarkers, args.Upgrade, args.Update); err != nil {
+		_, _ = fmt.Fprintln(out, err)
+		return 1
+	}
 	cfg, err := config.Load(args.ConfigPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -2906,12 +2915,13 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 	// off by default, so no behavior change unless opted in).
 	rlg, rlgBackup := serveRealigner(sqlDB, cfg, true)
 	s := scheduler(sqlDB, scanner.ScanOptions{
-		Update:         args.Update,
-		Upgrade:        args.Upgrade,
-		MaxDepth:       args.Depth,
-		BFS:            args.BFS,
-		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-		UnsyncedBefore: unsyncedBefore,
+		Update:          args.Update,
+		Upgrade:         args.Upgrade,
+		MaxDepth:        args.Depth,
+		BFS:             args.BFS,
+		EmbeddedLyrics:  embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
+		UnsyncedBefore:  unsyncedBefore,
+		BareMarkersOnly: args.BareMarkers,
 		// providersVersion 0: a one-shot `scan` constructs no provider set, so it
 		// has no generation to compare a stored verdict against. Zero never
 		// suppresses, so the CLI keeps its pre-#679 behavior exactly.

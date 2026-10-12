@@ -42,6 +42,37 @@ func ManualMarkerOnDisk(path string) bool {
 	return isManualMarker(data)
 }
 
+// BareMarkerOnDisk reports whether path is an instrumental marker with NO
+// [source:] header: a legacy marker written before provenance stamping, or one
+// typed by hand (the two cannot be told apart). It judges with provenanceOf,
+// the same rule ReadInstrumentalProvenance applies, but reads through
+// readRegularNoFollow, so a symlink, FIFO, oversized or unreadable file reads as
+// false: a marker whose provenance cannot be read is never treated as bare. A
+// lyric that merely contains the marker line among other text is not a marker.
+func BareMarkerOnDisk(path string) bool {
+	data, err := readRegularNoFollow(path, maxManualMarkerBytes)
+	if err != nil {
+		return false
+	}
+	tags, lines, err := parseLRCHeaderFrom(bytes.NewReader(data))
+	if err != nil {
+		return false
+	}
+	prov, isMarker := provenanceOf(tags, lines)
+	if !isMarker || prov.Source != "" {
+		return false
+	}
+	// provenanceOf counts a marker line anywhere, so a real unsynced lyric with an
+	// annotated instrumental break would read as a marker. A legacy marker is
+	// exactly the marker line, so every non-blank body line must be that line.
+	for _, l := range lines {
+		if s := strings.TrimSpace(l); s != "" && s != InstrumentalMarker {
+			return false
+		}
+	}
+	return true
+}
+
 // isManualMarker reports whether data is an instrumental marker carrying
 // [source:manual].
 func isManualMarker(data []byte) bool {
