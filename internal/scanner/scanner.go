@@ -488,6 +488,9 @@ type Scanner struct {
 	// Nil means os.ReadFile; tests inject a counting reader to prove an ordinary
 	// scan performs no read (#1572).
 	readTxt func(string) ([]byte, error)
+	// identities, when set, is the tag cache an unsettled file's identity is
+	// served from instead of opening the file (#1574). Nil disables it.
+	identities IdentityStore
 }
 
 // Option configures a Scanner at construction.
@@ -1175,13 +1178,18 @@ func (sc *Scanner) ScanLibrary(ctx context.Context, root string, opts ScanOption
 	// EvalSymlinks-resolved path used to produce for the same inode.
 	absRoot, canonRoot := pathutil.CanonicalRoot(root)
 	var results []models.ScanResult
-	if err := sc.scanDir(ctx, root, absRoot, canonRoot, opts, 0, &results); err != nil {
+	var stats identityStats
+	err := sc.scanDir(ctx, root, absRoot, canonRoot, opts, 0, &results, &stats)
+	if sc.identities != nil {
+		stats.log(ctx)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return results, nil
 }
 
-func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, opts ScanOptions, depth int, results *[]models.ScanResult) error {
+func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, opts ScanOptions, depth int, results *[]models.ScanResult, stats *identityStats) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1216,7 +1224,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		}
 		if file.IsDir() {
 			if depth < opts.MaxDepth {
-				if err := sc.scanDir(ctx, filepath.Join(dir, file.Name()), absRoot, canonRoot, opts, depth+1, results); err != nil {
+				if err := sc.scanDir(ctx, filepath.Join(dir, file.Name()), absRoot, canonRoot, opts, depth+1, results, stats); err != nil {
 					return err
 				}
 			}
@@ -1377,8 +1385,10 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		// for this file and read as usual rather than guessing an identity.
 		var mtimeNano, size int64
 		haveIdentity := false
+		var lstat os.FileInfo
 		if sc.failures != nil {
 			if info, ierr := file.Info(); ierr == nil {
+				lstat = info
 				mtimeNano, size, haveIdentity = info.ModTime().UnixNano(), info.Size(), true
 				skip, serr := sc.failures.ShouldSkip(ctx, fullPath, mtimeNano, size)
 				if serr != nil {
@@ -1390,7 +1400,17 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			}
 		}
 
-		f, err := os.Open(fullPath) //nolint:gosec // path from directory scan
+		// Serve the identity from the tag cache when its row is current for this
+		// file (#1574), so the file is not opened at all. Placed AFTER the
+		// metadata-failure skip above, which still decides first, and before the
+		// open; every other outcome falls through to the read below.
+		if id, hit := sc.cachedIdentity(ctx, opts, file, lstat, fullPath,
+			pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, fullPath), stats); hit {
+			*results = append(*results, pendingRow(dir, fullPath, stem, id, opts))
+			continue
+		}
+
+		f, err := os.Open(fullPath) //nolint:gosec // reason: path from directory scan
 		if err != nil {
 			slog.Warn("error reading file", "error", err)
 			continue
@@ -1417,7 +1437,7 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		// SYNCEDLYRICS, stored as LRC text) take precedence and write a .lrc;
 		// unsynced lyrics (m.Lyrics(), the ID3 USLT frame) write a .txt. ID3 SYLT
 		// and MP4 synced atoms are intentionally not handled. "off" is a no-op.
-		if opts.EmbeddedLyrics != "" && opts.EmbeddedLyrics != "off" {
+		if opts.embeddedLyricsOn() {
 			synced := strings.TrimSpace(syncedLyrics(m))
 			unsynced := strings.TrimSpace(m.Lyrics())
 			hasSynced := synced != "" && looksLikeLRC(synced)
@@ -1539,21 +1559,15 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 		_ = f.Close()
 
 		slog.Debug("adding file", "file", file.Name(), "enrich", opts.EnrichRecording)
-		*results = append(*results, models.ScanResult{
-			FilePath: filePath,
-			Track: models.Track{
-				ArtistName:    extractArtist(m, vorbisFields),
-				TrackName:     m.Title(),
-				AlbumName:     m.Album(),
-				AlbumArtist:   extractAlbumArtist(m, vorbisFields),
-				TrackLength:   dur,
-				ISRC:          isrc,
-				RecordingMBID: recordingMBID,
-			},
-			Outdir:   dir,
-			Filename: stem + sidecar.ExtLineSynced,
-			Status:   "pending",
-		})
+		*results = append(*results, pendingRow(dir, filePath, stem, CachedIdentity{
+			Artist:      extractArtist(m, vorbisFields),
+			AlbumArtist: extractAlbumArtist(m, vorbisFields),
+			Title:       m.Title(),
+			Album:       m.Album(),
+			ISRC:        isrc,
+			MBID:        recordingMBID,
+			TrackLength: dur,
+		}, opts))
 	}
 	return nil
 }
