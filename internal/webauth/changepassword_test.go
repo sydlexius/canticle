@@ -352,18 +352,132 @@ func TestChangePassword_CorruptStoredHashIsLoggedNotLeaked(t *testing.T) {
 	}
 }
 
-// faultSessionStore is the real session store with CreateSession failing once
-// armed, so the fixture's own logins still succeed.
+// faultSessionStore is the real session store with the conditional create
+// failing once armed (so the fixture's own logins still succeed), or preceded
+// by beforeCreate: the window between a verify and its session insert.
 type faultSessionStore struct {
 	SessionStore
-	createErr error
+	createErr    error
+	beforeCreate func()
 }
 
-func (s *faultSessionStore) CreateSession(ctx context.Context, userID string, expiresAt time.Time) (string, error) {
+func (s *faultSessionStore) CreateSessionForCredential(ctx context.Context, userID, hash string, expiresAt time.Time) (string, bool, error) {
 	if s.createErr != nil {
-		return "", s.createErr
+		return "", false, s.createErr
 	}
-	return s.SessionStore.CreateSession(ctx, userID, expiresAt)
+	if s.beforeCreate != nil {
+		s.beforeCreate()
+	}
+	return s.SessionStore.CreateSessionForCredential(ctx, userID, hash, expiresAt)
+}
+
+// newSessionFaultFixture is the fixture over a faultSessionStore, armed after setup.
+func newSessionFaultFixture(t *testing.T) (changeFixture, *faultSessionStore) {
+	t.Helper()
+	fault := &faultSessionStore{}
+	f := newChangeFixture(t, func(u UserStore, s SessionStore) (UserStore, SessionStore) {
+		fault.SessionStore = s
+		return u, fault
+	})
+	return f, fault
+}
+
+// A rotation commits after Login verified the OLD password and before its
+// session insert. The login must lose: its session would otherwise be created
+// after the rotation's revocation and stay valid under a superseded password.
+func TestLogin_LosesToARotationAfterVerify(t *testing.T) {
+	const rotated = "the-rotated-password"
+	rotations := map[string]func(context.Context, changeFixture) error{
+		"operator SetPassword": func(ctx context.Context, f changeFixture) error {
+			return NewService(f.users, NewSQLSessionStore(f.db)).SetPassword(ctx, "admin", rotated)
+		},
+		"web ChangePassword": func(ctx context.Context, f changeFixture) error {
+			_, err := NewService(f.users, NewSQLSessionStore(f.db)).ChangePassword(ctx, f.user.ID, changeOldPassword, rotated)
+			return err
+		},
+	}
+	for name, rotate := range rotations {
+		t.Run(name, func(t *testing.T) {
+			f, fault := newSessionFaultFixture(t)
+			ctx := context.Background()
+			var after int
+			fault.beforeCreate = func() {
+				if err := rotate(ctx, f); err != nil {
+					t.Fatalf("competing rotation: %v", err)
+				}
+				after = f.sessionCount(t)
+			}
+
+			token, err := f.svc.Login(ctx, "admin", changeOldPassword)
+			if !errors.Is(err, ErrInvalidCredentials) || token != "" {
+				t.Fatalf("token set = %v, err = %v; want no token and ErrInvalidCredentials", token != "", err)
+			}
+			if n := f.sessionCount(t); n != after {
+				t.Errorf("sessions = %d, %d after the rotation; the stale login created one", n, after)
+			}
+			fault.beforeCreate = nil
+			if _, err := f.svc.Login(ctx, "admin", rotated); err != nil {
+				t.Fatalf("login with the rotated password failed: %v", err)
+			}
+		})
+	}
+}
+
+// A second rotation lands between a change's own rotation and its session
+// insert. The change stands as far as it went, but its password is already
+// superseded, so it gets no session and reports that a sign-in is needed.
+func TestChangePassword_SupersededBeforeItsSessionIsReauthRequired(t *testing.T) {
+	const operatorPassword = "the-operators-password"
+	f, fault := newSessionFaultFixture(t)
+	ctx := context.Background()
+	fault.beforeCreate = func() {
+		if err := f.svc.SetPassword(ctx, "admin", operatorPassword); err != nil {
+			t.Fatalf("competing SetPassword: %v", err)
+		}
+	}
+
+	token, err := f.svc.ChangePassword(ctx, f.user.ID, changeOldPassword, changeNewPassword)
+	if !errors.Is(err, ErrReauthRequired) || token != "" {
+		t.Fatalf("token set = %v, err = %v; want no token and ErrReauthRequired", token != "", err)
+	}
+	if n := f.sessionCount(t); n != 0 {
+		t.Errorf("sessions = %d; want 0 (the superseded change issued none)", n)
+	}
+}
+
+func TestCreateSessionForCredential(t *testing.T) {
+	f := newChangeFixture(t, nil)
+	ctx := context.Background()
+	store := NewSQLSessionStore(f.db)
+	expires := time.Now().Add(time.Hour)
+
+	misses := map[string][2]string{
+		"stale hash":   {f.user.ID, "$argon2id$stale"},
+		"unknown user": {"no-such-user", f.user.PasswordHash},
+	}
+	for name, arg := range misses {
+		token, created, err := store.CreateSessionForCredential(ctx, arg[0], arg[1], expires)
+		if err != nil || created || token != "" {
+			t.Errorf("%s: token set = %v, created = %v, err = %v; want nothing created", name, token != "", created, err)
+		}
+	}
+	for name, arg := range map[string][2]string{"empty user": {"", "h"}, "empty hash": {f.user.ID, ""}} {
+		if _, created, err := store.CreateSessionForCredential(ctx, arg[0], arg[1], expires); err == nil || created {
+			t.Errorf("%s: created = %v, err = %v; want an error", name, created, err)
+		}
+	}
+	f.assertUntouched(t)
+
+	token, created, err := store.CreateSessionForCredential(ctx, f.user.ID, f.user.PasswordHash, expires)
+	if err != nil || !created {
+		t.Fatalf("matching hash: created = %v, err = %v; want a session", created, err)
+	}
+	if got, err := f.svc.ValidateSession(ctx, token); err != nil || got.ID != f.user.ID {
+		t.Fatalf("the created session does not validate for its user: %v", err)
+	}
+	if n := f.sessionCount(t); n != 3 {
+		t.Errorf("sessions = %d; want the fixture's 2 plus exactly 1", n)
+	}
 }
 
 // The rotation committed but no session could be issued. The caller must be

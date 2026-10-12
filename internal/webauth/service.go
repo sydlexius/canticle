@@ -34,7 +34,8 @@ var (
 	// naming the failure is an aid rather than an enumeration risk.
 	ErrUserNotFound = errors.New("webauth: user not found")
 	// ErrReauthRequired is returned by ChangePassword when the rotation committed
-	// but the fresh session could not be created. The password HAS changed and
+	// but the fresh session could not be created, or was refused because yet
+	// another rotation committed straight after it. The password HAS changed and
 	// every earlier session is revoked, so the caller must not report the change
 	// as failed: it sends the user to sign in again with the new password.
 	ErrReauthRequired = errors.New("webauth: password changed, sign in again")
@@ -172,8 +173,10 @@ func (s *Service) SetPassword(ctx context.Context, username, password string) er
 // it, so a stale password cannot undo an operator's rotation. The session is
 // created after it commits, through the same path Login uses rather than Login
 // itself, which would spend a second Argon2id pass and add a second failure
-// point. If that session cannot be created the password has still changed, and
-// the error wraps ErrReauthRequired so the caller can say so.
+// point, and it is issued for the NEW hash: if another rotation replaced that
+// hash first, no session is created. If that session cannot be created the
+// password has still changed, and the error wraps ErrReauthRequired so the
+// caller can say so.
 func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) (string, error) {
 	user, ok, err := s.users.GetByID(ctx, userID)
 	if err != nil {
@@ -208,7 +211,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 		}
 		return "", fmt.Errorf("webauth: change password: %w", err)
 	}
-	token, err := s.newSession(ctx, user.ID)
+	token, err := s.newSession(ctx, user.ID, hash)
 	if err != nil {
 		return "", fmt.Errorf("webauth: change password: %w: %w", ErrReauthRequired, err)
 	}
@@ -219,6 +222,12 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 // raw token. It is constant-time and enumeration-safe: an unknown username still
 // runs an Argon2id verify against a dummy hash, and both the unknown-user and
 // wrong-password paths return the identical ErrInvalidCredentials.
+//
+// The session is created only for the credential that was verified. A rotation
+// (ChangePassword, or SetPassword from the CLI's separate process) that commits
+// after the verify makes the insert match nothing, and Login then returns
+// ErrInvalidCredentials: the password it checked is no longer the password, so
+// no session issued under it survives the rotation's revocation.
 func (s *Service) Login(ctx context.Context, username, password string) (string, error) {
 	user, ok, err := s.users.GetByUsername(ctx, username)
 	if err != nil {
@@ -240,7 +249,10 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 	if !valid {
 		return "", ErrInvalidCredentials
 	}
-	token, err := s.newSession(ctx, user.ID)
+	token, err := s.newSession(ctx, user.ID, user.PasswordHash)
+	if errors.Is(err, ErrInvalidCredentials) {
+		return "", ErrInvalidCredentials
+	}
 	if err != nil {
 		return "", fmt.Errorf("webauth: login: %w", err)
 	}
@@ -248,9 +260,20 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 }
 
 // newSession creates a session for userID that expires one session TTL from now
-// and returns its raw token. Login and ChangePassword both issue through it.
-func (s *Service) newSession(ctx context.Context, userID string) (string, error) {
-	return s.sessions.CreateSession(ctx, userID, s.now().Add(s.sessionTTL))
+// and returns its raw token, but only while passwordHash is still the user's
+// stored hash: the one Login verified, or the one ChangePassword rotated to. If
+// the credential changed underneath (or the user is gone) it creates nothing
+// and returns ErrInvalidCredentials. Login and ChangePassword both issue
+// through it.
+func (s *Service) newSession(ctx context.Context, userID, passwordHash string) (string, error) {
+	token, created, err := s.sessions.CreateSessionForCredential(ctx, userID, passwordHash, s.now().Add(s.sessionTTL))
+	if err != nil {
+		return "", err
+	}
+	if !created {
+		return "", ErrInvalidCredentials
+	}
+	return token, nil
 }
 
 // ValidateSession resolves a raw session token to its owning user. It returns

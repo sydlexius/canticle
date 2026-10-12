@@ -73,8 +73,8 @@ func (failingUserStore) RotateCredentialIfCurrent(context.Context, string, strin
 
 type failingSessionStore struct{}
 
-func (failingSessionStore) CreateSession(context.Context, string, time.Time) (string, error) {
-	return "", errStore
+func (failingSessionStore) CreateSessionForCredential(context.Context, string, string, time.Time) (string, bool, error) {
+	return "", false, errStore
 }
 func (failingSessionStore) GetSessionByToken(context.Context, string) (Session, bool, error) {
 	return Session{}, false, errStore
