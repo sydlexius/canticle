@@ -94,8 +94,8 @@ func TestOrderedDispatchMarksProviderLaneRemote(t *testing.T) {
 // ordered loop. A regression there would silently report a provider lane as
 // local and skip pacing.
 //
-// Note the worker does not install a local lane under parallel dispatch today
-// (see rebuildOrchestrator, and #528), so this exercises the orchestrator's
+// Note the worker stages its one local lane (the detector) outside the parallel
+// race (see rebuildOrchestrator, and #528), so this exercises the orchestrator's
 // contract directly rather than a currently-reachable worker configuration.
 func TestParallelDispatchPropagatesLaneLocality(t *testing.T) {
 	local := newLocalTestLane(syncedSong())

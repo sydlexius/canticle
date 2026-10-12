@@ -72,10 +72,14 @@ below.
 
 The detector needs the YAMNet classifier sidecar, which you build and run
 yourself (see "Sidecar setup"), plus `ffmpeg` (and `ffprobe`, for spread
-sampling; see "ffmpeg and ffprobe are both required" below). Instrumental
-detection requires `providers.mode = "ordered"`; under parallel dispatch the
-detector is inactive and a warning is logged. (`ordering = "front"` with
-`providers.mode = "parallel"` is rejected at config load.) With no
+sampling; see "ffmpeg and ffprobe are both required" below). Detection runs
+under both provider modes. Under `providers.mode = "parallel"` the detector
+never joins the provider race: it is staged outside it, so with the default
+`ordering = "demoted"` it runs only after at least one provider was asked and
+every provider that was asked has answered without a usable lyric. When no
+provider could be asked (every circuit open), the track waits. `ordering = "front"` requires
+`providers.mode = "ordered"`; with `providers.mode = "parallel"` it is rejected
+at config load. With no
 `classifier_url` set, no detector is built and Canticle behaves as if the feature
 did not exist: providers only.
 
@@ -126,7 +130,7 @@ a track whose title carries a strong instrumental qualifier with an
 instrumental marker, without asking any provider, the cache, or the detector.
 The title alone decides. Requiring the detector to agree was weighed and
 declined: the rule would then silently turn back into today's behavior whenever
-the sidecar is absent, its breaker is open, or dispatch is parallel.
+the sidecar is absent or its breaker is open.
 
 A qualifier is strong only when it stands alone in brackets or after a dash,
 beside nothing but packaging words (`Version`, `Mix`, a year), and qualifies a

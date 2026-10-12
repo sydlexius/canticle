@@ -401,8 +401,8 @@ type Worker struct {
 	// titleRuleWeak adds the Weak tier (SetTitleRuleWeak, #1471).
 	titleRuleWeak bool
 	// detectorLane is the detector lane actually installed by the most recent
-	// rebuildOrchestrator, or nil when none was (no audioDetector, or parallel
-	// mode). It is kept here ONLY so the pre-dequeue availability gate can
+	// rebuildOrchestrator, or nil when none was (no audioDetector). It is
+	// kept here ONLY so the pre-dequeue availability gate can
 	// consult the same live breaker the orchestrator uses; it is deliberately
 	// NOT part of w.lanes, which tracks provider lanes exclusively and which the
 	// circuit-config setters fan out across.
@@ -601,56 +601,46 @@ func (w *Worker) rebuildOrchestrator() error {
 	// regardless of detectorOrdering - the detector stays strictly opt-in.
 	lanes := append([]*orchestrator.Lane(nil), w.lanes...)
 	if w.audioDetector != nil {
-		// The detector lane is inserted ONLY under ordered dispatch. Under
-		// providers.mode=parallel every lane races, so a fast gate-positive
-		// detector verdict can become the held result before a slower provider
-		// answers - and because the default `demoted` ordering ranks an
-		// instrumental below real lyrics only when both are in hand, a lyrical
-		// track whose provider lane is slow would wrongly settle as instrumental.
-		// Rather than race it, detection is left INACTIVE under parallel and the
-		// operator is told so explicitly: silently dropping a configured detector
-		// would look identical to a detector that simply never fires. Staged
-		// dispatch (run the providers, then the detector only if they all miss)
-		// is the real fix and is tracked in #528.
-		if w.mode != orchestrator.ModeOrdered {
-			slog.Warn("worker: instrumental detection is INACTIVE under parallel provider dispatch; the detector lane is not installed. Set providers.mode=ordered to enable it (see #528)", "mode", w.mode)
-			w.detectorLane = nil
-		} else {
-			// REUSE the existing detector breaker across rebuilds (#531).
-			// Constructing a fresh one here discarded the accumulated trip count
-			// and open-until deadline, so a rebuild silently un-tripped a
-			// detector that had just been shut off for being unreachable -- the
-			// sidecar would be hammered again immediately instead of staying
-			// open for its backoff window. Reconfiguring in place mirrors how
-			// the circuit setters fan out across the provider lanes rather than
-			// replacing their breakers.
-			//
-			// This was latent while every rebuild-triggering setter ran only at
-			// startup (where there is no state worth keeping); it becomes live
-			// the moment anything rebuilds at runtime, e.g. a settings save that
-			// re-wires the worker.
-			cb := w.detectorBreaker
-			if cb == nil {
-				cb = circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
-				cb.SetClock(w.now)
-				w.detectorBreaker = cb
-			}
-			// No reconfiguration here: SetCircuitBackoff, SetCircuitOpenDuration
-			// and setClock now fan out to w.detectorBreaker directly, so a
-			// surviving breaker is already current. Re-applying config on every
-			// rebuild would be a second, order-dependent path to the same state.
-			// Share the primary provider lane's pacer so a detector settle credits
-			// the same ratchet-down counter the musixmatch client's OnThrottle
-			// ratchets up (#550) -- this is a decay CREDIT only; the detector lane
-			// stays local:true and never pays the provider-request pacing pause.
-			detLane := orchestrator.NewDetectorLane(w.audioDetector, cb, w.lane.Pacer())
-			if w.detectorOrdering == "front" {
-				lanes = append([]*orchestrator.Lane{detLane}, lanes...)
-			} else {
-				lanes = append(lanes, detLane)
-			}
-			w.detectorLane = detLane
+		// Installed in BOTH dispatch modes. Parallel mode never races it (#528):
+		// the orchestrator stages an instrumental-only lane, ahead of the provider
+		// fan-out when it is first ("front"), otherwise after every provider lane
+		// has reported with nothing to commit. Racing it would let a fast
+		// gate-positive verdict beat a slower provider's lyric.
+		//
+		// REUSE the existing detector breaker across rebuilds (#531).
+		// Constructing a fresh one here discarded the accumulated trip count
+		// and open-until deadline, so a rebuild silently un-tripped a
+		// detector that had just been shut off for being unreachable -- the
+		// sidecar would be hammered again immediately instead of staying
+		// open for its backoff window. Reconfiguring in place mirrors how
+		// the circuit setters fan out across the provider lanes rather than
+		// replacing their breakers.
+		//
+		// This was latent while every rebuild-triggering setter ran only at
+		// startup (where there is no state worth keeping); it becomes live
+		// the moment anything rebuilds at runtime, e.g. a settings save that
+		// re-wires the worker.
+		cb := w.detectorBreaker
+		if cb == nil {
+			cb = circuit.New(w.circuitBackoffBase, w.circuitOpenDuration)
+			cb.SetClock(w.now)
+			w.detectorBreaker = cb
 		}
+		// No reconfiguration here: SetCircuitBackoff, SetCircuitOpenDuration
+		// and setClock now fan out to w.detectorBreaker directly, so a
+		// surviving breaker is already current. Re-applying config on every
+		// rebuild would be a second, order-dependent path to the same state.
+		// Share the primary provider lane's pacer so a detector settle credits
+		// the same ratchet-down counter the musixmatch client's OnThrottle
+		// ratchets up (#550) -- this is a decay CREDIT only; the detector lane
+		// stays local:true and never pays the provider-request pacing pause.
+		detLane := orchestrator.NewDetectorLane(w.audioDetector, cb, w.lane.Pacer())
+		if w.detectorOrdering == "front" {
+			lanes = append([]*orchestrator.Lane{detLane}, lanes...)
+		} else {
+			lanes = append(lanes, detLane)
+		}
+		w.detectorLane = detLane
 	} else {
 		w.detectorLane = nil
 	}
@@ -858,10 +848,12 @@ func (w *Worker) setClock(now func() time.Time) {
 // detector lane that could still settle items. That is worst under
 // ordering=front, whose entire purpose is settling a high-confidence
 // instrumental with zero provider requests: the detector would be unusable in
-// exactly the situation it is most valuable. The parallel-mode exclusion is
-// preserved for free, since rebuildOrchestrator leaves detectorLane nil there.
+// exactly the situation it is most valuable. Parallel mode counts the lane only
+// when it is ahead of the providers (front): a demoted one is not asked until a
+// provider has been (#528). Ordered mode counts it in either position (#1502).
 func (w *Worker) allLanesUnavailable() bool {
-	if w.detectorLane != nil && w.detectorLane.Breaker().Allow() != circuit.StateOpen {
+	staged := w.mode == orchestrator.ModeParallel && w.detectorOrdering != "front"
+	if w.detectorLane != nil && !staged && w.detectorLane.Breaker().Allow() != circuit.StateOpen {
 		return false
 	}
 	for _, l := range w.lanes {
@@ -1435,10 +1427,9 @@ func (w *Worker) run(ctx context.Context, pause func(context.Context) error) err
 // protect.
 //
 // A cache hit contacts nothing. Otherwise the answer comes from the ATTEMPTED
-// lane set, never from the winning lane: ModeParallel races every lane at once,
-// so a local lane can win a dispatch that still issued provider requests, and
-// keying off the winner would drop the throttle exactly when the most requests
-// are in flight.
+// lane set, never from the winning lane: a local lane can win a dispatch that
+// still issued provider requests (a demoted detector settling after the
+// providers missed), and keying off the winner would drop their throttle.
 //
 // An empty attempt set means "unknown", not "provider-free" -- a fetcher that
 // reports no lane attribution (any non-orchestrator caller) keeps the existing
