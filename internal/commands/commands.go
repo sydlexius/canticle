@@ -1739,7 +1739,7 @@ func buildWebAuth(ctx context.Context, cfg config.Config, sqlDB *sql.DB, store s
 	if err := bootstrapAdminFromEnv(ctx, svc); err != nil {
 		return nil, nil, nil, fmt.Errorf("bootstrap web admin from environment: %w", err)
 	}
-	auth := web.NewAuth(svc, policy, version)
+	auth := web.NewAuth(svc, policy, version, web.WithPasswordChanger(svc))
 	onboarding := web.NewOnboarding(svc, store, auth, policy, version)
 	return svc, auth, onboarding, nil
 }

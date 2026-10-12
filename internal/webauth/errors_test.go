@@ -67,11 +67,14 @@ func (failingUserStore) HasUsers(context.Context) (bool, error) { return false, 
 func (failingUserStore) RotateCredential(context.Context, string, string) (int64, error) {
 	return 0, errStore
 }
+func (failingUserStore) RotateCredentialIfCurrent(context.Context, string, string, string) (int64, error) {
+	return 0, errStore
+}
 
 type failingSessionStore struct{}
 
-func (failingSessionStore) CreateSession(context.Context, string, time.Time) (string, error) {
-	return "", errStore
+func (failingSessionStore) CreateSessionForCredential(context.Context, string, string, time.Time) (string, bool, error) {
+	return "", false, errStore
 }
 func (failingSessionStore) GetSessionByToken(context.Context, string) (Session, bool, error) {
 	return Session{}, false, errStore
@@ -119,6 +122,9 @@ func (s okUserStore) GetByUsername(context.Context, string) (User, bool, error) 
 func (s okUserStore) GetByID(context.Context, string) (User, bool, error) { return s.user, true, nil }
 func (s okUserStore) HasUsers(context.Context) (bool, error)              { return true, nil }
 func (s okUserStore) RotateCredential(context.Context, string, string) (int64, error) {
+	return 0, nil
+}
+func (s okUserStore) RotateCredentialIfCurrent(context.Context, string, string, string) (int64, error) {
 	return 0, nil
 }
 

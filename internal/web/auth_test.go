@@ -1,7 +1,10 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -545,4 +548,196 @@ func mustQueryNext(t *testing.T, location string) string {
 		t.Fatalf("parse Location %q: %v", location, err)
 	}
 	return u.Query().Get("next")
+}
+
+func TestCurrentUser(t *testing.T) {
+	policy, err := trustnet.NewPolicy([]string{"192.0.2.0/24"}, nil)
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+	a, svc := newTestAuth(t, policy)
+	withCookie := func(token string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+		req.RemoteAddr = "198.51.100.7:1234" // outside the trusted CIDR
+		req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
+		return req
+	}
+
+	t.Run("valid cookie resolves the user", func(t *testing.T) {
+		token := loginToken(t, svc)
+		want, err := svc.ValidateSession(context.Background(), token)
+		if err != nil {
+			t.Fatalf("ValidateSession: %v", err)
+		}
+		got, ok := a.currentUser(withCookie(token))
+		if !ok || got == nil {
+			t.Fatalf("currentUser = (%v, %v), want the signed-in user", got, ok)
+		}
+		if got.ID != want.ID || got.Username != testAdminUser {
+			t.Errorf("currentUser = %s/%s, want %s/%s", got.ID, got.Username, want.ID, testAdminUser)
+		}
+	})
+
+	t.Run("no cookie", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+		req.RemoteAddr = "198.51.100.7:1234"
+		if got, ok := a.currentUser(req); ok || got != nil {
+			t.Errorf("currentUser = (%v, %v), want no user", got, ok)
+		}
+	})
+
+	t.Run("unknown token", func(t *testing.T) {
+		if got, ok := a.currentUser(withCookie("not-a-real-token")); ok || got != nil {
+			t.Errorf("currentUser = (%v, %v), want no user", got, ok)
+		}
+	})
+
+	t.Run("revoked cookie", func(t *testing.T) {
+		token := loginToken(t, svc)
+		if err := svc.Logout(context.Background(), token); err != nil {
+			t.Fatalf("Logout: %v", err)
+		}
+		if got, ok := a.currentUser(withCookie(token)); ok || got != nil {
+			t.Errorf("currentUser = (%v, %v), want no user", got, ok)
+		}
+	})
+
+	// The trusted-network bypass lets a request through RequireSession with no
+	// session. It is not an identity, so there is nobody to act as.
+	t.Run("trusted network without a cookie", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+		req.RemoteAddr = "192.0.2.50:1234" // inside the trusted CIDR
+		if !a.policy.Trusted(req) {
+			t.Fatal("precondition: request is not trusted, so this proves nothing about the bypass")
+		}
+		if got, ok := a.currentUser(req); ok || got != nil {
+			t.Errorf("currentUser = (%v, %v), want no user", got, ok)
+		}
+	})
+}
+
+// An expired session resolves to no user. The service cannot mint a session
+// that is already expired (the table checks expires_at > created_at), so a real
+// session is aged in place: both stamps move to the past, as time would do.
+func TestCurrentUserExpiredCookie(t *testing.T) {
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, filepath.Join(t.TempDir(), "web.db"))
+	if err != nil {
+		t.Fatalf("dbtest.OpenAt: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	svc := webauth.NewService(webauth.NewSQLUserStore(sqlDB), webauth.NewSQLSessionStore(sqlDB))
+	if _, err := svc.Setup(context.Background(), testAdminUser, testAdminPass); err != nil {
+		t.Fatalf("Setup admin: %v", err)
+	}
+	a := NewAuth(svc, trustnet.LoopbackOnly(), "vtest")
+
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	req.RemoteAddr = "198.51.100.7:1234"
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: loginToken(t, svc)})
+	if _, ok := a.currentUser(req); !ok {
+		t.Fatal("precondition: the session does not resolve before it expires")
+	}
+
+	res, err := sqlDB.ExecContext(context.Background(),
+		`UPDATE sessions SET created_at = '2000-01-01T00:00:00Z', expires_at = '2000-01-08T00:00:00Z'`)
+	if err != nil {
+		t.Fatalf("age the session: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("aged %d sessions, want 1", n)
+	}
+	if got, ok := a.currentUser(req); ok || got != nil {
+		t.Errorf("currentUser = (%v, %v), want no user for an expired session", got, ok)
+	}
+}
+
+// Password-change attempts and logins share one limiter but not one counter,
+// and a password-change counter belongs to the USER: it holds whatever address
+// the guesses come from, and it is not another user's.
+func TestPasswordChangeLimiterNamespace(t *testing.T) {
+	const peer = "203.0.113.91:9000"
+	fromPeer := func(form url.Values) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = peer
+		addLoginCSRF(req)
+		return req
+	}
+
+	t.Run("a user's lockout locks neither login nor another user", func(t *testing.T) {
+		a, _ := newTestAuth(t, trustnet.LoopbackOnly())
+		key := passwordChangeKey("user-1")
+		for i := 0; i < defaultMaxFailures; i++ {
+			a.limiter.fail(key)
+		}
+		if ok, _ := a.limiter.allow(passwordChangeKey("user-1")); ok {
+			t.Fatal("the user's password-change key is not locked out after max failures")
+		}
+		if ok, _ := a.limiter.allow(passwordChangeKey("user-2")); !ok {
+			t.Error("one user's failures locked another user's password change")
+		}
+		rec := httptest.NewRecorder()
+		a.handleLogin(rec, fromPeer(loginForm()))
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("login status = %d, want 303: password-change failures locked /login", rec.Code)
+		}
+		// A successful login clears only the login counter.
+		if ok, _ := a.limiter.allow(key); ok {
+			t.Error("a successful login cleared the password-change lockout")
+		}
+	})
+
+	t.Run("login lockout does not lock password change", func(t *testing.T) {
+		a, _ := newTestAuth(t, trustnet.LoopbackOnly())
+		bad := url.Values{"username": {testAdminUser}, "password": {"wrong"}, "csrf_token": {testCSRFToken}}
+		var rec *httptest.ResponseRecorder
+		for i := 0; i <= defaultMaxFailures; i++ {
+			rec = httptest.NewRecorder()
+			a.handleLogin(rec, fromPeer(bad))
+		}
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("precondition: login status = %d, want 429", rec.Code)
+		}
+		if ok, _ := a.limiter.allow(passwordChangeKey("user-1")); !ok {
+			t.Error("a login lockout locked a user's password change")
+		}
+	})
+}
+
+// failingSessions is the real service with session validation failing as a
+// broken database would: an error that is not ErrInvalidSession.
+type failingSessions struct{ SessionService }
+
+func (failingSessions) ValidateSession(context.Context, string) (*webauth.User, error) {
+	return nil, errors.New("database is down")
+}
+
+// A store failure and an invalid session both resolve to no user; only the
+// failure is logged, and never with the cookie value.
+func TestCurrentUserLogsStoreFailure(t *testing.T) {
+	const token = "session-cookie-value"
+	_, svc := newTestAuth(t, trustnet.LoopbackOnly())
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	req := httptest.NewRequest(http.MethodGet, "/settings", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})
+
+	if got, ok := NewAuth(svc, nil, "vtest").currentUser(req); ok || got != nil {
+		t.Fatalf("invalid session: currentUser = (%v, %v), want no user", got, ok)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("an ordinary invalid session was logged: %q", logs.String())
+	}
+
+	if got, ok := NewAuth(failingSessions{svc}, nil, "vtest").currentUser(req); ok || got != nil {
+		t.Fatalf("store failure: currentUser = (%v, %v), want no user", got, ok)
+	}
+	if !strings.Contains(logs.String(), "session validation failed") || !strings.Contains(logs.String(), "database is down") {
+		t.Errorf("a store failure was not logged with its cause; log = %q", logs.String())
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Error("the log carries the session cookie value")
+	}
 }

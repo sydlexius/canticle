@@ -29,9 +29,13 @@ type Session struct {
 
 // SessionStore persists login sessions keyed by the SHA-256 of the raw token.
 type SessionStore interface {
-	// CreateSession mints a raw token, stores only its SHA-256, and returns the
-	// raw token to the caller (the only time it exists outside the browser).
-	CreateSession(ctx context.Context, userID string, expiresAt time.Time) (rawToken string, err error)
+	// CreateSessionForCredential mints a raw token and stores its SHA-256 ONLY IF
+	// the user's stored password hash still equals passwordHash, the hash the
+	// caller verified a password against (or just rotated to). The check and the
+	// insert are one statement, so a rotation cannot commit between them: created
+	// is false, with no token and no row, when the hash changed underneath or the
+	// user is gone. The raw token is returned to the caller only here.
+	CreateSessionForCredential(ctx context.Context, userID, passwordHash string, expiresAt time.Time) (rawToken string, created bool, err error)
 	// GetSessionByToken resolves rawToken via its SHA-256 and returns the session
 	// only if it has not expired. ok is false for unknown or expired tokens.
 	GetSessionByToken(ctx context.Context, rawToken string) (session Session, ok bool, err error)
@@ -56,7 +60,9 @@ func NewSQLSessionStore(db *sql.DB) *SQLSessionStore {
 }
 
 // CreateSession generates a 32-byte base64url token, persists its SHA-256 hash
-// with the given expiry, and returns the raw token.
+// with the given expiry, and returns the raw token. It is unconditional and is
+// deliberately not part of SessionStore: a session issued for a credential goes
+// through CreateSessionForCredential.
 func (s *SQLSessionStore) CreateSession(ctx context.Context, userID string, expiresAt time.Time) (string, error) {
 	if userID == "" {
 		return "", fmt.Errorf("webauth: session user id must not be empty")
@@ -73,6 +79,42 @@ func (s *SQLSessionStore) CreateSession(ctx context.Context, userID string, expi
 		return "", fmt.Errorf("webauth: create session: %w", err)
 	}
 	return raw, nil
+}
+
+// CreateSessionForCredential inserts the session only while the user's stored
+// hash equals passwordHash (see the interface doc). The comparison and the
+// insert are ONE statement, which SQLite runs under its single write lock:
+// against a rotation transaction it either commits first, and that rotation's
+// DELETE then revokes the session, or runs after the rotation committed, sees
+// the new hash and inserts nothing. A session for a superseded credential
+// therefore never outlives the rotation, from this process or from the CLI's.
+func (s *SQLSessionStore) CreateSessionForCredential(ctx context.Context, userID, passwordHash string, expiresAt time.Time) (string, bool, error) {
+	if userID == "" {
+		return "", false, fmt.Errorf("webauth: session user id must not be empty")
+	}
+	if passwordHash == "" {
+		return "", false, fmt.Errorf("webauth: session credential hash must not be empty")
+	}
+	raw, err := s.newToken()
+	if err != nil {
+		return "", false, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (token_hash, user_id, expires_at)
+		 SELECT ?, id, ? FROM users WHERE id = ? AND password_hash = ?`,
+		hashToken(raw), formatTime(expiresAt), userID, passwordHash,
+	)
+	if err != nil {
+		return "", false, fmt.Errorf("webauth: create session: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return "", false, fmt.Errorf("webauth: create session rows: %w", err)
+	}
+	if n == 0 {
+		return "", false, nil
+	}
+	return raw, true, nil
 }
 
 // GetSessionByToken returns the unexpired session for rawToken, or ok=false.

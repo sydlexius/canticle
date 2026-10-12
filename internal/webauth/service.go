@@ -25,14 +25,20 @@ var (
 	// ErrInvalidSession is returned by ValidateSession for an unknown, expired, or
 	// orphaned session token.
 	ErrInvalidSession = errors.New("webauth: invalid session")
-	// ErrPasswordTooShort is returned by Setup and SetPassword when the password
-	// is shorter than MinPasswordLength.
+	// ErrPasswordTooShort is returned by Setup, SetPassword and ChangePassword
+	// when the password is shorter than MinPasswordLength.
 	ErrPasswordTooShort = fmt.Errorf("webauth: password must be at least %d characters", MinPasswordLength)
-	// ErrUserNotFound is returned by SetPassword when the named user does not
-	// exist. Unlike Login, SetPassword is an administrative operation reached
-	// only by an operator who already controls the host or an authenticated
-	// session, so naming the failure is an aid rather than an enumeration risk.
+	// ErrUserNotFound is returned by SetPassword and ChangePassword when the
+	// named user does not exist. Unlike Login, both are reached only by an
+	// operator who already controls the host or an authenticated session, so
+	// naming the failure is an aid rather than an enumeration risk.
 	ErrUserNotFound = errors.New("webauth: user not found")
+	// ErrReauthRequired is returned by ChangePassword when the rotation committed
+	// but the fresh session could not be created, or was refused because yet
+	// another rotation committed straight after it. The password HAS changed and
+	// every earlier session is revoked, so the caller must not report the change
+	// as failed: it sends the user to sign in again with the new password.
+	ErrReauthRequired = errors.New("webauth: password changed, sign in again")
 )
 
 // Service ties the user and session stores together into the browser-auth core:
@@ -154,10 +160,74 @@ func (s *Service) SetPassword(ctx context.Context, username, password string) er
 	return nil
 }
 
+// ChangePassword replaces the password of the user with id userID after
+// verifying currentPassword, revokes every session of that user, and returns the
+// raw token of ONE fresh session for the browser that made the change (#545).
+//
+// A wrong current password returns ErrInvalidCredentials and changes nothing.
+// The new password's length is checked before any hash is computed, so a refused
+// change costs no Argon2id pass beyond the verify. The hash update and the
+// revocation are one transaction, and a compare-and-swap on the hash that was
+// verified (RotateCredentialIfCurrent): if another rotation committed in
+// between, this one loses with ErrInvalidCredentials rather than overwriting
+// it, so a stale password cannot undo an operator's rotation. The session is
+// created after it commits, through the same path Login uses rather than Login
+// itself, which would spend a second Argon2id pass and add a second failure
+// point, and it is issued for the NEW hash: if another rotation replaced that
+// hash first, no session is created. If that session cannot be created the
+// password has still changed, and the error wraps ErrReauthRequired so the
+// caller can say so.
+func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) (string, error) {
+	user, ok, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("webauth: change password: %w", err)
+	}
+	if !ok {
+		return "", ErrUserNotFound
+	}
+	valid, err := VerifyPassword(user.PasswordHash, currentPassword)
+	if err != nil {
+		// As in Login: an unparsable stored hash is a server-side defect, logged
+		// without detail reaching the caller.
+		slog.Error("webauth: stored password hash is unparsable", "user_id", user.ID, "error", err)
+		return "", ErrInvalidCredentials
+	}
+	if !valid {
+		return "", ErrInvalidCredentials
+	}
+	if len(newPassword) < MinPasswordLength {
+		return "", ErrPasswordTooShort
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return "", fmt.Errorf("webauth: change password: %w", err)
+	}
+	// The swap is keyed by username; the one just loaded by id names the same
+	// row. It reports ErrUserNotFound if the user vanished since the load and
+	// ErrInvalidCredentials if the verified hash is no longer the stored one.
+	if _, err := s.users.RotateCredentialIfCurrent(ctx, user.Username, user.PasswordHash, hash); err != nil {
+		if errors.Is(err, ErrUserNotFound) || errors.Is(err, ErrInvalidCredentials) {
+			return "", err
+		}
+		return "", fmt.Errorf("webauth: change password: %w", err)
+	}
+	token, err := s.newSession(ctx, user.ID, hash)
+	if err != nil {
+		return "", fmt.Errorf("webauth: change password: %w: %w", ErrReauthRequired, err)
+	}
+	return token, nil
+}
+
 // Login verifies credentials and, on success, creates a session and returns its
 // raw token. It is constant-time and enumeration-safe: an unknown username still
 // runs an Argon2id verify against a dummy hash, and both the unknown-user and
 // wrong-password paths return the identical ErrInvalidCredentials.
+//
+// The session is created only for the credential that was verified. A rotation
+// (ChangePassword, or SetPassword from the CLI's separate process) that commits
+// after the verify makes the insert match nothing, and Login then returns
+// ErrInvalidCredentials: the password it checked is no longer the password, so
+// no session issued under it survives the rotation's revocation.
 func (s *Service) Login(ctx context.Context, username, password string) (string, error) {
 	user, ok, err := s.users.GetByUsername(ctx, username)
 	if err != nil {
@@ -179,10 +249,29 @@ func (s *Service) Login(ctx context.Context, username, password string) (string,
 	if !valid {
 		return "", ErrInvalidCredentials
 	}
-	expiresAt := s.now().Add(s.sessionTTL)
-	token, err := s.sessions.CreateSession(ctx, user.ID, expiresAt)
+	token, err := s.newSession(ctx, user.ID, user.PasswordHash)
+	if errors.Is(err, ErrInvalidCredentials) {
+		return "", ErrInvalidCredentials
+	}
 	if err != nil {
 		return "", fmt.Errorf("webauth: login: %w", err)
+	}
+	return token, nil
+}
+
+// newSession creates a session for userID that expires one session TTL from now
+// and returns its raw token, but only while passwordHash is still the user's
+// stored hash: the one Login verified, or the one ChangePassword rotated to. If
+// the credential changed underneath (or the user is gone) it creates nothing
+// and returns ErrInvalidCredentials. Login and ChangePassword both issue
+// through it.
+func (s *Service) newSession(ctx context.Context, userID, passwordHash string) (string, error) {
+	token, created, err := s.sessions.CreateSessionForCredential(ctx, userID, passwordHash, s.now().Add(s.sessionTTL))
+	if err != nil {
+		return "", err
+	}
+	if !created {
+		return "", ErrInvalidCredentials
 	}
 	return token, nil
 }
