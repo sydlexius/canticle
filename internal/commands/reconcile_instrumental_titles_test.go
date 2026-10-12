@@ -102,9 +102,15 @@ func (f *ritFixture) db(t *testing.T, fn func(q func(string, ...any) string)) {
 // audio file at all) and its .lrc is dated off from the settle.
 func (f *ritFixture) row(t *testing.T, fileAlbum string, off time.Duration) (id, lrc string) {
 	t.Helper()
+	return f.titled(t, "(Instrumental)", fileAlbum, off)
+}
+
+// titled is row with the given title suffix in place of "(Instrumental)".
+func (f *ritFixture) titled(t *testing.T, suffix, fileAlbum string, off time.Duration) (id, lrc string) {
+	t.Helper()
 	f.n++
 	audio := fmt.Sprintf("%d.flac", f.n)
-	title := fmt.Sprintf("Paper Lighthouse %d (Instrumental)", f.n)
+	title := fmt.Sprintf("Paper Lighthouse %d %s", f.n, suffix)
 	if fileAlbum != ritNoFile {
 		if err := testutil.WriteFLACFileWithComments(f.dir, audio, 44100, 441000, map[string]string{"ALBUM": fileAlbum}); err != nil {
 			t.Fatal(err)
@@ -173,18 +179,31 @@ func ritRead(t *testing.T, path string) string {
 
 // A dry run counts and changes nothing; --yes removes the lyric file dated at
 // the settle, with one backup record and one tail line per row, and reopens the
-// row. The file dated three hours later is kept and counted not provable.
+// row. The file dated three hours later is kept and counted not provable. A
+// Weak title and an a cappella title are counted and left alone in both modes,
+// though their files are dated at the settle too.
 func TestReconcileInstrumentalTitlesDryRunThenApply(t *testing.T) {
 	f := newRITFixture(t, "strong", "", false)
 	good, goodLRC := f.row(t, "", 0)
 	late, lateLRC := f.row(t, "", 3*time.Hour)
+	weak, weakLRC := f.titled(t, "- Instrumental Demo", "", 0)
+	capp, cappLRC := f.titled(t, "(A Cappella)", "", 0)
+	// kept fails when a Weak or a cappella row, or its lyric file, was touched.
+	kept := func(label string, blocks int) {
+		t.Helper()
+		for _, r := range []struct{ id, lrc string }{{weak, weakLRC}, {capp, cappLRC}} {
+			if got, want := f.state(t, r.id), fmt.Sprintf("done|musixmatch|%d", blocks); got != want || ritRead(t, r.lrc) != ritLRC {
+				t.Errorf("%s: row %s = %s, want %s with its lyric file as written", label, r.id, got, want)
+			}
+		}
+	}
 
 	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{Tail: f.tail, Backup: f.backup})
 	if code != 0 {
 		t.Fatalf("dry run = %d:\n%s", code, out)
 	}
 	ritWant(t, "dry run", out, "dry run: nothing changed (pass --yes with --backup <file> to repair)", "instrumental_title.mode: strong",
-		"rows examined: 2", "strong: 2", "strong instrumental bracket: 2", "candidates: 2",
+		"rows examined: 4", "no signal or excluded (a cappella, karaoke): 1", "weak: 1", "strong: 2", "strong instrumental bracket: 2", "candidates: 2",
 		"skipped, not provable (file not dated at the settle): 1", "rows that would be repaired: 1", "lyric files that would be backed up: 1")
 	if strings.Contains(out, "rows repaired") || strings.Contains(out, "backup:") {
 		t.Errorf("dry run prints an applied line:\n%s", out)
@@ -196,6 +215,7 @@ func TestReconcileInstrumentalTitlesDryRunThenApply(t *testing.T) {
 	if ritRead(t, goodLRC) != ritLRC || f.state(t, good) != "done|musixmatch|0" {
 		t.Errorf("dry run changed the row or its file: %s", f.state(t, good))
 	}
+	kept("dry run", 0)
 	for _, p := range []string{f.backup, f.tailApply} {
 		if _, err := os.Stat(p); err == nil {
 			t.Errorf("dry run created %s", filepath.Base(p))
@@ -206,7 +226,7 @@ func TestReconcileInstrumentalTitlesDryRunThenApply(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("apply = %d:\n%s", code, out)
 	}
-	ritWant(t, "apply", out, "candidates: 2", "skipped, not provable (file not dated at the settle): 1", "errors: 0", "rows repaired: 1",
+	ritWant(t, "apply", out, "rows examined: 4", "no signal or excluded (a cappella, karaoke): 1", "weak: 1", "candidates: 2", "skipped, not provable (file not dated at the settle): 1", "errors: 0", "rows repaired: 1",
 		"lyric files backed up: 1", "lyric files removed: 1", "new blocks: 1", "rows reopened: 1", "backup: "+f.backup)
 	ritNoLeak(t, "apply stdout", out, f)
 	if _, err := os.Stat(goodLRC); err == nil {
@@ -218,6 +238,7 @@ func TestReconcileInstrumentalTitlesDryRunThenApply(t *testing.T) {
 	if got := f.state(t, good); got != "pending|null|1" {
 		t.Errorf("repaired row = %s, want it reopened with one block", got)
 	}
+	kept("apply", 1)
 	records := strings.Split(strings.TrimSpace(ritRead(t, f.backup)), "\n")
 	if len(records) != 1 || !strings.Contains(records[0], `"op":"reconcile-instrumental-titles","work_item_id":`+good+`,`) {
 		t.Errorf("backup = %q; want one record for row %s", records, good)
