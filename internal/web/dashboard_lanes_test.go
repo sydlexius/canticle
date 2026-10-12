@@ -201,8 +201,8 @@ func TestDashboard_UnconfiguredLaneNotActive(t *testing.T) {
 	}
 }
 
-// TestDashboard_DetectorHistoryWithoutHealth: with the detector off or in
-// parallel mode there is no detector health entry, but its recorded history
+// TestDashboard_DetectorHistoryWithoutHealth: with no classifier configured
+// there is no detector health entry, but its recorded history
 // still renders a tile, and that tile gets no status line (it is not a lyrics
 // source). A history-only provider lane in the same render still reads
 // "Not active".

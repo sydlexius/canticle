@@ -1470,14 +1470,21 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if cfg.InstrumentalDetector.CooldownSeconds < 0 {
 				cfg.InstrumentalDetector.CooldownSeconds = 0
 			}
-			// Ordering: blank (key omitted from TOML) restores the default; an
-			// unrecognized value is also reset to the default rather than left to
-			// silently behave as "demoted" via the worker's any-other-value
-			// fallback, so a typo in the file is visibly corrected rather than
-			// hidden.
-			if cfg.InstrumentalDetector.Ordering != detectorOrderingFront && cfg.InstrumentalDetector.Ordering != detectorOrderingDemoted {
-				cfg.InstrumentalDetector.Ordering = d.InstrumentalDetector.Ordering
+			// Ordering: trimmed and lowercased first, as `config set`, the env
+			// override and the settings page do, so every path accepts the same
+			// spellings (#1507). Blank (key omitted from TOML) restores the
+			// default. An unrecognized value is also reset to the default rather
+			// than left to behave as "demoted" via the worker's any-other-value
+			// fallback, and the reset is logged so a typo in the file is not hidden.
+			ordering := strings.ToLower(strings.TrimSpace(cfg.InstrumentalDetector.Ordering))
+			if ordering != detectorOrderingFront && ordering != detectorOrderingDemoted {
+				if ordering != "" {
+					slog.Warn("instrumental_detector.ordering is not front or demoted; using the default",
+						"key", "instrumental_detector.ordering", "value", cfg.InstrumentalDetector.Ordering, "default", d.InstrumentalDetector.Ordering) //nolint:gosec // reason: G706: tainted config value passed as a structured slog field, not a format string
+				}
+				ordering = d.InstrumentalDetector.Ordering
 			}
+			cfg.InstrumentalDetector.Ordering = ordering
 			// Backfill sweep bounds. BatchSize/IntervalMinutes < 1 would make the
 			// sweep either classify nothing or spin its ticker, so both restore the
 			// default rather than being honored. CooldownSeconds=0 IS a valid user

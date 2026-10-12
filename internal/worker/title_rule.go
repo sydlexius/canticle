@@ -190,8 +190,10 @@ func (w *Worker) SetTitleRuleWeak(enabled bool) { w.titleRuleWeak = enabled }
 // detector ahead of the cache and the providers. Every "no" leaves the row on
 // the path it takes today:
 //
-//   - the tier is off, or dispatch is parallel (detector-first under parallel
-//     is #528's to design; this is the one condition to change there);
+//   - the tier is off. Dispatch mode does not matter (#1508): the ask happens
+//     here, before any dispatch, and an answer empties the path the dispatch
+//     hands its lanes, so the detector lane staged under parallel returns a
+//     miss without running the detector, exactly as it does under ordered;
 //   - no detector lane is held, or detection is off for this item (an empty
 //     path: disabled, no source file, or the karaoke skip);
 //   - an upgrade trip, which has a file by definition (a word-recheck row
@@ -201,7 +203,7 @@ func (w *Worker) SetTitleRuleWeak(enabled bool) { w.titleRuleWeak = enabled }
 //     detector settle uses the ordinary write, so the stem rule is enforced
 //     here, before the detector is asked at all.
 func (w *Worker) weakTitleEligible(item queue.WorkItem, track models.Track, detectorPath string) bool {
-	if !w.titleRuleWeak || w.mode != orchestrator.ModeOrdered {
+	if !w.titleRuleWeak {
 		return false
 	}
 	if w.detectorLane == nil || detectorPath == "" || item.UpgradeQueued {

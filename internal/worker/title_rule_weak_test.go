@@ -195,14 +195,6 @@ func TestWeakTitle_Unchanged(t *testing.T) {
 		// A probe that fails (the directory is gone) is a no, not a yes.
 		{name: "second output directory gone", track: weakTrack, paths: second, want: "failed|null|null"},
 		{name: "mode strong", track: weakTrack, setup: func(_ *testing.T, r *titleRig) { r.w.SetTitleRuleWeak(false) }, want: "done|musixmatch|unsynced"},
-		{name: "parallel dispatch", track: weakTrack, setup: func(_ *testing.T, r *titleRig) {
-			r.w.SetRaceWait(time.Millisecond)
-			r.w.SetProvidersMode(orchestrator.ModeParallel)
-			// No lane is held under parallel today. Hold a real one, built as
-			// rebuildOrchestrator builds it, so the mode check itself is pinned
-			// for the day #528 holds the lane there.
-			r.w.detectorLane = orchestrator.NewDetectorLane(r.w.audioDetector, r.w.detectorBreaker, r.w.lane.Pacer())
-		}, want: "done|musixmatch|unsynced"},
 		{name: "no detector", track: weakTrack, setup: func(_ *testing.T, r *titleRig) { r.w.EnableAudioDetector(nil) }, want: "done|musixmatch|unsynced"},
 		{name: "open breaker", track: weakTrack, setup: func(_ *testing.T, r *titleRig) { r.w.detectorBreaker.Trip() }, want: "done|musixmatch|unsynced"},
 		{name: "detection off for the item", track: weakTrack, setup: func(_ *testing.T, r *titleRig) { r.w.SetInstrumentalDetectionDefault(false) }, want: "done|musixmatch|unsynced"},
@@ -258,6 +250,92 @@ func TestWeakTitle_Unchanged(t *testing.T) {
 				t.Errorf("primary calls = %d; want 1", r.primary.calls)
 			}
 		})
+	}
+}
+
+// TestWeakTitle_Parallel: the tier acts under providers.mode = "parallel" as it
+// does under ordered (#1508). The dispatch stages the detector lane (before the
+// provider race under "front", after it under "demoted"), so each case also
+// pins that the staged lane does not run the detector a second time once the
+// early ask has answered.
+func TestWeakTitle_Parallel(t *testing.T) {
+	for _, ordering := range []string{"demoted", "front"} {
+		rig := func(t *testing.T, verdict bool) (*titleRig, *fakeDetector) {
+			r, det := newWeakRig(t, weakTrack, verdict)
+			r.w.SetRaceWait(time.Millisecond)
+			r.w.SetProvidersMode(orchestrator.ModeParallel)
+			r.w.SetDetectorOrdering(ordering)
+			if r.w.detectorLane == nil || r.w.mode != orchestrator.ModeParallel {
+				t.Fatalf("rig: detector lane held = %v, mode = %v; want a held lane under parallel", r.w.detectorLane != nil, r.w.mode)
+			}
+			return r, det
+		}
+		t.Run(ordering+", detector agrees", func(t *testing.T) {
+			r, det := rig(t, true)
+			r.run(t)
+			if len(det.calls) != 1 || r.fetches() != 0 {
+				t.Errorf("detector calls = %d, provider requests = %d; want 1, 0", len(det.calls), r.fetches())
+			}
+			if got, want := r.cols(t, "status", "provider_lane", "outcome_type"), "done|detector|instrumental"; got != want {
+				t.Errorf("status|lane|outcome = %q; want %q", got, want)
+			}
+		})
+		for _, miss := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, detector disagrees, every provider misses=%v", ordering, miss), func(t *testing.T) {
+				r, det := rig(t, false)
+				want := "done|musixmatch|unsynced"
+				if miss {
+					r.primary.err, want = musixmatch.ErrNotFound, "deferred|null|null"
+				}
+				r.run(t)
+				if len(det.calls) != 1 {
+					t.Errorf("detector calls = %d; want exactly 1", len(det.calls))
+				}
+				if r.primary.calls != 1 {
+					t.Errorf("primary calls = %d; want 1", r.primary.calls)
+				}
+				if got := r.cols(t, "status", "provider_lane", "outcome_type"); got != want {
+					t.Errorf("status|lane|outcome = %q; want %q", got, want)
+				}
+			})
+		}
+		t.Run(ordering+", detector still starting", func(t *testing.T) {
+			r, det := rig(t, true)
+			det.err = fmt.Errorf("dial refused: %w", detector.ErrClassifierNotReady)
+			r.primary.err = musixmatch.ErrNotFound
+			r.run(t)
+			if len(det.calls) != 1 {
+				t.Errorf("detector dials = %d; want exactly 1", len(det.calls))
+			}
+			if got := r.cols(t, "status", "miss_count"); got != "pending|0" {
+				t.Errorf("status|miss_count = %q; want pending|0 (released, no miss)", got)
+			}
+		})
+		// An outage (not a boot) on the early ask: the staged lane does not dial
+		// the detector again, and the row gets what the providers give it.
+		for _, miss := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, detector outage, every provider misses=%v", ordering, miss), func(t *testing.T) {
+				r, det := rig(t, true)
+				det.err = errors.New("sidecar returned 500")
+				cols, want := []string{"status", "provider_lane", "outcome_type", "instrumental_result"}, "done|musixmatch|unsynced|null"
+				if miss {
+					r.primary.err = musixmatch.ErrNotFound
+					cols, want = []string{"status", "miss_count", "outcome_type"}, "deferred|1|null"
+				}
+				r.run(t)
+				if len(det.calls) != 1 {
+					t.Errorf("detector dials = %d; want exactly 1", len(det.calls))
+				}
+				if got := r.cols(t, cols...); got != want {
+					t.Errorf("%s = %q; want %q", strings.Join(cols, "|"), got, want)
+				}
+				if !miss {
+					if body := r.read(t, "track.txt"); !strings.Contains(body, titleRuleWords) {
+						t.Errorf("track.txt = %q; want the provider's words", body)
+					}
+				}
+			})
+		}
 	}
 }
 

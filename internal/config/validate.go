@@ -130,6 +130,8 @@ var enumValues = map[string][]string{
 	"output.word_sync_mode": wordSyncModeStrings(wordSyncModes()),
 	// Same single-source rule: the dropdown and ValidateAndSet read the loader's list.
 	"instrumental_title.mode": instrumentalTitleModeStrings(),
+	// The loader's two constants, default first (#1507).
+	"instrumental_detector.ordering": {detectorOrderingDemoted, detectorOrderingFront},
 }
 
 // instrumentalTitleModeStrings flattens the mode set to plain strings.
@@ -372,6 +374,11 @@ func validatorFor(f FieldSpec) Validator {
 		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "instrumental_title.mode":
 		// NORMALIZED like the timing enums: the loader lowercases and trims first.
+		return ValidateNormalizedEnum(enumValues[f.Path]...)
+	case "instrumental_detector.ordering":
+		// NORMALIZED: `config set`, the env override and the loader all trim and
+		// lowercase this value, so a verbatim comparison here would refuse a
+		// spelling the other paths accept (#1507).
 		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "timing_validation.on_mis_synced", "timing_validation.on_categorical":
 		// NORMALIZED, because the loader normalizes these two before validating

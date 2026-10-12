@@ -157,21 +157,21 @@ describe("save status reporting", () => {
     // The server sends plain text, not JSON, and settings.js shows it verbatim.
     // This is how a cross-field invariant rejection reaches the operator.
     const h = loadSettings(
-      fieldCard({ path: "providers.mode", tier: "caution", label: "Provider mode", control: textControl("providers.mode") }),
+      fieldCard({ path: "server.scan_schedule.frequency", tier: "caution", label: "Scan frequency", control: textControl("server.scan_schedule.frequency") }),
       {
         responses: [
-          { ok: false, status: 400, text: "config: instrumental_detector.ordering=front requires providers.mode=ordered" },
+          { ok: false, status: 400, text: "config: server.scan_schedule.day is required when server.scan_schedule.frequency is \"weekly\" (e.g. day = \"sunday\")" },
         ],
       },
     );
 
-    h.card("providers.mode").querySelector(".mx-settings-save").click();
+    h.card("server.scan_schedule.frequency").querySelector(".mx-settings-save").click();
     await h.settle();
 
-    expect(h.statusOf("providers.mode")).toBe(
-      "Error: config: instrumental_detector.ordering=front requires providers.mode=ordered",
+    expect(h.statusOf("server.scan_schedule.frequency")).toBe(
+      "Error: config: server.scan_schedule.day is required when server.scan_schedule.frequency is \"weekly\" (e.g. day = \"sunday\")",
     );
-    const status = h.card("providers.mode").querySelector(".mx-settings-field-status");
+    const status = h.card("server.scan_schedule.frequency").querySelector(".mx-settings-field-status");
     expect(status.classList.contains("mx-status-error")).toBe(true);
   });
 

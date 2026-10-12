@@ -460,6 +460,13 @@ var modeOptionLabels = map[string]string{
 	"parallel": "In parallel (race them)",
 }
 
+// detectorOrderingLabels says when the detector is asked relative to the lyrics
+// sources, in place of the bare "demoted" and "front" tokens.
+var detectorOrderingLabels = map[string]string{
+	"demoted": "After the lyrics sources miss",
+	"front":   "Before any lyrics source",
+}
+
 // timingActionLabels gives the two remediation dropdowns plain-language labels.
 //
 // THE PURGE LABEL IS LOAD-BEARING. That option UNLINKS a lyric file, and the
@@ -577,6 +584,10 @@ func selectOptions(path, effective string) []templates.SettingsOption {
 			}
 		case "server.scan_schedule.day":
 			if l, ok := scanDayLabels[v]; ok {
+				label = l
+			}
+		case "instrumental_detector.ordering":
+			if l, ok := detectorOrderingLabels[v]; ok {
 				label = l
 			}
 		}
@@ -1136,6 +1147,10 @@ func rawConfigValue(cfg config.Config, path string) string {
 		return joinSlice(cfg.InstrumentalDetector.InstrumentalClasses)
 	case "instrumental_detector.cooldown_seconds":
 		return strconv.Itoa(cfg.InstrumentalDetector.CooldownSeconds)
+	case "instrumental_detector.ordering":
+		// Without this arm the select marks no option, the browser shows the
+		// first one, and a save of the card writes it over the stored value.
+		return cfg.InstrumentalDetector.Ordering
 	case "instrumental_detector.backfill.enabled":
 		return strconv.FormatBool(cfg.InstrumentalDetector.Backfill.Enabled)
 	case "instrumental_detector.backfill.batch_size":

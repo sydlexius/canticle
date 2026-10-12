@@ -850,7 +850,11 @@ func (w *Worker) setClock(now func() time.Time) {
 // instrumental with zero provider requests: the detector would be unusable in
 // exactly the situation it is most valuable. Parallel mode counts the lane only
 // when it is ahead of the providers (front): a demoted one is not asked until a
-// provider has been (#528). Ordered mode counts it in either position (#1502).
+// provider has been (#528). The one exception is a Weak-titled row's early ask
+// (#1508), which runs before dispatch in either position whenever the worker
+// is not idle. It is not counted here, so it does not wake a worker whose
+// providers are all unavailable. Ordered mode counts the lane in either
+// position (#1502).
 func (w *Worker) allLanesUnavailable() bool {
 	staged := w.mode == orchestrator.ModeParallel && w.detectorOrdering != "front"
 	if w.detectorLane != nil && !staged && w.detectorLane.Breaker().Allow() != circuit.StateOpen {
