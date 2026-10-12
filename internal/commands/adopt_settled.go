@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -40,13 +41,45 @@ func (b *adoptBackup) append(rec queue.AdoptRecord) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("write adopt backup record: %w", pathlessErr(err))
+	return appendLineOrRollback(f, append(line, '\n'))
+}
+
+// backupHandle is the part of *os.File appendLineOrRollback needs.
+type backupHandle interface {
+	io.Writer
+	Sync() error
+	Stat() (os.FileInfo, error)
+	Truncate(size int64) error
+}
+
+// appendLineOrRollback writes one record and syncs it. A short or failed write
+// or a failed sync restores the file to its prior length (and syncs that), so
+// a later append on the O_APPEND handle never lands on a partial tail. Errors
+// are path-free; a failed rollback is named in the error.
+func appendLineOrRollback(f backupHandle, rec []byte) error {
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat adopt backup: %w", pathlessErr(err))
 	}
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync adopt backup record: %w", pathlessErr(err))
+	before := fi.Size()
+	n, err := f.Write(rec)
+	if err == nil && n < len(rec) {
+		err = io.ErrShortWrite
 	}
-	return nil
+	op := "write"
+	if err == nil {
+		if err = f.Sync(); err == nil {
+			return nil
+		}
+		op = "sync"
+	}
+	if rerr := f.Truncate(before); rerr != nil {
+		return fmt.Errorf("%s adopt backup record: %w; rollback failed, the backup may end in a partial record: %w", op, pathlessErr(err), pathlessErr(rerr))
+	}
+	if rerr := f.Sync(); rerr != nil {
+		return fmt.Errorf("%s adopt backup record: %w; rollback sync failed: %w", op, pathlessErr(err), pathlessErr(rerr))
+	}
+	return fmt.Errorf("%s adopt backup record: %w", op, pathlessErr(err))
 }
 
 // pathlessErr strips the *os.PathError wrapper, whose text carries the file

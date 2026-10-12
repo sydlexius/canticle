@@ -37,7 +37,7 @@ type AdoptCounts struct {
 	Unexpected    int // the store returned a result this adopter does not expect; nothing assumed
 	NoSidecar     int // done index row, no lyric file beside the audio; not adopted
 	Unreadable    int // lyric file present but could not be classified
-	NoIdentity    int // row carries no artist/title identity
+	NoIdentity    int // row lacks an artist or a title key (half-empty pairs collide)
 	WriteFailed   int // adoption write or backup failed; database unchanged
 	BudgetHit     bool
 }
@@ -114,7 +114,7 @@ func (a *Adopter) Run(ctx context.Context, libraryID int64, pathPrefix string) (
 			if err := ctx.Err(); err != nil {
 				return n, fmt.Errorf("scan: adopt: %w", err)
 			}
-			if c.ArtistKey == "" && c.TitleKey == "" {
+			if c.ArtistKey == "" || c.TitleKey == "" {
 				n.NoIdentity++
 				continue
 			}

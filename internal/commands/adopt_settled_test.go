@@ -3,6 +3,8 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -100,4 +102,83 @@ func TestSchedulerAdoptsASettledFileAfterTheScan(t *testing.T) {
 	if status != "done" || outcome != "synced" || links != 1 {
 		t.Errorf("row = %s/%s links=%d, want a linked done/synced row", status, outcome, links)
 	}
+}
+
+// faultyHandle wraps a real file and injects a short write, a failed sync, or
+// a failed rollback truncate.
+type faultyHandle struct {
+	*os.File
+	short, failSync, failTrunc bool
+}
+
+func (h *faultyHandle) Write(p []byte) (int, error) {
+	if h.short {
+		return h.File.Write(p[:len(p)/2])
+	}
+	return h.File.Write(p)
+}
+
+func (h *faultyHandle) Sync() error {
+	if h.failSync {
+		h.failSync = false
+		return errors.New("injected sync failure")
+	}
+	return h.File.Sync()
+}
+
+func (h *faultyHandle) Truncate(n int64) error {
+	if h.failTrunc {
+		return errors.New("injected truncate failure")
+	}
+	return h.File.Truncate(n)
+}
+
+// A short write or a failed sync rolls the file back to its prior length, so a
+// later append yields only well-formed JSONL; a failed rollback is named.
+func TestAppendLineOrRollbackLeavesNoPartialTail(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		h    faultyHandle
+	}{{"short write", faultyHandle{}}, {"sync failure", faultyHandle{}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := os.OpenFile(filepath.Join(t.TempDir(), "b.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			tc.h.File = f
+			first := []byte("{\"n\":1}\n")
+			if err := appendLineOrRollback(&tc.h, first); err != nil {
+				t.Fatal(err)
+			}
+			tc.h.short, tc.h.failSync = tc.name == "short write", tc.name == "sync failure"
+			if err := appendLineOrRollback(&tc.h, []byte("{\"n\":2}\n")); err == nil {
+				t.Fatal("injected fault produced no error")
+			}
+			if got, _ := os.ReadFile(f.Name()); !bytes.Equal(got, first) {
+				t.Fatalf("file after a failed append = %q, want it unchanged", got)
+			}
+			tc.h.short = false
+			if err := appendLineOrRollback(&tc.h, []byte("{\"n\":3}\n")); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := os.ReadFile(f.Name())
+			for _, l := range strings.Split(strings.TrimSuffix(string(got), "\n"), "\n") {
+				if !json.Valid([]byte(l)) {
+					t.Errorf("malformed JSONL line %q", l)
+				}
+			}
+		})
+	}
+	t.Run("rollback failure is reported and path-free", func(t *testing.T) {
+		f, err := os.OpenFile(filepath.Join(t.TempDir(), "b.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		err = appendLineOrRollback(&faultyHandle{File: f, short: true, failTrunc: true}, []byte("{\"n\":1}\n"))
+		if err == nil || !strings.Contains(err.Error(), "rollback failed") || strings.Contains(err.Error(), f.Name()) {
+			t.Errorf("err = %v, want a path-free rollback-failed error", err)
+		}
+	})
 }

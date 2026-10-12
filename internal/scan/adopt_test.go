@@ -373,3 +373,16 @@ func TestAdoptCountsEachStoreResultWithoutWrites(t *testing.T) {
 		})
 	}
 }
+
+// A half-empty identity (one key blank) is NoIdentity: two untitled tracks by
+// one artist share (artist_key, ""), so adopting would link the second to the
+// first's row. Neither is read, linked or inserted.
+func TestAdoptSkipsAHalfEmptyIdentity(t *testing.T) {
+	e := newAdoptEnv(t)
+	e.seed("a", "Zebra Quartz", "", "a.lrc", lineLRC)
+	e.seed("b", "", "Mauve Lantern", "b.lrc", lineLRC)
+	n := e.run(e.adopter(0))
+	if n != (scan.AdoptCounts{NoIdentity: 2}) || e.reads != 0 || e.queueCount() != 0 || len(e.records) != 0 {
+		t.Errorf("counts=%+v reads=%d rows=%d records=%d, want only NoIdentity=2", n, e.reads, e.queueCount(), len(e.records))
+	}
+}
