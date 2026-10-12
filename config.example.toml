@@ -718,14 +718,14 @@ on_mis_synced = "demote"
 on_categorical = "quarantine"
 
 [instrumental_title]
-# The instrumental title rule. Off by default; serve mode only; read at startup
+# The instrumental title rule. On (strong) by default; serve mode only; read at startup
 # (a change needs a restart). It never replaces a lyric file or an instrumental
 # marker already on disk. A sung track whose title carries a strong
 # qualifier gets a marker and no lyrics while this is on (see "Title rule" in
-# docs/instrumental-detection.md). Bulk undo: set it off, then
-# `scan purge-provenance --source title-rule`.
-#   off         - the track title is ignored (the default; today's behavior)
-#   strong      - a title with a strong instrumental qualifier (a bracketed or
+# docs/instrumental-detection.md). Set it to off to disable. Bulk undo: set it
+# off, then `scan purge-provenance --source title-rule`.
+#   off         - the track title is ignored
+#   strong      - (the default) a title with a strong instrumental qualifier (a bracketed or
 #                 dash-suffixed "Instrumental" or "Off Vocal") is
 #                 settled with an instrumental marker without asking a lyric
 #                 provider
@@ -737,7 +737,7 @@ on_categorical = "quarantine"
 #                 ordered provider dispatch
 # An unrecognized value resets to "off".
 # Env: MXLRC_INSTRUMENTAL_TITLE_MODE.
-mode = "off"
+mode = "strong"
 
 [word_sync_recheck]
 # Serve-mode word-timing re-check sweep: keeps queuing newly settled

@@ -29,7 +29,8 @@ func TestRunServe_WiresInstrumentalTitleMode(t *testing.T) {
 		{"strong", "[instrumental_title]\nmode = \" Strong \"\n\n", "[source:title-rule]"},
 		{"all", "[instrumental_title]\nmode = \"all\"\n\n", "[source:title-rule]"},
 		{"legacy strong_weak alias", "[instrumental_title]\nmode = \"strong_weak\"\n\n", "[source:title-rule]"},
-		{"off by default", "", "words from the provider"},
+		{"explicit off", "[instrumental_title]\nmode = \"off\"\n\n", "words from the provider"},
+		{"strong by default", "", "[source:title-rule]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prev := slog.Default()

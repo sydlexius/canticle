@@ -547,16 +547,17 @@ const (
 	detectorOrderingFront   = "front"
 )
 
-// InstrumentalTitleMode is the instrumental_title.mode policy (#1467). Off
-// (the default) ignores the track title, which is today's behavior; Strong
-// settles a title carrying a strong instrumental qualifier without a provider
-// request; All additionally honors weaker title or album signals when
+// InstrumentalTitleMode is the instrumental_title.mode policy (#1467). Strong
+// (the default since #1473) settles a title carrying a strong instrumental
+// qualifier without a provider request; Off ignores the track title; All
+// additionally honors weaker title or album signals when
 // the audio detector agrees. Serve mode reads it once at startup
 // (commands.titleRuleOn and titleRuleWeakOn).
 type InstrumentalTitleMode string
 
 const (
-	// InstrumentalTitleOff ignores the title (the default).
+	// InstrumentalTitleOff ignores the title. It is the fallback for an
+	// unrecognized value and for a nil or zero-value Config, not the default.
 	InstrumentalTitleOff InstrumentalTitleMode = "off"
 	// InstrumentalTitleStrong honors strong title qualifiers only.
 	InstrumentalTitleStrong InstrumentalTitleMode = "strong"
@@ -620,9 +621,9 @@ func NormalizeInstrumentalTitleMode(v string) (InstrumentalTitleMode, bool) {
 
 // InstrumentalTitleConfig holds the [instrumental_title] settings.
 type InstrumentalTitleConfig struct {
-	// Mode is off (default), strong or all (strong_weak is the deprecated
+	// Mode is strong (default), off or all (strong_weak is the deprecated
 	// alias of all). An unrecognized value
-	// resets to off. Override: MXLRC_INSTRUMENTAL_TITLE_MODE.
+	// resets to off, never to the default. Override: MXLRC_INSTRUMENTAL_TITLE_MODE.
 	Mode InstrumentalTitleMode `toml:"mode"`
 }
 
@@ -1249,7 +1250,7 @@ func defaults() Config {
 			OnMisSynced:        TimingActionDemote,
 			OnCategorical:      TimingActionQuarantine,
 		},
-		InstrumentalTitle: InstrumentalTitleConfig{Mode: InstrumentalTitleOff},
+		InstrumentalTitle: InstrumentalTitleConfig{Mode: InstrumentalTitleStrong},
 		WordSyncRecheck: WordSyncRecheckConfig{
 			Enabled: false,
 			Batch:   wordSyncRecheckBatchDefault,
@@ -1461,15 +1462,16 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			if !validTimingAction(cfg.TimingValidation.OnCategorical, timingCategoricalActions()) {
 				cfg.TimingValidation.OnCategorical = d.TimingValidation.OnCategorical
 			}
-			// An unrecognized mode resets to off (the conservative default), the
-			// same rule as timing_validation's action enums.
+			// An unrecognized mode resets to off, NOT to the default (strong): a
+			// typo must never switch the rule on.
 			if m, ok := normalizeInstrumentalTitleMode(string(cfg.InstrumentalTitle.Mode)); ok {
 				if _, alias := normalizeInstrumentalTitleModeAlias(string(cfg.InstrumentalTitle.Mode)); alias {
 					warnInstrumentalTitleModeAlias("file", string(cfg.InstrumentalTitle.Mode))
 				}
 				cfg.InstrumentalTitle.Mode = m
 			} else {
-				cfg.InstrumentalTitle.Mode = d.InstrumentalTitle.Mode
+				slog.Warn("config value is invalid; using off", "key", "instrumental_title.mode", "value", string(cfg.InstrumentalTitle.Mode)) //nolint:gosec // reason: G706: tainted config value passed as a structured slog field, not a format string
+				cfg.InstrumentalTitle.Mode = InstrumentalTitleOff
 			}
 			// WordSyncRecheck.Batch outside 1..max resets to the default, the same
 			// bound the env and `config set` paths enforce. Enabled is not

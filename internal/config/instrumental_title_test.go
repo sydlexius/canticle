@@ -22,11 +22,58 @@ func loadTitleMode(t *testing.T, body string) Config {
 	return cfg
 }
 
-func TestInstrumentalTitleMode_Default(t *testing.T) {
+func TestInstrumentalTitleMode_AbsentKeyLoadsAsStrong(t *testing.T) {
 	isolateEnv(t)
-	cfg := loadTitleMode(t, "")
+	for name, body := range map[string]string{
+		"empty file":      "",
+		"section no mode": "[instrumental_title]\n",
+	} {
+		cfg := loadTitleMode(t, body)
+		if got := cfg.InstrumentalTitleMode(); got != InstrumentalTitleStrong {
+			t.Errorf("%s: absent mode = %q, want strong", name, got)
+		}
+	}
+}
+
+func TestInstrumentalTitleMode_ExplicitOffLoadsAsOff(t *testing.T) {
+	isolateEnv(t)
+	cfg := loadTitleMode(t, "[instrumental_title]\nmode = \"off\"\n")
 	if got := cfg.InstrumentalTitleMode(); got != InstrumentalTitleOff {
-		t.Fatalf("default mode = %q, want off", got)
+		t.Fatalf("explicit off = %q, want off", got)
+	}
+}
+
+func TestInstrumentalTitleMode_UnrecognizedFileValueLoadsAsOffAndWarns(t *testing.T) {
+	isolateEnv(t)
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	cfg := loadTitleMode(t, "[instrumental_title]\nmode = \"sideways\"\n")
+	if got := cfg.InstrumentalTitleMode(); got != InstrumentalTitleOff {
+		t.Fatalf("unrecognized file value = %q, want off (not the strong default)", got)
+	}
+	if !strings.Contains(buf.String(), "key=instrumental_title.mode") {
+		t.Errorf("want a warning naming the key; log:\n%s", buf.String())
+	}
+}
+
+func TestInstrumentalTitleMode_UnrecognizedEnvValueKeepsCurrent(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MXLRC_INSTRUMENTAL_TITLE_MODE", "sideways")
+	cfg := loadTitleMode(t, "")
+	if got := cfg.InstrumentalTitleMode(); got != InstrumentalTitleStrong {
+		t.Fatalf("unrecognized env over absent key = %q, want the current value strong", got)
+	}
+	cfg = loadTitleMode(t, "[instrumental_title]\nmode = \"off\"\n")
+	if got := cfg.InstrumentalTitleMode(); got != InstrumentalTitleOff {
+		t.Fatalf("unrecognized env over file off = %q, want off", got)
+	}
+}
+
+func TestInstrumentalTitleMode_ZeroValueConfigReadsOff(t *testing.T) {
+	if got := (&Config{}).InstrumentalTitleMode(); got != InstrumentalTitleOff {
+		t.Fatalf("zero-value config read as %q, want off", got)
 	}
 }
 

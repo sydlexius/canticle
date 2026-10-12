@@ -119,8 +119,16 @@ Two rules bound when it can act:
 
 ## Title rule
 
-Separate from the audio detector, and off by default: `instrumental_title.mode`
-(see [CONFIGURATION.md](CONFIGURATION.md)). It needs no sidecar.
+Separate from the audio detector, and on by default: `instrumental_title.mode`
+defaults to `strong` (see [CONFIGURATION.md](CONFIGURATION.md)). It needs no
+sidecar. With it on, the worker settles a track whose title carries a strong
+instrumental marker (for example "(Instrumental)") with an instrumental marker
+file and asks no lyrics provider. Set it to `off` to disable.
+
+**Upgrading.** After upgrading, rows not yet settled whose title is a strong
+match get a marker file where before they would have been sent to the
+providers. Rows already settled are not changed. The repair command `scan
+reconcile-instrumental-titles` handles those (dry run by default).
 
 **The problem it solves.** A track titled `Glass Harbor (Instrumental)` is the
 instrumental cut of a sung track. Asked for it, a lyrics provider answers with
