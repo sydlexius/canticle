@@ -294,6 +294,8 @@ func printTitleRepair(out io.Writer, res titlerepair.Result, applied bool) {
 	line("weak, detector says instrumental", res.WeakDetectorInstrumental)
 	line("weak, detector says not instrumental", res.WeakDetectorNotInstrumental)
 	line("weak, never scored", res.WeakDetectorUnscored)
+	line("weak, album named as instrumental", res.WeakAlbumInstrumental)
+	line("weak, plain title on an instrumental release (counted only, a lower bound)", res.InstrumentalRelease)
 	line("strong", res.Strong)
 	cells := make([]string, 0, len(res.StrongBy))
 	for k, n := range res.StrongBy {
