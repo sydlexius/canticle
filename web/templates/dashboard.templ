@@ -238,7 +238,7 @@ templ dashRecentOutcomes(rows []RecentOutcomeRow) {
 		title="Up to 20 most recently completed tracks. A newly submitted track appears here after the background worker processes it."
 	>
 		<h2 class="mx-dash-section-title" id="mx-dash-outcomes-heading">Recent Outcomes</h2>
-		<p class="mx-dash-section-sub">Completion is asynchronous -- a newly submitted track may not appear until the worker processes it.</p>
+		<p class="mx-dash-section-sub">Completion is asynchronous -- a newly submitted track may not appear until the worker processes it. Files a scan adopted (lyrics already beside the audio) are included.</p>
 		if len(rows) == 0 {
 			<div class="mx-report-empty">
 				<span>No completed tracks yet. Tracks complete asynchronously in the background.</span>

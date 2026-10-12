@@ -1365,12 +1365,13 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			// reopens on --upgrade like any .txt, and on nothing else. A detector
 			// version bump deliberately does NOT reopen it here (#1106): for a
 			// marker whose 'done' work_queue row exists, the scan index keeps the
-			// row done and the durable queue never reopens a done row on an
-			// Enqueue collision, so an emitted marker re-detected nothing and only
-			// cost an audio tag read on every scan (the #684 class). A marker with
-			// NO queue row (a rebuilt database over an existing library) did get
+			// row done and an ordinary scan's Enqueue collision never reopens a
+			// done row, so an emitted marker re-detected nothing and only cost an
+			// audio tag read on every scan (the #684 class). A marker with NO
+			// queue row (a rebuilt database over an existing library) did get
 			// re-queued by the old reopen; it is now reached only by scan
-			// --upgrade. Re-detection under a new model for a done row is the
+			// --upgrade, which also re-queues, once, a marker a scan adopted
+			// (#1586). Re-detection under a new model for a done row is the
 			// [upgrade_sweep] (serve mode, off by default; it bypasses the cache
 			// and the detector refuses telemetry from an older model version, so
 			// inference runs again) or scan reconcile, not a scan side effect.

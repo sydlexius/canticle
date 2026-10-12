@@ -96,7 +96,7 @@ var fields = []FieldSpec{
 
 	// [output]
 	{Path: "output.dir", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_OUTPUT_DIR"}, Criticality: Safe, Editable: true, Description: "Default directory for .lrc output files."},
-	{Path: "output.embedded_lyrics", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_EMBEDDED_LYRICS"}, Criticality: Safe, Editable: true, Description: "How to handle embedded lyrics: off, respect, or extract."},
+	{Path: "output.embedded_lyrics", Section: "output", Type: TypeString, EnvVars: []string{"MXLRC_EMBEDDED_LYRICS"}, Criticality: Safe, Editable: true, Description: "How to handle embedded lyrics: off, respect, or extract. respect and extract open every file without a lyric file on each scan."},
 	{Path: "output.bilingual_output", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_BILINGUAL_OUTPUT"}, Criticality: Safe, Editable: true, Description: "Interleave original and translation lines in one .lrc."},
 	{Path: "output.bump_audio_mtime", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_OUTPUT_BUMP_AUDIO_MTIME"}, Criticality: Caution, Editable: true, Description: "After replacing an existing sidecar with different lyrics, bump the source audio file's modified time (metadata only) so tools that key on it, such as Music Assistant, notice. Writes to your audio files."},
 	{Path: "output.word_sync", Section: "output", Type: TypeBool, EnvVars: []string{"MXLRC_WORD_SYNC"}, Criticality: Safe, Editable: true, Description: "Deprecated: use word_sync_mode. Write per-word karaoke timings (Enhanced LRC) into the lyric file itself. Only consulted when word_sync_mode is unset."},
@@ -178,7 +178,7 @@ var fields = []FieldSpec{
 	{Path: "word_sync_generate.model", Section: "word_sync_generate", Type: TypeString, EnvVars: []string{"MXLRC_WORD_SYNC_GENERATE_MODEL"}, Criticality: Safe, Editable: true, Description: "Reserved, not yet sent: the aligner client's wire contract has no model parameter, and the sidecar picks its own models via its own ALIGNER_* environment variables."},
 
 	// [enrichment]
-	{Path: "enrichment.enabled", Section: "enrichment", Type: TypeBool, EnvVars: []string{"MXLRC_ENRICHMENT_ENABLED"}, Criticality: Safe, Editable: true, Description: "Look up recording IDs (ISRC, MusicBrainz MBID, Spotify ID) before fetching, and feed them to the matcher to improve match accuracy."},
+	{Path: "enrichment.enabled", Section: "enrichment", Type: TypeBool, EnvVars: []string{"MXLRC_ENRICHMENT_ENABLED"}, Criticality: Safe, Editable: true, Description: "Read the ISRC, MusicBrainz recording ID and duration from each file's tags and feed them to the matcher. Also decides whether a scan writes the tag cache (off: files with no cache row are opened every scan)."},
 
 	// [realign]
 	{Path: "realign.enabled", Section: "realign", Type: TypeBool, EnvVars: []string{"MXLRC_REALIGN_ENABLED"}, Criticality: Safe, Editable: true, Description: "Master switch for the realign feature that re-attaches orphaned .lrc/.txt sidecars to renamed audio files. Not yet active: reserved for the serve-mode auto-realign integration (#450); the realign CLI command runs regardless. Off by default."},

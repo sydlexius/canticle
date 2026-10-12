@@ -79,6 +79,8 @@ dir = "lyrics"
 #             timestamped LRC text is written as a synced .lrc and preferred over
 #             unsynced lyrics, which are written as .txt.
 # ID3 SYLT and MP4 synced-lyric atoms are intentionally not handled.
+# respect and extract bypass the tag cache: every file without a lyric file is
+# opened on each scan (docs/USER_GUIDE.md "What a scan reads").
 # embedded_lyrics = "off"
 
 # Bilingual interleaved output (env: MXLRC_BILINGUAL_OUTPUT). Default false.
@@ -582,6 +584,9 @@ min_similarity = 0.35
 # Default true, preserving the always-on behavior from before per-library
 # control existed. Set to false to skip enrichment by default (tracks then use
 # the duration_bucket=0 cache fallback). Env override: MXLRC_ENRICHMENT_ENABLED.
+# The switch also decides whether a scan writes the tag cache (the worker follows
+# this global value), so with it off a file with no cache row is opened on every
+# scan. See docs/USER_GUIDE.md "What a scan reads".
 enabled = true
 
 [realign]

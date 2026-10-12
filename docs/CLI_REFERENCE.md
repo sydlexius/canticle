@@ -20,7 +20,7 @@ Commands:
   provenance  embed or inspect provenance tags in .lrc files
   realign     re-attach orphaned .lrc/.txt sidecars (and their .elrc companions) to renamed audio files
   revalidate  re-check existing .lrc timing against audio duration and remediate the backlog
-  timing-accuracy  measure per-provider line-start timing error against a local hand-verified reference set
+  timing-accuracy  measure per-provider line-start and word-start timing error against a local hand-verified reference set
   completion  output a shell completion script (bash, zsh, or fish)
 
 Global flags:
@@ -75,7 +75,7 @@ canticle "Dream Theater"
 
 The `--upgrade` flag re-fetches tracks that previously produced a `.txt` - unsynced lyrics or an instrumental marker, whoever wrote it - to promote them when better lyrics become available. Results are ranked from lowest to highest as instrumental marker, unsynced, line-synced, word-synced, and a result is written only when it ranks at least as high as what is already on disk, so a re-fetch never replaces a `.lrc` with a `.txt` or lyrics with a marker. Only `--update` (full re-fetch) may write a lower-ranked result over a better one. A line-synced `.lrc` is not reopened by `--upgrade`; it reaches word sync only through the paced word-sync recheck sweep (`[word_sync_recheck]`, off by default).
 
-**Cost of `--upgrade`.** In fetch mode every run does at least one lookup per reopened `.txt`, instrumental markers included, and a cache miss costs one or more provider requests (more with fallback lanes or parallel mode); a marker is re-checked on every `--upgrade` run, not once. Requests are paced only by the cooldown (`-c`/`api.cooldown`), so on a library with many markers a routine `--upgrade` is mostly re-asking questions whose answer rarely changes. To narrow a run, scope the directory you pass. `scan --upgrade --unsynced-before <cutoff>` (below) is the scan-side equivalent, but under `scan`/`serve` a sidecar Canticle itself fetched (its queue row is `done` from that fetch) is not re-queued by the run itself (so it may issue no requests for it). A lyric file that was already on disk and that Canticle did not fetch is re-queued by these flags once, and not again after a worker has taken its row (a fetch, or a word-sync recheck or upgrade sweep trip, even one that fetched nothing); one you edited in Canticle or marked instrumental by hand is never re-queued. A `.txt` whose queue row is `done`, whoever wrote it, is re-queued by the serve-mode [`[upgrade_sweep]`](CONFIGURATION.md#upgrade_sweep), paced and at most once a week.
+**Cost of `--upgrade`.** In fetch mode every run does at least one lookup per reopened `.txt`, instrumental markers included, and a cache miss costs one or more provider requests (more with fallback lanes or parallel mode); a marker is re-checked on every `--upgrade` run, not once. Requests are paced only by the cooldown (`-c`/`api.cooldown`), so on a library with many markers a routine `--upgrade` is mostly re-asking questions whose answer rarely changes. To narrow a run, scope the directory you pass. `scan --upgrade --unsynced-before <cutoff>` (below) is the scan-side equivalent, but under `scan`/`serve` a sidecar Canticle itself fetched (its queue row is `done` from that fetch) is not re-queued by the run itself (so it may issue no requests for it). A lyric file that was already on disk and that Canticle did not fetch (a file a scan adopted) is re-queued by these flags once, within each flag's own scope (`--upgrade` reaches an unsynced `.txt` or an instrumental marker, never a synced `.lrc`; `--update` also reaches a `.lrc`), and not again after a worker has taken its row (a fetch, or a word-sync recheck or upgrade sweep trip, even one that fetched nothing); one you edited in Canticle or marked instrumental by hand is never re-queued. A `.txt` whose queue row is `done`, whoever wrote it, is re-queued by the serve-mode [`[upgrade_sweep]`](CONFIGURATION.md#upgrade_sweep), paced and at most once a week.
 
 **Lyric blocks are serve-only.** A lyric result you block for a track is refused only in `serve` mode, which keeps the block list in its database; `fetch` mode opens no database, so it applies no blocks and will write a blocked result again.
 
@@ -102,7 +102,7 @@ Why bother narrowing, rather than just re-fetching everything:
 
 Behavior worth knowing before you rely on it:
 
-- **It only ever subtracts from one run.** The flag narrows a re-fetch that was already going to happen; it can never reopen something the reopen rules exclude, and it writes no state. A file skipped by a dated run is fully eligible under the next ordinary scan.
+- **It only ever subtracts from one run.** The flag narrows a re-fetch that was already going to happen; it can never reopen something the reopen rules exclude, and it writes no state. A file skipped by a dated run stays eligible for the next `--upgrade` run without a cutoff (an ordinary scan with no reopen flag reopens nothing).
 - **It covers both `.txt` classes `--upgrade` reopens** - unsynced sidecars and instrumental markers of any provenance - for the evidence reason above. It does **not** cover `.lrc` files, which is why it is refused with `--update`.
 - **It requires `--upgrade`,** and is rejected without it rather than silently matching nothing.
 - **The comparison is strict.** A sidecar stamped exactly at the cutoff is excluded.
@@ -318,7 +318,7 @@ canticle revalidate --tail ./offenders.tsv
 
 ## Reconcile word sync
 
-`scan reconcile-word-sync` queues tracks that already have a line-synced `.lrc` for a word-timing re-check. Turning on `output.word_sync_mode` only changes new fetches, so without this pass an established library keeps its line-only output. The command itself fetches nothing. It marks the selected queue rows, and a running `canticle serve` worker re-asks only the word-capable providers (Musixmatch, Petit Lyrics) for them, behind all fresh work. A track whose providers have no word data is marked as such and not asked again, unless the provider set changes or you pass `--recheck-absent-before`.
+`scan reconcile-word-sync` queues tracks that already have a line-synced `.lrc` (including files a scan adopted) for a word-timing re-check. Turning on `output.word_sync_mode` only changes new fetches, so without this pass an established library keeps its line-only output. The command itself fetches nothing. It marks the selected queue rows, and a running `canticle serve` worker re-asks only the word-capable providers (Musixmatch, Petit Lyrics) for them, behind all fresh work. A track whose providers have no word data is marked as such and not asked again, unless the provider set changes or you pass `--recheck-absent-before`.
 
 ```sh
 # Count the candidates and the minimum drain time (dry run, the default: writes nothing)

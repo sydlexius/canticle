@@ -124,9 +124,9 @@ type ServeCmd struct {
 	ConfigPath     string  `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth          int     `arg:"-d,--depth" help:"scheduler maximum recursion depth" default:"100"`
 	Update         bool    `arg:"-u,--update" help:"scheduler re-fetches existing .lrc files and may overwrite them with a worse result (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; a done queue row is re-queued only by [upgrade_sweep]"`
+	Upgrade        bool    `arg:"--upgrade" help:"scheduler re-fetches .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; a done queue row a worker completed is re-queued only by [upgrade_sweep], while a file a scan adopted is re-queued once"`
 	BFS            bool    `arg:"--bfs" help:"scheduler uses breadth-first traversal"`
-	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
+	EmbeddedLyrics *string `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off); respect and extract open every file without a lyric file each scan"`
 	ScanInterval   *int    `arg:"--scan-interval" help:"DEPRECATED scheduler interval in seconds; prefer [server.scan_schedule] (default: server.scan_interval_seconds or 900; 0 disables repeat)"`
 	SweepInterval  *int    `arg:"--sweep-interval" help:"path-reconciliation sweep interval in seconds (default: server.sweep_interval_seconds or 21600; 0 disables the periodic sweep)"`
 	WorkInterval   *int    `arg:"--work-interval" help:"worker poll interval in seconds (default: server.work_interval_seconds or api.cooldown; minimum 15)"`
@@ -139,11 +139,11 @@ type ScanCmd struct {
 	ConfigPath           string   `arg:"--config" help:"path to config file (default: XDG)" default:""`
 	Depth                int      `arg:"-d,--depth" help:"maximum recursion depth" default:"100"`
 	Update               bool     `arg:"-u,--update" help:"queue existing .lrc files for re-fetch; the serve worker keeps a better sidecar already on disk unless serve itself runs with --update (a canticle-written .elrc companion is rewritten or removed to match, per output.word_sync_mode)"`
-	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs a lookup per .txt (markers included) on every run, a provider request or more on a cache miss; a done queue row is re-queued only by [upgrade_sweep]; narrow with --unsynced-before (fetch mode)"`
+	Upgrade              bool     `arg:"--upgrade" help:"re-fetch .txt sidecars (unsynced or instrumental marker) to promote them; a worse result never replaces what is on disk; costs a lookup per .txt (markers included) on every run, a provider request or more on a cache miss; a done queue row a worker completed is re-queued only by [upgrade_sweep], while a file a scan adopted is re-queued once; narrow with --unsynced-before (fetch mode)"`
 	BFS                  bool     `arg:"--bfs" help:"use breadth-first traversal"`
-	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off)"`
-	Enrich               bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`
-	NoEnrich             bool     `arg:"--no-enrich" help:"force recording enrichment off for this scan, overriding per-library and global settings; mutually exclusive with --enrich"`
+	EmbeddedLyrics       *string  `arg:"--embedded-lyrics" help:"embedded unsynced lyrics handling: off, respect, or extract (default: output.embedded_lyrics or off); respect and extract open every file without a lyric file each scan"`
+	Enrich               bool     `arg:"--enrich" help:"force recording enrichment (ISRC/MBID/duration) and tag-cache writes on for this scan, overriding per-library and global settings; mutually exclusive with --no-enrich"`
+	NoEnrich             bool     `arg:"--no-enrich" help:"force recording enrichment off for this scan (it then writes no tag cache), overriding per-library and global settings; mutually exclusive with --enrich"`
 	DetectInstrumental   bool     `arg:"--detect-instrumental" help:"force instrumental detection on for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --no-detect-instrumental"`
 	NoDetectInstrumental bool     `arg:"--no-detect-instrumental" help:"force instrumental detection off for tracks enqueued by this scan, overriding per-library and global settings; mutually exclusive with --detect-instrumental"`
 	Libraries            []string `arg:"--only,separate" help:"limit scan to named or numeric libraries; repeat to select more than one. Distinct from subcommand --library flags (which target a single library row)"`
@@ -453,7 +453,7 @@ type LibraryCmd struct {
 type LibraryAddCmd struct {
 	Path               string `arg:"positional,required" help:"library root path"`
 	Name               string `arg:"--name" help:"display name (default: directory base)" default:""`
-	Enrich             *bool  `arg:"--enrich" help:"recording enrichment for this library; omit to inherit the global default, --enrich / --enrich=false to set"`
+	Enrich             *bool  `arg:"--enrich" help:"recording enrichment (and tag-cache writes) for this library; omit to inherit the global default, --enrich / --enrich=false to set"`
 	DetectInstrumental *bool  `arg:"--detect-instrumental" help:"instrumental detection for this library; omit to inherit the global default, --detect-instrumental / --detect-instrumental=false to set"`
 	ConfigPath         string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
@@ -474,7 +474,7 @@ type LibraryUpdateCmd struct {
 	ID                 int64  `arg:"positional,required" help:"library id"`
 	Path               string `arg:"--path" help:"new library root path" default:""`
 	Name               string `arg:"--name" help:"new display name" default:""`
-	Enrich             *bool  `arg:"--enrich" help:"set recording enrichment for this library (--enrich / --enrich=false); omit to leave unchanged"`
+	Enrich             *bool  `arg:"--enrich" help:"set recording enrichment (and tag-cache writes) for this library (--enrich / --enrich=false); omit to leave unchanged"`
 	DetectInstrumental *bool  `arg:"--detect-instrumental" help:"set instrumental detection for this library (--detect-instrumental / --detect-instrumental=false); omit to leave unchanged"`
 	ConfigPath         string `arg:"--config" help:"path to config file (default: XDG)" default:""`
 }
