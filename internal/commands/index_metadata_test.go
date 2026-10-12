@@ -1077,3 +1077,275 @@ func TestSchedulerRepointsSettledRowAfterFormatSwap(t *testing.T) {
 		t.Errorf("row after the swap names %q, want 01 song.flac", filepath.Base(source))
 	}
 }
+
+// A row cached before #1520 holds an empty mbid for a Vorbis-comment file;
+// migration 071 leaves such a row with a NULL reader_version. The next
+// index-metadata run must treat it as stale and refill it, even though the
+// file's mtime and size are unchanged.
+func TestIndexMetadataRefillsEmptyRecordingIDFromPreFixRow(t *testing.T) {
+	const recordingID = "11111111-2222-4333-8444-555555555555"
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	if err := testutil.WriteFLACFileWithComments(root, "track.flac", 44100, 44100, map[string]string{
+		"TITLE":               "Quiet Harbor",
+		"MUSICBRAINZ_TRACKID": recordingID,
+	}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ctx := context.Background()
+
+	var first bytes.Buffer
+	if code := runIndexMetadata(ctx, &first, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("first pass exit=%d out=%s", code, first.String())
+	}
+
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	// Recreate what the pre-fix reader and migration 071 leave behind: no
+	// recording ID, and a NULL stamp that never matches.
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE audio_metadata SET mbid = '', reader_version = NULL`); err != nil {
+		t.Fatalf("seed pre-fix row: %v", err)
+	}
+
+	var second bytes.Buffer
+	if code := runIndexMetadata(ctx, &second, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("second pass exit=%d out=%s", code, second.String())
+	}
+	var got, version string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT mbid, reader_version FROM audio_metadata`).Scan(&got, &version); err != nil {
+		t.Fatalf("read refilled row: %v", err)
+	}
+	if got != recordingID {
+		t.Errorf("mbid after re-index = %q, want %q (a stale pre-fix row must be re-read); output: %s", got, recordingID, second.String())
+	}
+	if version != scanner.DurationReaderVersion {
+		t.Errorf("reader_version = %q, want %q", version, scanner.DurationReaderVersion)
+	}
+}
+
+// seedScanRowForFill inserts a scan_results row for name under the library
+// root (keyed by the canonical path index-metadata uses) with the given
+// recording ID, and returns the row id.
+func seedScanRowForFill(t *testing.T, dbPath, root, name, recordingID string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	_, canonRoot := pathutil.CanonicalRoot(root)
+	key := filepath.Join(canonRoot, name)
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	res, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO scan_results (library_id, file_path, artist, title, outdir, filename, status, recording_mbid)
+		 VALUES ((SELECT id FROM libraries LIMIT 1), ?, 'Artist', 'Title', ?, ?, 'done', ?)`,
+		key, filepath.Dir(key), name, recordingID)
+	if err != nil {
+		t.Fatalf("insert scan row: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func scanRowRecordingID(t *testing.T, dbPath string, id int64) string {
+	t.Helper()
+	ctx := context.Background()
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	var got string
+	if err := sqlDB.QueryRowContext(ctx, `SELECT recording_mbid FROM scan_results WHERE id = ?`, id).Scan(&got); err != nil {
+		t.Fatalf("read scan row: %v", err)
+	}
+	return got
+}
+
+// TestIndexMetadataFillsEmptyScanRecordingID covers #1520's main user effect:
+// a settled FLAC row whose scan_results.recording_mbid is empty gets the ID the
+// fresh cache row holds. A dry run writes nothing, a non-empty value is never
+// overwritten, a row whose file is gone is left alone, and stdout carries
+// counts only.
+func TestIndexMetadataFillsEmptyScanRecordingID(t *testing.T) {
+	const recordingID = "11111111-2222-4333-8444-555555555555"
+	const otherID = "99999999-8888-4777-8666-555555555555"
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	for _, name := range []string{"empty.flac", "kept.flac"} {
+		if err := testutil.WriteFLACFileWithComments(root, name, 44100, 44100, map[string]string{
+			"TITLE": "Quiet Harbor", "MUSICBRAINZ_TRACKID": recordingID,
+		}); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+	emptyID := seedScanRowForFill(t, dbPath, root, "empty.flac", "")
+	keptID := seedScanRowForFill(t, dbPath, root, "kept.flac", otherID)
+	goneID := seedScanRowForFill(t, dbPath, root, "gone.flac", "")
+	ctx := context.Background()
+
+	var dry bytes.Buffer
+	if code := runIndexMetadata(ctx, &dry, ScanIndexMetadataCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("dry run exit=%d out=%s", code, dry.String())
+	}
+	if got := scanRowRecordingID(t, dbPath, emptyID); got != "" {
+		t.Errorf("dry run wrote the scan row's recording ID: %q", got)
+	}
+	if !strings.Contains(dry.String(), "would fill the recording ID on 1 empty scan row(s)") {
+		t.Errorf("dry run output lacks the would-fill count: %s", dry.String())
+	}
+
+	var yes bytes.Buffer
+	if code := runIndexMetadata(ctx, &yes, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("yes run exit=%d out=%s", code, yes.String())
+	}
+	if got := scanRowRecordingID(t, dbPath, emptyID); got != recordingID {
+		t.Errorf("empty scan row recording ID = %q, want %q", got, recordingID)
+	}
+	if got := scanRowRecordingID(t, dbPath, keptID); got != otherID {
+		t.Errorf("non-empty scan row recording ID = %q, want %q kept (the fill must not overwrite)", got, otherID)
+	}
+	if got := scanRowRecordingID(t, dbPath, goneID); got != "" {
+		t.Errorf("row for a missing file recording ID = %q, want empty", got)
+	}
+	if !strings.Contains(yes.String(), "filled the recording ID on 1 empty scan row(s)") {
+		t.Errorf("yes output lacks the filled count: %s", yes.String())
+	}
+	for _, secret := range []string{recordingID, otherID, "empty.flac", "Quiet Harbor"} {
+		if strings.Contains(yes.String()+dry.String(), secret) {
+			t.Errorf("output leaked %q", secret)
+		}
+	}
+
+	// A settled file (cache row current, file not reopened) is filled too: a
+	// run interrupted between the cache write and the fill recovers here.
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE scan_results SET recording_mbid = '' WHERE id = ?`, emptyID); err != nil {
+		t.Fatalf("reset scan row: %v", err)
+	}
+	var settled bytes.Buffer
+	if code := runIndexMetadata(ctx, &settled, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("settled run exit=%d out=%s", code, settled.String())
+	}
+	if got := scanRowRecordingID(t, dbPath, emptyID); got != recordingID {
+		t.Errorf("settled-file scan row recording ID = %q, want %q", got, recordingID)
+	}
+}
+
+// The dry run counts rows, not paths: two scan rows (two libraries) sharing a
+// file_path with an empty ID are reported as 2, and the real run fills 2.
+func TestIndexMetadataDryRunCountEqualsRealCountForSharedPath(t *testing.T) {
+	const recordingID = "11111111-2222-4333-8444-555555555555"
+	cfgPath, dbPath, root := setupIndexMetadata(t)
+	if err := testutil.WriteFLACFileWithComments(root, "shared.flac", 44100, 44100, map[string]string{
+		"TITLE": "Quiet Harbor", "MUSICBRAINZ_TRACKID": recordingID,
+	}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	firstID := seedScanRowForFill(t, dbPath, root, "shared.flac", "")
+	ctx := context.Background()
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	var otherLib int64
+	if err := sqlDB.QueryRowContext(ctx,
+		`INSERT INTO libraries (path, name) VALUES (?, 'Other') RETURNING id`, t.TempDir()).Scan(&otherLib); err != nil {
+		t.Fatalf("insert second library: %v", err)
+	}
+	res, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO scan_results (library_id, file_path, artist, title, outdir, filename, status, recording_mbid)
+		 SELECT ?, file_path, artist, title, outdir, filename, status, ''
+		 FROM scan_results WHERE id = ?`, otherLib, firstID)
+	if err != nil {
+		t.Fatalf("insert second row for the same path: %v", err)
+	}
+	secondID, _ := res.LastInsertId()
+
+	var dry bytes.Buffer
+	if code := runIndexMetadata(ctx, &dry, ScanIndexMetadataCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("dry run exit=%d out=%s", code, dry.String())
+	}
+	if !strings.Contains(dry.String(), "would fill the recording ID on 2 empty scan row(s)") {
+		t.Errorf("dry run output lacks a count of 2: %s", dry.String())
+	}
+	var yes bytes.Buffer
+	if code := runIndexMetadata(ctx, &yes, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("yes run exit=%d out=%s", code, yes.String())
+	}
+	if !strings.Contains(yes.String(), "filled the recording ID on 2 empty scan row(s)") {
+		t.Errorf("yes output lacks a count of 2: %s", yes.String())
+	}
+	for _, id := range []int64{firstID, secondID} {
+		if got := scanRowRecordingID(t, dbPath, id); got != recordingID {
+			t.Errorf("scan row %d recording ID = %q, want %q", id, got, recordingID)
+		}
+	}
+}
+
+// A library root that is a symlink: the scanner stores file_path under the
+// root as configured (the symlink spelling), not the resolved one, and the
+// fill must still find the row. The row is inserted with the symlink-rooted
+// path, which is how ScanLibrary spells it (filepath.Join(root, name)).
+func TestIndexMetadataFillsScanRowStoredUnderSymlinkedRoot(t *testing.T) {
+	const recordingID = "11111111-2222-4333-8444-555555555555"
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	cfgPath := filepath.Join(dir, "config.toml")
+	real := filepath.Join(dir, "array")
+	link := filepath.Join(dir, "music")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	reconcilePathsCfg(t, cfgPath, dbPath)
+	if err := testutil.WriteFLACFileWithComments(real, "linked.flac", 44100, 44100, map[string]string{
+		"TITLE": "Quiet Harbor", "MUSICBRAINZ_TRACKID": recordingID,
+	}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ctx := context.Background()
+	sqlDB, err := dbtest.OpenAt(ctx, t, dbPath)
+	if err != nil {
+		t.Fatalf("db open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+	if _, err := library.New(sqlDB).Add(ctx, link, "lib", models.LibrarySettings{}); err != nil {
+		t.Fatalf("library.Add: %v", err)
+	}
+	key := filepath.Join(link, "linked.flac")
+	res, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO scan_results (library_id, file_path, artist, title, outdir, filename, status, recording_mbid)
+		 VALUES ((SELECT id FROM libraries LIMIT 1), ?, 'Artist', 'Title', ?, 'linked.flac', 'done', '')`,
+		key, link)
+	if err != nil {
+		t.Fatalf("insert scan row: %v", err)
+	}
+	id, _ := res.LastInsertId()
+
+	var dry bytes.Buffer
+	if code := runIndexMetadata(ctx, &dry, ScanIndexMetadataCmd{ConfigPath: cfgPath}); code != 0 {
+		t.Fatalf("dry run exit=%d out=%s", code, dry.String())
+	}
+	if !strings.Contains(dry.String(), "would fill the recording ID on 1 empty scan row(s)") {
+		t.Errorf("dry run output lacks a count of 1: %s", dry.String())
+	}
+	if got := scanRowRecordingID(t, dbPath, id); got != "" {
+		t.Errorf("dry run wrote the scan row's recording ID: %q", got)
+	}
+	var yes bytes.Buffer
+	if code := runIndexMetadata(ctx, &yes, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("yes run exit=%d out=%s", code, yes.String())
+	}
+	if got := scanRowRecordingID(t, dbPath, id); got != recordingID {
+		t.Errorf("symlink-rooted scan row recording ID = %q, want %q", got, recordingID)
+	}
+}

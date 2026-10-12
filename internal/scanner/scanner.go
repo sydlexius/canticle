@@ -960,8 +960,38 @@ func extractISRC(m tag.Metadata) string {
 
 // extractRecordingMBID returns the MusicBrainz recording ID from audio tag metadata,
 // or "" if absent.
+//
+// The dhowden/tag mbz package keys its result by Picard's own tag names, and
+// those differ per format (#1520). For ID3 and MP4 the "MusicBrainz Track Id"
+// frame or freeform atom is mapped to mbz.Recording. For Vorbis comments (FLAC,
+// Ogg Vorbis; Opus tags are laid out the same way, though .opus is not a scanned
+// extension) Picard writes the recording ID as MUSICBRAINZ_TRACKID, which
+// mbz stores under mbz.Track (the lowercased key equals mbz.Track), so
+// mbz.Recording stays empty. The per-release track ID is MUSICBRAINZ_RELEASETRACKID,
+// which mbz drops, so it can never be returned here. For ID3 and MP4, mbz.Track
+// is the per-release track ID and must NOT be used as a fallback.
+//
+// MP4 freeform atoms need a second correction: dhowden/tag strips only 4 of the 8
+// header bytes of a freeform "data" atom (mp4.go readCustomAtom), so each value
+// arrives with the 4-byte locale field, four NUL bytes, in front of it. Several
+// data children are joined with ";" (readAtomData), giving
+// "\x00\x00\x00\x00id1;\x00\x00\x00\x00id2". Only the first value is returned, with
+// the NULs removed.
+//
+// For every format the result is trimmed of surrounding whitespace and lowercased,
+// so the same recording never lands under two spellings. It is not validated as a
+// UUID.
 func extractRecordingMBID(m tag.Metadata) string {
-	return mbz.Extract(m).Get(mbz.Recording)
+	info := mbz.Extract(m)
+	id := info.Get(mbz.Recording)
+	if id == "" && m.Format() == tag.VORBIS {
+		id = info.Get(mbz.Track)
+	}
+	if m.Format() == tag.MP4 {
+		first, _, _ := strings.Cut(id, ";")
+		id = strings.ReplaceAll(first, "\x00", "")
+	}
+	return strings.ToLower(strings.TrimSpace(id))
 }
 
 // artistValueSep joins the discrete values of a multi-value artist frame for

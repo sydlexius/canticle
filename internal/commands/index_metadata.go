@@ -119,7 +119,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	// (finding: --limit is per-root, not per-run). Threading it as a *int
 	// alongside the other counters makes the budget carry over correctly from
 	// one root to the next, exactly like walked/indexed/skipped/unreadable.
-	var walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures int
+	var walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures, mbidFilled int
 	limitReached := false
 	interrupted := false
 	for _, root := range roots {
@@ -139,7 +139,7 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 			walkErrors++
 			continue
 		}
-		if err := walkIndexMetadata(ctx, store, durations, root, args, &walked, &indexed, &skipped, &unreadable, &walkErrors, &workDone, &durationFailures, &limitReached); err != nil {
+		if err := walkIndexMetadata(ctx, sqlDB, store, durations, root, args, &walked, &indexed, &skipped, &unreadable, &walkErrors, &workDone, &durationFailures, &mbidFilled, &limitReached); err != nil {
 			if errors.Is(err, context.Canceled) {
 				slog.Info("index-metadata: interrupted", "walked", walked, "indexed", indexed)
 				interrupted = true
@@ -175,6 +175,15 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	durationNote := ""
 	if durationFailures > 0 {
 		durationNote = fmt.Sprintf("; %d duration parse failure(s)", durationFailures)
+	}
+	// The recording-ID fill (#1520) is appended only when non-zero, like the
+	// duration note: the healthy steady state reads exactly as before.
+	if mbidFilled > 0 {
+		fillVerb := "would fill"
+		if args.Yes {
+			fillVerb = "filled"
+		}
+		durationNote += fmt.Sprintf("; %s the recording ID on %d empty scan row(s)", fillVerb, mbidFilled)
 	}
 	_, _ = fmt.Fprintf(out, "index-metadata: walked %d file(s); %s %d (%d skipped unchanged, %d unreadable, %d walk error(s))%s; coverage now %d row(s)%s\n",
 		walked, verb, indexed, skipped, unreadable, walkErrors, durationNote, coverage, suffixDryRun(args.Yes))
@@ -221,11 +230,13 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 // configured roots, not a per-root allowance: a local counter here would
 // reset to zero at the start of every root, letting a run over N roots read
 // up to Limit*N files (finding: --limit is per-root, not per-run).
-func walkIndexMetadata(ctx context.Context, store *audiometa.Store, durations *audiodur.Store, root string, args ScanIndexMetadataCmd,
-	walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures *int, limitReached *bool,
+func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Store, durations *audiodur.Store, root string, args ScanIndexMetadataCmd,
+	walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures, mbidFilled *int, limitReached *bool,
 ) error {
 	absRoot, canonRoot := pathutil.CanonicalRoot(root)
-	return filepath.WalkDir(absRoot, func(p string, d os.DirEntry, walkErr error) error {
+	// Walk the resolved root: WalkDir does not descend through a symlinked
+	// root, so walking absRoot would visit nothing under /music -> /mnt/array/music.
+	return filepath.WalkDir(canonRoot, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// A per-entry walk error (permission denied on a subtree, a
 			// directory that vanished mid-walk) must not abort the whole
@@ -253,7 +264,8 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, durations *a
 		// walked reports every audio file the walk reaches, independent of the
 		// limit; only the limit gate below cares about work done.
 		*walked++
-		canonPath := pathutil.RebaseUnderCanonicalRoot(absRoot, canonRoot, p)
+		canonPath := p
+		walkPath := pathutil.RebaseUnderCanonicalRoot(canonRoot, absRoot, p) // the scanner's spelling
 
 		// d.Info() is an LSTAT: for a symlinked audio file it describes the
 		// symlink itself, not its target. scanner.ReadAudioFacts, though,
@@ -335,6 +347,12 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, durations *a
 					slog.Warn("index-metadata: could not bank duration from the metadata row", "file", canonPath, "error", derr)
 				}
 			}
+			// The same cached row also settles the scan row's recording ID with
+			// no file open, which covers a run that was interrupted between the
+			// cache write and the fill (#1520).
+			if ok {
+				fillScanRecordingMBID(ctx, sqlDB, walkPath, canonPath, facts.MBID, args.Yes, mbidFilled)
+			}
 			return nil
 		}
 
@@ -387,8 +405,53 @@ func walkIndexMetadata(ctx context.Context, store *audiometa.Store, durations *a
 				indexMetadataRowCommitted()
 			}
 		}
+		fillScanRecordingMBID(ctx, sqlDB, walkPath, canonPath, facts.MBID, args.Yes, mbidFilled)
 		*indexed++
 		*workDone++
 		return nil
 	})
+}
+
+// fillScanRecordingMBID copies a file's recording ID from the tag cache onto
+// its scan_results row (#1520). It FILLS ONLY: the UPDATE matches rows whose
+// recording_mbid is empty, so a non-empty value is never overwritten here (a
+// scan rewrites it, and the scan upsert keeps a non-empty value over an empty
+// one). A settled file is never opened by a scan, so without this a row stored
+// before the Vorbis fix keeps an empty ID forever and `scan reconcile-paths`
+// retains it as "identity absent".
+//
+// The scanner stores file_path as the walk path under the library root as
+// configured, while the tag-cache key is the symlink-resolved path, so a
+// symlinked root spells the same file two ways: the row matches under either
+// walkPath or canonPath (equal for an ordinary root, so nothing double counts).
+//
+// A row for a file that is gone is never visited, because the caller walks
+// files that exist. Best-effort: a failure is logged and the run continues,
+// since audio_metadata is this command's product. A dry run only counts the
+// rows it would fill and writes nothing. filled counts rows, never IDs.
+func fillScanRecordingMBID(ctx context.Context, sqlDB *sql.DB, walkPath, path, mbid string, apply bool, filled *int) {
+	if mbid == "" {
+		return
+	}
+	if !apply {
+		// COUNT(*) over the same predicate as the UPDATE below, so the dry run
+		// reports the number of rows the real run fills (two rows may share a path).
+		var n int
+		if err := sqlDB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM scan_results WHERE (file_path = ? OR file_path = ?) AND recording_mbid = ''`, walkPath, path).Scan(&n); err != nil {
+			slog.Warn("index-metadata: could not check the scan row for a recording ID", "file", path, "error", err)
+			return
+		}
+		*filled += n
+		return
+	}
+	res, err := sqlDB.ExecContext(ctx,
+		`UPDATE scan_results SET recording_mbid = ? WHERE (file_path = ? OR file_path = ?) AND recording_mbid = ''`, mbid, walkPath, path)
+	if err != nil {
+		slog.Warn("index-metadata: could not fill the scan row's recording ID", "file", path, "error", err)
+		return
+	}
+	if n, rerr := res.RowsAffected(); rerr == nil {
+		*filled += int(n)
+	}
 }

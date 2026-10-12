@@ -949,3 +949,41 @@ func TestSweep_MalformedGoneSourceIsHeld(t *testing.T) {
 		t.Fatalf("scan_results count for the malformed source = %d (err %v), want 1 (held)", sr, err)
 	}
 }
+
+// TestSweep_FilledRecordingIDTurnsIdentityAbsentRetainIntoRelink is the #1520
+// effect on a moved FLAC: while scan_results.recording_mbid is empty the gone
+// row is retained as "identity absent"; once `scan index-metadata --yes`
+// fills it, the same sweep relinks the row onto the moved file by that ID.
+func TestSweep_FilledRecordingIDTurnsIdentityAbsentRetainIntoRelink(t *testing.T) {
+	ctx, sqlDB, libID, root := openSeeded(t)
+	oldPath := filepath.Join(root, "ArtistM", "AlbumOld", "01. track.flac")
+	newPath := filepath.Join(root, "ArtistM", "AlbumNew", "01. track.flac")
+	seedRowWithIdentity(t, ctx, sqlDB, libID, oldPath, "done", "done", "", "")
+	if err := os.Remove(oldPath); err != nil {
+		t.Fatalf("remove old: %v", err)
+	}
+	seedPresentScanResult(t, ctx, sqlDB, libID, newPath, "11111111-2222-4333-8444-555555555555", "")
+
+	res, err := New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep before fill: %v", err)
+	}
+	if len(res.Relinked) != 0 || res.ScanResults != 0 || res.WorkItems != 0 {
+		t.Fatalf("before fill the empty-ID row must be neither relinked nor pruned, got %+v", res)
+	}
+	if sr, wq, _ := rowCounts(t, ctx, sqlDB); sr != 2 || wq != 1 {
+		t.Fatalf("before fill scan=%d wq=%d, want 2/1 (the row is kept)", sr, wq)
+	}
+
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE scan_results SET recording_mbid = ? WHERE file_path = ?`,
+		"11111111-2222-4333-8444-555555555555", oldPath); err != nil {
+		t.Fatalf("fill recording ID: %v", err)
+	}
+	res, err = New(sqlDB).Sweep(ctx, SweepOptions{Granularity: Exact})
+	if err != nil {
+		t.Fatalf("Sweep after fill: %v", err)
+	}
+	if len(res.Relinked) != 1 || res.Relinked[0].NewPath != newPath {
+		t.Fatalf("after fill Relinked = %+v, want one row to %s", res.Relinked, newPath)
+	}
+}
