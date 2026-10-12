@@ -3018,6 +3018,17 @@ func strongTitlePredicate(cfg config.Config) func(models.Track) bool {
 	}
 }
 
+// scanIdentityCache adapts the tag cache to the scanner's identity read
+// (#1574). The scanner cannot import audiometa, so it declares its own result
+// type; the conversion below compiles only while the two structs have the same
+// fields in the same order, so neither can drift from the other silently.
+type scanIdentityCache struct{ store *audiometa.Store }
+
+func (c scanIdentityCache) Identity(ctx context.Context, path string, mtimeNano, size int64) (scanner.CachedIdentity, bool, error) {
+	id, found, err := c.store.Identity(ctx, path, mtimeNano, size)
+	return scanner.CachedIdentity(id), found, err
+}
+
 // scheduler builds the scan scheduler. cacheRepo is the cache used to skip
 // already-cached tracks at enqueue time; pass the worker's shared repo in serve
 // mode so the /metrics hit-rate covers scheduler lookups too (#308),
@@ -3091,6 +3102,10 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 			// CLI is genuinely unaffected: it builds its own Scanner with no options
 			// and has no database to index into.
 			scanner.WithIndexStore(results),
+			// Serve an unsettled file's identity from the tag cache when its row is
+			// current, so the file is not opened (#1574). Read-only here: the scan
+			// does not write audio_metadata.
+			scanner.WithIdentityStore(scanIdentityCache{store: audiometa.New(sqlDB, scanner.DurationReaderVersion)}),
 		),
 		Options: opts,
 		// trigger and path disambiguate the two callers of this one callback
