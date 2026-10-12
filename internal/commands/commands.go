@@ -3599,22 +3599,9 @@ func runConfig(out io.Writer, args ConfigCmd) int {
 			_, _ = fmt.Fprintln(out, err)
 			return 2
 		}
-		// Re-check the cross-field invariants against the MERGED config before
-		// persisting. setConfigValue validates one key in isolation, but
-		// instrumental_detector.ordering and providers.mode are separately
-		// settable and only contradict each other in combination: setting either
-		// one alone can move the file into the rejected front+parallel state,
-		// which load-time validation would then fail on at the NEXT startup -
-		// after the write, so the operator gets a broken config file and a
-		// delayed, confusing boot error rather than an immediate rejection. This
-		// is the same share-one-validator arrangement ValidateTLSSelection uses
-		// across boot and the settings-save path.
-		if err := config.ValidateInstrumentalDetectorOrdering(cfg); err != nil {
-			_, _ = fmt.Fprintln(out, err)
-			return 2
-		}
-		// Same reasoning, same shared-validator arrangement, for
-		// [server.scan_schedule]: frequency, at, and day are three separately
+		// Re-check the cross-field invariant against the MERGED config before
+		// persisting. setConfigValue validates one key in isolation, but the
+		// [server.scan_schedule] frequency, at, and day are three separately
 		// settable keys that only cohere in combination ("weekly" needs both
 		// "at" and "day"; "daily" needs "at"). setConfigValue's per-key
 		// validation cannot see that the MERGED result is incomplete, so a

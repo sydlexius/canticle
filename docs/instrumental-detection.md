@@ -77,9 +77,10 @@ under both provider modes. Under `providers.mode = "parallel"` the detector
 never joins the provider race: it is staged outside it, so with the default
 `ordering = "demoted"` it runs only after at least one provider was asked and
 every provider that was asked has answered without a usable lyric. When no
-provider could be asked (every circuit open), the track waits. `ordering = "front"` requires
-`providers.mode = "ordered"`; with `providers.mode = "parallel"` it is rejected
-at config load. With no
+provider could be asked (every circuit open), the track waits. With
+`ordering = "front"` the detector is asked before any provider: a track it
+calls instrumental is settled with no provider request, and the providers race
+only when it says not instrumental or is unavailable. With no
 `classifier_url` set, no detector is built and Canticle behaves as if the feature
 did not exist: providers only.
 

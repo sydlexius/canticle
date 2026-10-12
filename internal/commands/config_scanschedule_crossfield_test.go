@@ -8,10 +8,9 @@ import (
 )
 
 // TestConfigSetRejectsWeeklyWithoutDay verifies that `config set` revalidates
-// the MERGED [server.scan_schedule] before persisting, mirroring
-// TestConfigSetRejectsOrderingFrontWhenModeParallel for the ordering/mode
-// pair. Setting frequency=weekly on a config with no day ever set produces the
-// incomplete schedule that config.ValidateScanSchedule rejects at load; without
+// the MERGED [server.scan_schedule] before persisting. Setting frequency=weekly
+// on a config with no day ever set produces the incomplete schedule that
+// config.ValidateScanSchedule rejects at load; without
 // a re-check here the CLI writes a config the server refuses to boot from at
 // the NEXT startup -- the same defect CodeRabbit found and #817 fixed on the
 // web settings-save path (checkScanScheduleInvariant /

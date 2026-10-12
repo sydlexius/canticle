@@ -415,14 +415,15 @@ min_similarity = 0.35
 # Optional audio-based instrumental detection sidecar. When enabled and a
 # classifier_url is configured, the detector samples each track's audio with
 # ffmpeg and asks an external AudioSet classifier whether it is instrumental,
-# writing an instrumental marker on a provider miss. It runs ONLY on provider
-# misses and never overrides provider-supplied data. Disabled by default.
+# writing an instrumental marker on a provider miss. By default it runs ONLY on
+# provider misses (see ordering below) and never overrides provider-supplied
+# data. Disabled by default.
 # Env: MXLRC_INSTRUMENTAL_DETECTOR_ENABLED.
 # enabled = false
 
 # Detector lane ordering: "demoted" (the default) consults the detector only
 # after a provider miss; "front" settles a high-confidence instrumental before
-# any provider lane runs and requires providers.mode = "ordered".
+# any provider lane runs, under either providers.mode.
 # Env: MXLRC_INSTRUMENTAL_DETECTOR_ORDERING.
 # ordering = "demoted"
 
