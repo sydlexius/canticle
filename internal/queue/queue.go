@@ -313,6 +313,11 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 				return WorkItem{}, err
 			}
 		}
+		if inputs.ReopenAdopted {
+			if err := reopenAdoptedForScan(ctx, tx, inputs, q.now()); err != nil {
+				return WorkItem{}, err
+			}
+		}
 	}
 
 	artistKey, titleKey := IdentityKeys(inputs.Track)
@@ -439,6 +444,17 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		); err != nil {
 			return WorkItem{}, fmt.Errorf("queue: link scan_result %d: %w", inputs.ScanResultID, err)
 		}
+		// A scan enqueue that lands on a terminal row queued nothing, and that
+		// row will never write its status back to the scan row the enqueuer
+		// just reserved as 'processing' (#1586). Settle it here, as RetireMiss
+		// does for 'unavailable' (scan_results has no such state), under the
+		// owner guard every done writeback carries.
+		if inputs.FromScan && (item.Status == StatusDone || item.Status == StatusUnavailable) {
+			if _, err := tx.ExecContext(ctx, `UPDATE scan_results SET status = 'done' WHERE id = ? AND status != 'done'`+scanResultNoLiveSibling,
+				inputs.ScanResultID, item.ID); err != nil {
+				return WorkItem{}, fmt.Errorf("queue: settle scan_result %d against terminal row %d: %w", inputs.ScanResultID, item.ID, err)
+			}
+		}
 	}
 	// Webhook-priority work preempts the shuffled lookahead buffer (#571): clear
 	// batch_seq on every buffered row so the next Dequeue redraws a batch that
@@ -465,10 +481,13 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 // interpolation -> no gosec concern). Like every claim path it clears batch_seq,
 // so a row buffered before batching was switched off cannot carry its stamp into
 // processing and later pin a buffer slot it can never be served from (#999).
+// Every claim also clears adopted_at (#1586): a row a worker has claimed has
+// been fetched for, so it is no longer "adopted and never fetched".
 const dequeueRandomizedSQL = `UPDATE work_queue
          SET status = 'processing',
              prev_status = status,
              claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+             adopted_at = NULL,
              batch_seq = NULL
          WHERE id = (
              SELECT id
@@ -488,6 +507,7 @@ const dequeueDeterministicSQL = `UPDATE work_queue
          SET status = 'processing',
              prev_status = status,
              claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+             adopted_at = NULL,
              batch_seq = NULL
          WHERE id = (
              SELECT id
@@ -513,6 +533,7 @@ const dequeueBatchedClaimSQL = `UPDATE work_queue
          SET status = 'processing',
              prev_status = status,
              claimed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+             adopted_at = NULL,
              batch_seq = NULL
          WHERE id = (
              SELECT id

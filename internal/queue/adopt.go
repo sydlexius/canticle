@@ -199,6 +199,11 @@ func (q *DBQueue) linkExistingTx(ctx context.Context, tx *sql.Tx, c AdoptCandida
 // candidate. word_timing_state stays NULL: no word-timing verdict is recorded
 // because none was reached.
 //
+// adopted_at is stamped with now (#1586): it marks the row as one adoption
+// created and no fetch has touched, which is what lets a scan reopen flag
+// reopen it (reopenAdoptedForScan). A link-only adoption (LinkSettled, and the
+// conflict fallback below) never stamps it: that row is one a worker completed.
+//
 // ON CONFLICT DO NOTHING on the identity key: a racing adoption (or a worker
 // enqueue) that won the key makes this fall back to the link-only path inside
 // the same transaction, so two adoptions collapse to one row. If that
@@ -226,11 +231,11 @@ func (q *DBQueue) InsertSettledDone(ctx context.Context, c AdoptCandidate, cls A
 	var id int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths,
-             scan_result_id, status, attempts, outcome_type, sync_tier, completed_at, word_timing_checked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'done', 0, ?, ?, ?, ?)
+             scan_result_id, status, attempts, outcome_type, sync_tier, completed_at, word_timing_checked_at, adopted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'done', 0, ?, ?, ?, ?, ?)
          ON CONFLICT(artist_key, title_key) DO NOTHING RETURNING id`,
 		c.Track.ArtistName, c.Track.TrackName, c.Track.AlbumName, c.Track.AlbumArtist, c.ArtistKey, c.TitleKey,
-		c.Outdir, c.Filename, c.FilePath, outputPaths, c.ScanResultID, cls.OutcomeType, nullIfEmpty(cls.SyncTier), stamp, wordChecked).Scan(&id)
+		c.Outdir, c.Filename, c.FilePath, outputPaths, c.ScanResultID, cls.OutcomeType, nullIfEmpty(cls.SyncTier), stamp, wordChecked, stamp).Scan(&id)
 	switch {
 	case err == nil:
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, id, c.ScanResultID); err != nil {
@@ -258,4 +263,53 @@ func (q *DBQueue) InsertSettledDone(ctx context.Context, c AdoptCandidate, cls A
 	default:
 		return AdoptNoRow, fmt.Errorf("queue: insert settled: %w", err)
 	}
+}
+
+// reopenAdoptedForScan reopens the 'done' row adoption created for the file a
+// scan-origin enqueue carries, when the scan forced that file back to pending
+// under an operator reopen flag (inputs.ReopenAdopted, #1586). Before adoption
+// such a file had no queue row, so the flag inserted a pending one; adoption
+// gave it a 'done' row, which the enqueue upsert keeps.
+//
+// The first statement decides: it spends the adoption mark, and carries every
+// guard itself:
+//   - adopted_at IS NOT NULL: InsertSettledDone made the row and neither a
+//     worker claim nor a reopen has touched it since (both clear the column).
+//     A row a worker completed, or one adoption only linked to, never matches,
+//     whatever its lane, upstream or attempts say.
+//   - source_path is the incoming file: only the adopted file's own scan row
+//     reopens its row. The scan forces pending only the files its flag selects,
+//     so the flag's scope (--upgrade never a settled .lrc, --unsynced-before,
+//     --bare-markers) arrives here already applied; a second copy of the song
+//     with no lyric file cannot reopen the row of the copy that has one.
+//   - notHandProtected: a hand edit or a manual instrumental mark is kept.
+//
+// The row is then reopened through ReopenDoneRowTx (settle columns cleared;
+// that helper does not touch adopted_at, which this statement already spent),
+// so a row the worker goes on to complete is an ordinary worker row that these
+// flags never reopen again, and the upsert that follows in the same transaction
+// sees a pending row. No matching row is a no-op: an ordinary enqueue.
+func reopenAdoptedForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
+	artistKey, titleKey := IdentityKeys(inputs.Track)
+	var id int64
+	err := tx.QueryRowContext(ctx,
+		`UPDATE work_queue SET adopted_at = NULL
+         WHERE artist_key = ? AND title_key = ? AND status = 'done'
+           AND adopted_at IS NOT NULL AND source_path = ?`+notHandProtected+`
+         RETURNING id`,
+		artistKey, titleKey, inputs.SourcePath).Scan(&id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("queue: find adopted row for scan enqueue: %w", err)
+	}
+	reopened, err := ReopenDoneRowTx(ctx, tx, id, now)
+	if err != nil {
+		return err
+	}
+	if !reopened {
+		return fmt.Errorf("queue: adopted row %d matched the reopen guard but was not reopened", id)
+	}
+	return nil
 }

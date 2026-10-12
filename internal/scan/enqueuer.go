@@ -255,6 +255,26 @@ func (e *Enqueuer) resolveFileDuration(ctx context.Context, filePath string) (se
 // rows enqueued and the number short-circuited as cache hits so callers can log
 // a per-scan summary; on error the partial counts so far are returned alongside.
 func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqueued, cacheHits int, retErr error) {
+	return e.EnqueueReopening(ctx, lib, nil)
+}
+
+// EnqueueReopening is EnqueuePending for a scan run under an operator reopen
+// flag (--upgrade, --update and their cohort flags, #1586). forced is that
+// scan's own results, whose status that scan just forced onto their rows
+// (UpsertOptions.ForceStatus): each one listed as pending below is a file the
+// flag selected, so its enqueue may reopen the 'done' row settled-file
+// adoption gave the file (models.Inputs.ReopenAdopted; the queue decides). The
+// flag's scope is therefore whatever the scanner emitted, never re-derived
+// here. A pending row of an earlier scan, and every row when forced is empty
+// (an ordinary scan), reopens nothing.
+//
+// enqueued counts each queue row once, however many files of the song were
+// enqueued onto it, and never a row that stays 'done': that enqueue queues
+// nothing. queue.Enqueue settles the scan row of an enqueue that lands on a
+// terminal row ('done' or 'unavailable') in the enqueue transaction. A row
+// that stays 'unavailable' is still counted, though nothing was queued
+// (format_swap_test.go pins that count).
+func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, forced []models.ScanResult) (enqueued, cacheHits int, retErr error) {
 	if e.Results == nil {
 		return 0, 0, fmt.Errorf("scan: enqueuer results dependency is nil")
 	}
@@ -277,6 +297,11 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 	results, err := e.Results.ListPendingByLibrary(ctx, libraryID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("scan: list pending for enqueue: %w", err)
+	}
+	counted := map[int64]struct{}{} // queue rows already in enqueued
+	reopenPaths := make(map[string]struct{}, len(forced))
+	for _, r := range forced {
+		reopenPaths[r.FilePath] = struct{}{}
 	}
 
 	// Tracks skipped this pass because a Categorical verdict quarantined them.
@@ -407,7 +432,9 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 		// inventory path) also sets ScanResultID but must keep recheck mode.
 		inputs.FromScan = true
 		inputs.ReopenCategorical = reopenCategorical
-		if _, err := e.Queue.Enqueue(ctx, inputs, e.Priority); err != nil {
+		_, inputs.ReopenAdopted = reopenPaths[res.FilePath]
+		item, err := e.Queue.Enqueue(ctx, inputs, e.Priority)
+		if err != nil {
 			if restoreErr := e.Results.SetStatus(ctx, []int64{res.ID}, StatusPending); restoreErr != nil {
 				return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w; restore pending: %w", res.ID, err, restoreErr)
 			}
@@ -420,6 +447,12 @@ func (e *Enqueuer) EnqueuePending(ctx context.Context, lib models.Library) (enqu
 			}
 			return enqueued, cacheHits, fmt.Errorf("scan: enqueue result %d: %w", res.ID, err)
 		}
+		// A row that stays done queued nothing (Enqueue settled this scan row
+		// against it), and a second file of one song lands on a counted row.
+		if _, seen := counted[item.ID]; seen || item.Status == queue.StatusDone {
+			continue
+		}
+		counted[item.ID] = struct{}{}
 		enqueued++
 		if reopenCategorical {
 			reopened++
