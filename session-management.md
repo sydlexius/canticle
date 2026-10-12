@@ -5,6 +5,12 @@ Read it on resume, after the gitignored `SESSION-STATE.md` (which holds transien
 Durable rules live in the root `CLAUDE.md` and the nested `internal/<pkg>/CLAUDE.md` files, and the one-line-per-package catalog lives in `docs/ARCHITECTURE.md`; this file holds the point-in-time detail behind them.
 Add a dated `##` section at the top for new material. Do not edit history except to correct it.
 
+## 2026-10-11 - detector-settled rows and provider pacing pinned (#568)
+
+`TestPacingContract` (`internal/worker/pacing_contract_test.go`) pins, for ordered and parallel x demoted and front, how many provider requests, detector calls and pacing waits a detector-settled, a provider-hit and an all-miss row cost. The code already delivered it; `front` settles a gate-positive row with no request and no wait, `demoted` spends the request first by design.
+One plan fact was wrong: under `demoted`, a row a provider has the lyric for makes zero detector calls (the detector lane never runs once a lyric is held), not one.
+The operator-facing summary is "Which setting drains which backlog" in `docs/instrumental-detection.md`.
+
 ## 2026-10-11 - root CLAUDE.md slimmed to principles and pitfalls (#1491)
 
 The root `CLAUDE.md` was 26,684 bytes and is loaded into every session and every spawned agent. The maintainer's direction: it holds repo-specific principles and pitfalls, mostly generic, and no architecture documentation. It is now under 6 KB. Nothing was deleted; each part moved as follows, and unlike the two earlier trims the moved text is not repeated here because it survives in the named destination.
