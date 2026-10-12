@@ -2053,7 +2053,8 @@ func (idx *presentIndex) pool(ctx context.Context, libraryID *int64) ([]identity
 	}
 	// Only rows carrying identity can ever win the exact tier, so filtering at
 	// the SQL level (seekable via migration 037's partial indexes) skips the
-	// os.Stat cost for the majority of a library that has no identity at all.
+	// os.Stat cost for rows with no identity. That is a smaller share once
+	// `scan index-metadata` fills recording IDs on Vorbis-comment rows (#1520).
 	query := `SELECT id, file_path, outdir, filename, isrc, recording_mbid FROM scan_results
               WHERE file_path != '' AND (isrc != '' OR recording_mbid != '')`
 	var args []any
