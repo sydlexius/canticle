@@ -2,6 +2,8 @@ package scanner
 
 import (
 	"bytes"
+	"io"
+	"os"
 	"testing"
 )
 
@@ -31,3 +33,13 @@ var (
 	TagAtom      = tagAtom
 	FreeformAtom = freeformAtom
 )
+
+// SetAudioOpener replaces the opener the scan uses for an audio file, so a
+// test can count opens or change the file between the lookup stat and the read.
+func SetAudioOpener(sc *Scanner, open func(string) (*os.File, error)) { sc.openAudio = open }
+
+// SetDurationProbe replaces the scan's duration probe.
+func SetDurationProbe(sc *Scanner, probe func(string) (int, error)) { sc.probeFunc = probe }
+
+// SetVorbisReader wraps the handle the scan's Vorbis multi-value re-read uses.
+func SetVorbisReader(sc *Scanner, wrap func(*os.File) io.ReadSeeker) { sc.vorbisReader = wrap }

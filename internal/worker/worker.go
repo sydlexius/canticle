@@ -2395,7 +2395,8 @@ func (w *Worker) resolveMetadata(ctx context.Context, path string) (scanner.Audi
 // slow disk). This path runs unattended, so a row stamped current from it would
 // pin duration 0 until the file itself changed. The cost is that a file whose
 // duration is permanently unparsable is read again on every attempt, which is
-// what happened before this write existed.
+// what happened before this write existed. A read with MultiValueErr set is
+// not banked either: the row would pin the single-value fallback artist.
 //
 // A failed write is logged and nothing else: the attempt already has what it
 // needs. The store's error text quotes the path, so only its class is logged.
@@ -2411,7 +2412,7 @@ func (w *Worker) readAndBankMetadata(ctx context.Context, path, key string, mtim
 		return scanner.AudioMetadata{}, err
 	}
 	stamped := facts.MTimeNano != 0 || facts.SizeBytes != 0
-	if stamped && facts.DurationErr == nil && facts.MTimeNano == mtimeNano && facts.SizeBytes == size {
+	if stamped && facts.DurationErr == nil && facts.MultiValueErr == nil && facts.MTimeNano == mtimeNano && facts.SizeBytes == size {
 		if rerr := w.metaCache.Record(ctx, key, facts); rerr != nil {
 			class := cacheWriteErrClass(rerr)
 			level := slog.LevelWarn

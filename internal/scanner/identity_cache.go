@@ -32,22 +32,27 @@ type CachedIdentity struct {
 	TrackLength int
 }
 
-// IdentityStore is the scanner's read of the tag cache (#1574). It is declared
-// here because internal/audiometa imports this package, so the scanner cannot
-// name that store directly.
+// IdentityStore is the scanner's view of the tag cache: the identity read
+// (#1574) and the write of a row from the scan's own read (#1575). It is
+// declared here because internal/audiometa imports this package, so the scanner
+// cannot name that store directly.
 //
 // Identity returns the cached identity for path when a row exists that is
 // current for the given mtime and size AND was written by the current duration
 // and tag readers. found is false otherwise; a miss is not an error. path is
 // the canonical spelling audio_metadata is keyed by (see cachedIdentity).
 //
-// The scanner only READS through this seam. Nothing here writes a row.
+// Record stores facts as the row for path, replacing EVERY column and stamping
+// the row current for both readers. The scanner therefore only ever passes the
+// complete audioFactsFromHandle output, never a subset (see bankFacts).
 type IdentityStore interface {
 	Identity(ctx context.Context, path string, mtimeNano, size int64) (id CachedIdentity, found bool, err error)
+	Record(ctx context.Context, path string, facts AudioFacts) error
 }
 
 // WithIdentityStore wires the tag cache so an unsettled file whose cached row
-// is current is not opened (#1574). Nil disables it: every file is read.
+// is current is not opened (#1574), and so a file the scan does read leaves a
+// row behind (#1575). Nil disables both: every file is read, nothing is written.
 func WithIdentityStore(s IdentityStore) Option {
 	return func(sc *Scanner) { sc.identities = s }
 }
@@ -56,9 +61,16 @@ func WithIdentityStore(s IdentityStore) Option {
 // ScanLibrary call and logged once at its end; a per-file line would carry a
 // path, and the store's error text does too.
 type identityStats struct {
-	hits, misses, lookupErrors, bankErrors int
-	firstError                             string
+	hits, misses, lookupErrors, bankErrors  int
+	recorded, recordErrors, multiValueSkips int
+	firstError                              string
 }
+
+// cacheMiss is the stat a tag-cache lookup CLEANLY missed on: a store is
+// wired, the lookup ran without error and found no current row. It is the zero
+// value in every other case, and the zero value never equals a read handle's
+// stamp, so only a clean miss lets the read that follows be banked.
+type cacheMiss struct{ mtimeNano, size int64 }
 
 // fail counts a store error in n and keeps the scan's first one as a cause that
 // cannot name a file: the INNERMOST error's text, as every wrapper quotes the
@@ -84,13 +96,14 @@ func (st *identityStats) fail(n *int, err error, fullPath, key string) {
 	}
 }
 
-// log reports the scan's tag-cache counts: at Warn when a lookup or a duration
-// bank failed, at Debug otherwise. Counts, plus the first error's path-free
+// log reports the scan's tag-cache counts: at Warn when a lookup, a duration
+// bank or a row write failed, at Debug otherwise. Counts, plus the first error's path-free
 // cause (see fail) on the Warn line.
 func (st *identityStats) log(ctx context.Context) {
 	level, args := slog.LevelDebug, []any{"hits", st.hits, "misses", st.misses,
-		"lookup_errors", st.lookupErrors, "duration_bank_errors", st.bankErrors}
-	if st.lookupErrors > 0 || st.bankErrors > 0 {
+		"lookup_errors", st.lookupErrors, "duration_bank_errors", st.bankErrors,
+		"recorded", st.recorded, "record_errors", st.recordErrors, "multivalue_skips", st.multiValueSkips}
+	if st.lookupErrors > 0 || st.bankErrors > 0 || st.recordErrors > 0 {
 		level, args = slog.LevelWarn, append(args, "first_error", st.firstError)
 	}
 	slog.Log(ctx, level, "scan identity cache", args...)
@@ -138,24 +151,28 @@ func statFollowing(file os.DirEntry, fullPath string, lstat os.FileInfo) (os.Fil
 // path does from its open handle, but only when ABSENT (the gate
 // bankDurationForSkippedFile uses): this runs for every cached file on every
 // scan, and an unchanged scan must not write. Enrichment off banks nothing.
-func (sc *Scanner) cachedIdentity(ctx context.Context, opts ScanOptions, file os.DirEntry, lstat os.FileInfo, fullPath, key string, stats *identityStats) (CachedIdentity, bool) {
+//
+// The third result is the stat a CLEAN miss was looked up on, for bankFacts.
+// It is zero for a hit, a failed stat, a lookup error, and a scan that
+// made no lookup at all.
+func (sc *Scanner) cachedIdentity(ctx context.Context, opts ScanOptions, file os.DirEntry, lstat os.FileInfo, fullPath, key string, stats *identityStats) (CachedIdentity, bool, cacheMiss) {
 	if sc.identities == nil || opts.embeddedLyricsOn() {
-		return CachedIdentity{}, false
+		return CachedIdentity{}, false, cacheMiss{}
 	}
 	info, err := statFollowing(file, fullPath, lstat)
 	if err != nil {
 		stats.misses++
-		return CachedIdentity{}, false
+		return CachedIdentity{}, false, cacheMiss{}
 	}
 	mtimeNano, size := info.ModTime().UnixNano(), info.Size()
 	id, found, err := sc.identities.Identity(ctx, key, mtimeNano, size)
 	if err != nil {
 		stats.fail(&stats.lookupErrors, err, fullPath, key)
-		return CachedIdentity{}, false
+		return CachedIdentity{}, false, cacheMiss{}
 	}
 	if !found {
 		stats.misses++
-		return CachedIdentity{}, false
+		return CachedIdentity{}, false, cacheMiss{mtimeNano: mtimeNano, size: size}
 	}
 	stats.hits++
 	if opts.EnrichRecording && sc.durations != nil && id.TrackLength > 0 {
@@ -167,7 +184,56 @@ func (sc *Scanner) cachedIdentity(ctx context.Context, opts ScanOptions, file os
 			stats.fail(&stats.bankErrors, err, fullPath, key)
 		}
 	}
-	return id, true
+	return id, true, cacheMiss{}
+}
+
+// bankFacts writes the tag-cache row for a file the scan just read, from that
+// same read, so the next scan (and the worker) is answered from the cache with
+// no `scan index-metadata` run in between (#1575). It never opens the file.
+//
+// A row is written only when ALL of these hold; otherwise the file is simply
+// read again next time, which is what happened before this write existed:
+//
+//   - Recording enrichment is on. Off, the duration was never probed, and a row
+//     with duration 0 stamped current reads as "duration genuinely absent" to
+//     the worker and to revalidate.
+//   - A store is wired, and the duration parse did not fail. That failure can
+//     be transient: the row would pin duration 0 until the file itself changed.
+//   - The Vorbis multi-value re-read hit no I/O error (FLAC/OGG only). That is
+//     transient too, and the row would pin the single-value fallback artist,
+//     half of the queue's unique key. Such a read is counted, never logged.
+//   - The open handle's own stamp is non-zero and EQUALS the stat the lookup
+//     CLEANLY missed on. A difference means the file changed between that stat
+//     and the end of the read, so the facts may mix two versions of it. miss is
+//     zero, so nothing is written, after a lookup error (which is not evidence
+//     the row is absent) and on an embedded-lyrics scan (which makes no lookup);
+//     a hit never reaches here, so an unchanged warm scan writes nothing.
+//
+// facts is always the complete audioFactsFromHandle output: Record replaces
+// every column, so a subset would blank the rest while stamping them current.
+//
+// A failed write is counted and never fails or drops the track: the scan row is
+// already built. A write a canceled context cut short is shutdown, not a fault,
+// and is not counted.
+func (sc *Scanner) bankFacts(ctx context.Context, opts ScanOptions, key, fullPath string, facts AudioFacts, miss cacheMiss, stats *identityStats) {
+	if sc.identities == nil || !opts.EnrichRecording || facts.DurationErr != nil {
+		return
+	}
+	if facts.MultiValueErr != nil {
+		stats.multiValueSkips++
+		return
+	}
+	stamped := facts.MTimeNano != 0 || facts.SizeBytes != 0
+	if !stamped || facts.MTimeNano != miss.mtimeNano || facts.SizeBytes != miss.size {
+		return
+	}
+	err := sc.identities.Record(ctx, key, facts)
+	switch {
+	case err == nil:
+		stats.recorded++
+	case !errors.Is(err, context.Canceled):
+		stats.fail(&stats.recordErrors, err, fullPath, key)
+	}
 }
 
 // pendingRow builds the scan row for an unsettled file from its identity,

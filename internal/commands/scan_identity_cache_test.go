@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,30 @@ func idCacheScan(t *testing.T, sqlDB *sql.DB) {
 	s.EnrichOverride = &enrich
 	if err := s.RunOnce(context.Background()); err != nil {
 		t.Fatalf("scan: %v", err)
+	}
+}
+
+// idCacheCorrupt overwrites each file with same-size garbage and restores its
+// mtime, then proves the (mtime, size) stamp survived and the file no longer
+// reads as audio. A scan that opened such a file would lose its row.
+func idCacheCorrupt(t *testing.T, files ...string) {
+	t.Helper()
+	for _, f := range files {
+		before, err := os.Stat(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := errors.Join(os.WriteFile(f, bytes.Repeat([]byte{'Z'}, int(before.Size())), 0o600),
+			os.Chtimes(f, time.Now(), before.ModTime())); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(f)
+		if err != nil || !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+			t.Fatalf("stamp did not survive the overwrite (err %v): %v -> %v", err, before, after)
+		}
+		if _, err := scanner.ReadAudioFacts(f); err == nil {
+			t.Fatal("corrupted file still reads as tagged audio; the no-read proof would be vacuous")
+		}
 	}
 }
 
@@ -93,23 +118,7 @@ func TestScanIdentityCache_WarmScanMatchesColdThroughSymlinkedRoot(t *testing.T)
 	if _, err := warm.ExecContext(ctx, `DELETE FROM audio_durations`); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{filepath.Join(realRoot, "a.flac"), filepath.Join(sub, "b.mp3"), filepath.Join(sub, "c.flac")} {
-		before, err := os.Stat(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := errors.Join(os.WriteFile(f, bytes.Repeat([]byte{'Z'}, int(before.Size())), 0o600),
-			os.Chtimes(f, time.Now(), before.ModTime())); err != nil {
-			t.Fatal(err)
-		}
-		after, err := os.Stat(f)
-		if err != nil || !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
-			t.Fatalf("stamp did not survive the overwrite (err %v): %v -> %v", err, before, after)
-		}
-		if _, err := scanner.ReadAudioFacts(f); err == nil {
-			t.Fatal("corrupted file still reads as tagged audio; the no-read proof would be vacuous")
-		}
-	}
+	idCacheCorrupt(t, filepath.Join(realRoot, "a.flac"), filepath.Join(sub, "b.mp3"), filepath.Join(sub, "c.flac"))
 	logs := captureSlog(t)
 	idCacheScan(t, warm)
 
@@ -140,5 +149,66 @@ func TestScanIdentityCache_WarmScanMatchesColdThroughSymlinkedRoot(t *testing.T)
 	}
 	if !strings.Contains(logs.String(), "hits=3 misses=0 lookup_errors=0 duration_bank_errors=0") {
 		t.Errorf("warm scan did not serve all three files from the cache:\n%s", logs.String())
+	}
+}
+
+// The production wiring of the scan's own tag-cache write (#1575), end to end
+// and with NO `scan index-metadata` run on the scanned database: the first
+// scheduler pass banks a row per file it reads, equal to the row the real
+// index-metadata command writes for the same library in a second database; the
+// audio is then overwritten with same-size garbage, and a second pass leaves
+// scan_results and work_queue exactly as the first did.
+func TestScanBank_SecondScanMatchesFirstWithNoIndexRun(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := errors.Join(os.MkdirAll(sub, 0o750),
+		testutil.WriteFLACFileWithComments(root, "a.flac", 44100, 44100*187, map[string]string{
+			"ARTIST": "Marlow Finch", "ALBUMARTIST": "The Tin Larks", "TITLE": "Quiet Harbor", "ALBUM": "Low Tide",
+			"ISRC": "ZZXXX2600001", "MUSICBRAINZ_TRACKID": "11111111-2222-4333-8444-555555555555",
+		}),
+		testutil.WriteFLACFileWithComments(sub, "c.flac", 44100, 44100*61, map[string]string{"TITLE": "Untitled Shore"}),
+	); err != nil {
+		t.Fatalf("write library: %v", err)
+	}
+
+	scanned, _ := idCacheDB(t, root)
+	idCacheScan(t, scanned)
+	stamps := []string{"created_at", "updated_at", "next_attempt_at"}
+	first := map[string]string{}
+	for _, table := range []string{"scan_results", "work_queue"} {
+		first[table] = dumpTableExcept(t, scanned, table, stamps...)
+		if strings.Count(first[table], "\n") != 2 {
+			t.Fatalf("first scan left %s as:\n%s\nwant 2 rows", table, first[table])
+		}
+	}
+
+	indexed, cfgPath := idCacheDB(t, root)
+	var out bytes.Buffer
+	if code := runIndexMetadata(ctx, &out, ScanIndexMetadataCmd{ConfigPath: cfgPath, Yes: true}); code != 0 {
+		t.Fatalf("index-metadata exit %d: %s", code, out.String())
+	}
+	// Sorted: the scan and the index walk visit the two directories in a
+	// different order, and the dump is in insertion order.
+	sorted := func(dbh *sql.DB) string {
+		lines := strings.Split(dumpTableExcept(t, dbh, "audio_metadata", "indexed_at"), "\n")
+		sort.Strings(lines)
+		return strings.Join(lines, "\n")
+	}
+	banked, want := sorted(scanned), sorted(indexed)
+	if banked != want || strings.Count(want, "\n") != 2 || !strings.Contains(want, "Quiet Harbor") {
+		t.Errorf("the scan's cache rows differ from index-metadata's (want the same 2):\nscan:\n%s\nindex-metadata:\n%s", banked, want)
+	}
+
+	idCacheCorrupt(t, filepath.Join(root, "a.flac"), filepath.Join(sub, "c.flac"))
+	logs := captureSlog(t)
+	idCacheScan(t, scanned)
+	for table, was := range first {
+		if now := dumpTableExcept(t, scanned, table, stamps...); now != was {
+			t.Errorf("%s changed on the second scan:\nfirst:\n%s\nsecond:\n%s", table, was, now)
+		}
+	}
+	if !strings.Contains(logs.String(), "hits=2 misses=0 lookup_errors=0 duration_bank_errors=0 recorded=0 record_errors=0") {
+		t.Errorf("second scan was not served entirely from the rows the first banked:\n%s", logs.String())
 	}
 }
