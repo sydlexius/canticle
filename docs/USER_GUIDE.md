@@ -704,6 +704,53 @@ You can control it at three levels, resolved with the precedence **CLI flag > pe
 
 When enrichment is off for a track, the scanner skips ISRC, MBID, and duration extraction as a unit, and the track keeps the `duration_bucket = 0` cache fallback (no behavior regression). A per-library or global change only affects scans run after the change; it does not restamp already-scanned rows.
 
+## What a scan reads
+
+A scan of a library that has not changed reads no file contents, apart from the cases listed under "What still opens a file" below. It still lists each directory, checks each file's size and modified time, and looks for the lyric file beside it. Whether those checks wake spun-down disks depends on your operating system keeping directory metadata in memory, which Canticle does not control.
+
+Two things make this possible. A lone `.txt` lyric file is no longer read on an ordinary scan. And the tags of a file that has no lyric file yet are taken from the tag cache (the `audio_metadata` table) when the cache row is current, so the audio file is not opened.
+
+### What a scan no longer opens
+
+- **A lone `.txt` lyric file** is read only when the scan runs with `--upgrade` or `--update`, which can reopen it. Otherwise an instrumental marker and plain unsynced lyrics are skipped the same way, and neither is read.
+- **The audio file of a track that has no lyric file yet**, when its cache row matches the file's path, modified time and size and was written by the current tag reader and duration reader. The scan builds the track from the row.
+
+### What still opens a file
+
+- A file whose modified time or size changed since its cache row was written.
+- A file with no current cache row: never indexed, or indexed before the tag-reader version existed (see "What fills the tag cache").
+- Any file, while an embedded-lyrics mode is on (`respect` or `extract`, see [Configuration](CONFIGURATION.md#output)). Embedded lyrics are deliberately not cached, so the scan has to open each such file.
+- A file whose duration the parser tried and failed to read. It is never cached, so it is read again on every scan.
+- A scan that can reopen a settled file (`--upgrade` reads each lone `.txt`, `--update` also reopens settled `.lrc` files). The `.txt` is read, then the audio tags come from the cache if the row is current.
+- A settled file (one with a lyric file beside it) that the scan index has not seen: its tags are read once so it can be indexed. A settled file with a `.lrc`, with recording enrichment on and no cached duration for its current version, is opened once for a duration read.
+- A file whose tags failed to read before and has not changed is skipped, not opened.
+
+### What fills the tag cache
+
+- **`scan index-metadata --yes`** reads files that have no current row. It skips a file whose row matches its path, modified time and size, so it does not refresh a row written before the tag-reader version existed.
+- **The scan's own read.** When a scan has to read a file, it writes the row from that read, so the next scan does not open the file. It writes only with recording enrichment on for that scan. It declines when the duration parse failed, when the second read that recovers repeated artist values on FLAC and Ogg Vorbis files hit an I/O error, or when the file changed while it was being read. With enrichment off the scan uses existing rows but writes none.
+- **The worker's fetch-time read** (serve mode only). Before a fetch the worker looks up the file's row and, on a miss, reads the file and writes the full row. It follows the global `[enrichment] enabled` setting, not a per-library override, and declines in the same three cases as the scan. The worker accepts a row without checking the tag-reader version, so it does not re-read a file for that reason alone.
+
+After an upgrade that adds the tag-reader version, each existing row misses once. The first scan with recording enrichment on re-reads those files and rewrites their rows. With enrichment off the rows stay stale and the files are opened on every scan.
+
+### A retag that keeps the modified time is not seen
+
+The cache decides a file is unchanged from its path, modified time and size. A tagger that preserves the modified time and rewrites tags inside the file's existing padding changes neither, so the scan keeps the cached artist and title, and the track keeps its old identity.
+
+To force a re-read, touch the file (`touch "/path/to/track.flac"`). The new modified time makes the row a miss on the next scan, which reads the file and rewrites the row. Retaggers that change the file size or the modified time are seen without any action.
+
+### Known limits
+
+- With an embedded-lyrics mode on, every file without a lyric file is opened on each scan.
+- With recording enrichment off, the scan serves rows that exist but writes none, so a file with no row is opened on each scan.
+- Directory metadata must stay in memory for an unchanged scan to leave the disks asleep, as above.
+
+### Log lines
+
+On an ordinary scan, an instrumental marker with no reopen now logs `skipping file, unsynced lyrics exist` at debug level, where it used to log `skipping file, instrumental marker settled`.
+
+Each scan also logs one `scan identity cache` line with the counts `hits`, `misses`, `lookup_errors`, `duration_bank_errors`, `recorded`, `record_errors` and `multivalue_skips`. It is at debug level unless a lookup, duration write or row write failed, and then it is a warning that also carries a `first_error` cause with no file path. At the default (info) level you see it only on failure.
+
 ## Instrumental detection
 
 The optional instrumental-detection sidecar samples each track's audio with ffmpeg and asks an external classifier whether it is instrumental, writing an instrumental marker on a provider miss. It runs only when a classifier URL is configured (`[instrumental_detector] classifier_url`). Because it costs an ffmpeg sample plus an inference call per track, you may want it on a small curated or soundtrack-heavy library but off on a large bulk one.
