@@ -1095,18 +1095,22 @@ func (w *Worker) recordHitCounter(ctx context.Context, lane string) {
 	}
 }
 
-// recordMisses increments the provider outcome miss counter for every active
-// lane via the orchestrator's LaneNames. Called on the benign-miss path (the
-// orchestrator tried all lanes and found nothing). Errors are logged at Warn
-// and do not affect the processing outcome.
-func (w *Worker) recordMisses(ctx context.Context) {
-	for _, name := range w.currentOrch().LaneNames() {
-		w.recordSourceEvent(ctx, name, queue.SourceEventMiss)
+// recordMisses increments the provider outcome miss counter for every lane the
+// dispatch actually ran (attempts, the orchestrator's attribution). Called on
+// the benign-miss path. A lane skipped on an open breaker was never contacted,
+// so it is charged nothing (#1502). Errors are logged at Warn and do not affect
+// the processing outcome.
+func (w *Worker) recordMisses(ctx context.Context, attempts []models.LaneAttempt) {
+	for _, a := range attempts {
+		if a.Hit {
+			continue
+		}
+		w.recordSourceEvent(ctx, a.Lane, queue.SourceEventMiss)
 		if w.providerRecorder == nil {
 			continue
 		}
-		if err := w.providerRecorder.RecordProviderMiss(ctx, name); err != nil {
-			slog.Warn("worker: record provider miss failed", "lane", name, "error", err)
+		if err := w.providerRecorder.RecordProviderMiss(ctx, a.Lane); err != nil {
+			slog.Warn("worker: record provider miss failed", "lane", a.Lane, "error", err)
 		}
 	}
 }
@@ -1599,9 +1603,24 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	if err != nil {
 		switch orchestrator.ClassifyOutcome(err) {
 		case orchestrator.OutcomeUnavailable:
-			// Every available lane's breaker was open, so no lane was consulted.
-			// Release the item back to pending with no failure increment (the
-			// catalog answer is unknown) and idle, exactly like the open-gate path.
+			// No provider was asked: every provider lane's breaker was open. The
+			// catalog answer is unknown, so the row takes no failure increment.
+			//
+			// The detector may still have answered "not instrumental" (#1502). That
+			// is no miss either, but a live verdict is stamped as the benign-miss
+			// branch stamps it, so the next pass re-decides from the stored scores.
+			// The stamp is a no-op when the detector gave no verdict for this row.
+			w.stampDetectorMissTelemetry(context.WithoutCancel(ctx), item.ID)
+			// The detector lane ran (ErrNoProviderAsked) and did not fail: it said
+			// "not instrumental", or the row is one it is not asked about (detection
+			// off, no source path, a karaoke title). The lane is healthy and may
+			// settle a row behind this one, so this row is set aside and the pass
+			// goes on. A detector that errored on this row (outage, not ready), and
+			// a dispatch in which no lane ran at all, fall through: the row is
+			// released with no wait and the pass idles, like the open-gate path.
+			if errors.Is(err, orchestrator.ErrNoProviderAsked) && w.detectorMemo != nil && !w.detectorMemo.detectErrored() {
+				return w.parkUnaskedRow(ctx, item)
+			}
 			if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
 				return fmt.Errorf("worker: release item %d after lanes unavailable: %w", item.ID, releaseErr)
 			}
@@ -1614,10 +1633,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 			// (toward retirement) plus a multi-day cooldown for a pure boot race,
 			// and misreport an infrastructural race as a lyric outage (#567).
 			//
-			// Unlike OutcomeUnavailable (every lane's breaker open, so NO lane was
-			// consulted -> the whole drain pass idles), the providers WERE consulted
-			// here and returned a clean answer; only the detector could not run. So
-			// return nil to keep draining the rest of the queue rather than
+			// Unlike OutcomeUnavailable (no PROVIDER was asked: every provider
+			// breaker was open, and at most the detector lane ran), the providers
+			// WERE consulted here and returned a clean answer; only the detector
+			// could not run. So return nil to keep draining the queue rather than
 			// errLanesUnavailable, which wraps errIdle and would halt the pass on a
 			// single booting-detector item.
 			if releaseErr := w.queue.Release(context.WithoutCancel(ctx), item.ID); releaseErr != nil {
@@ -1676,10 +1695,10 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		if orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeBenignMiss ||
 			orchestrator.ClassifyOutcome(err) == orchestrator.OutcomeLaneOutage {
 			slog.Debug("worker no lyrics match; requeuing deferred", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "reason", err)
-			// Every active lane was tried and none returned lyrics: record a miss for
-			// each. Errors are non-fatal; recording happens before the Defer/Complete
+			// No lane that was tried returned lyrics: record a miss for each one
+			// tried. Errors are non-fatal; recording happens before the Defer/Complete
 			// so the queue state is clean regardless of the recording outcome.
-			w.recordMisses(context.WithoutCancel(ctx))
+			w.recordMisses(context.WithoutCancel(ctx), song.LaneAttempts)
 			// Also persist the per-track attribution (all attempted lanes missed this
 			// track) for the true per-track hit-rate (#282). The orchestrator carries
 			// the attempts on the returned song even on the benign-miss error path.
@@ -2692,6 +2711,54 @@ func (w *Worker) song(ctx context.Context, track models.Track, sourcePath string
 // a findable marker) is the #950 follow-up. A lane that never recovers settles
 // the row in hours rather than cycling it forever.
 const maxRefusedWaits = 3
+
+// providerReopenWait is how long until the first provider lane's breaker may be
+// probed again, read from the breakers themselves. With no provider breaker
+// reporting a reopen still ahead (the window lapsed since the dispatch), it is
+// the breaker's shortest window, so a parked row is never ready at once (a
+// zero wait would hand the pass the same row again without a pause).
+func (w *Worker) providerReopenWait() time.Duration {
+	now := w.now()
+	var wait time.Duration
+	for _, l := range w.lanes {
+		if d := l.Breaker().OpenUntil().Sub(now); d > 0 && (wait == 0 || d < wait) {
+			wait = d
+		}
+	}
+	if wait > 0 {
+		return wait
+	}
+	if w.circuitBackoffBase > 0 {
+		return w.circuitBackoffBase
+	}
+	return defaultCircuitBackoffBase
+}
+
+// parkUnaskedRow sets aside a row no provider was asked about, every provider
+// lane having been skipped on an open breaker, when the detector lane is
+// healthy: it called the row not instrumental, or was not asked about it
+// (#1502). No miss and no attempt is charged, and the row leaves the ready set
+// until a provider may be probed again (providerReopenWait). It returns nil so
+// the drain pass goes on to the next row: releasing the row with no wait would
+// hand the same row back on every poll, and the detector would never reach an
+// instrumental queued behind it.
+//
+// Cost: every row parked in one outage becomes ready at the same instant, the
+// breaker's reopen, and is parked again if the probe fails. Each re-ask of a
+// row the detector judges is decided from the stored scores, with no audio
+// read, only where memoDetector.canReuse holds (a gate-complete stamp from the
+// current model version). Any other such row (a degraded response, which is
+// never stamped, or a model version change) re-runs live inference, an audio
+// read, once per breaker window for as long as the outage lasts.
+func (w *Worker) parkUnaskedRow(ctx context.Context, item queue.WorkItem) error {
+	wait := w.providerReopenWait()
+	if err := w.queue.ReleaseUntil(context.WithoutCancel(ctx), item.ID, wait); err != nil {
+		return fmt.Errorf("worker: park item %d with no provider available: %w", item.ID, err)
+	}
+	w.lastItemContactedProvider = false // no provider request: no pacing wait
+	slog.Debug("worker: no provider is available and the detector cannot settle the row; row set aside", "id", item.ID, "wait", wait)
+	return nil
+}
 
 // deferRefusedUntried handles orchestrator.ErrTimingRefusedUntried. Below the
 // budget it parks ONLY this row (queue.DeferRefused moves it out of the ready

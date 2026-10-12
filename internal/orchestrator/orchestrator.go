@@ -90,9 +90,9 @@ func (o *Orchestrator) SetGuard(g ScriptGuard) { o.guard = g }
 func (o *Orchestrator) SetBlockChecker(c lyrics.BlockChecker) { o.blocks = c }
 
 // LaneNames returns the names of all lanes the orchestrator dispatches over, in
-// priority order. Used by the worker miss-recording path to increment the miss
-// counter for every active lane without touching the orchestrator's internal
-// lane slice directly.
+// priority order, without exposing the internal lane slice. It is for tests
+// only: nothing in production reads it (the worker's miss recording charges
+// only the lanes a dispatch ran, #1502).
 func (o *Orchestrator) LaneNames() []string {
 	names := make([]string, len(o.lanes))
 	for i, l := range o.lanes {
@@ -249,7 +249,7 @@ func (o *Orchestrator) findOrdered(ctx context.Context, track models.Track, sour
 			// it holds back a timing-refused result (noteUntried above, #950).
 			continue
 		}
-		r.consulted++
+		r.consult(lane.Local())
 		attempted = append(attempted, attemptedLane{name: lane.Name(), local: lane.Local()})
 
 		if err == nil {
@@ -403,6 +403,26 @@ type dispatchResult struct {
 	// unbounded reports a transport-class failure that left its lane's breaker
 	// closed: nothing stops the next row from meeting it again (noteTransport).
 	unbounded bool
+	// asked reports that a lane making an outbound provider request was
+	// consulted; skipped, that such a lane was passed over on an open breaker
+	// (#1502). See noProviderAsked.
+	asked, skipped bool
+}
+
+// consult counts a lane that was actually run. local is Lane.Local().
+func (r *dispatchResult) consult(local bool) {
+	r.consulted++
+	r.asked = r.asked || !local
+}
+
+// noProviderAsked reports a dispatch that says nothing about the catalog: no
+// lane ran at all, or only local lanes did while a provider lane was skipped on
+// an open breaker (#1502). The detector's "not instrumental" is then the only
+// answer, and it is not a lyric miss. A local lane cannot give a blocked answer
+// (an instrumental verdict has no lyric to match a block), so blocked needs no
+// clause here.
+func (r *dispatchResult) noProviderAsked() bool {
+	return r.consulted == 0 || (!r.asked && r.skipped)
 }
 
 // gate keeps song as the below-gate commit candidate if it lands strictly
@@ -428,6 +448,7 @@ func (r *dispatchResult) noteUntried(err error, class OutcomeClass, laneName str
 		return
 	}
 	r.answered = r.answered || (class == OutcomeBenignMiss && !errors.Is(err, musixmatch.ErrTruncatedResponse))
+	r.skipped = r.skipped || class == OutcomeUnavailable
 	switch class {
 	case OutcomeUnavailable, OutcomeAuthRateLimit, OutcomeLaneNotReady:
 		if r.untriedErr == nil {
@@ -512,7 +533,9 @@ func (r *dispatchResult) rankErr(err error, class OutcomeClass) {
 // have rather than backing off. With no result at all, the highest-precedence
 // error is surfaced; if every lane was unavailable (breaker open) the unavailable
 // sentinel is returned so the worker releases the item, unless the parent context
-// was canceled, in which case its error wins.
+// was canceled, in which case its error wins. The same holds when the only lanes
+// that ran were local and a provider lane was skipped (noProviderAsked, #1502);
+// that dispatch is told apart as ErrNoProviderAsked, which is still unavailable.
 //
 // A held demotable lyric (#950) is returned ahead of any retained result: it
 // is suitable, and the writer lands its words as .txt.
@@ -543,9 +566,12 @@ func (o *Orchestrator) resolve(ctx context.Context, r *dispatchResult) (models.S
 		r.bestSong.WinningLane = r.bestLane
 		return r.bestSong, nil
 	}
-	if r.consulted == 0 && len(o.lanes) > 0 {
+	if r.noProviderAsked() && len(o.lanes) > 0 {
 		if err := ctx.Err(); err != nil {
 			return models.Song{}, err
+		}
+		if r.consulted > 0 {
+			return models.Song{}, ErrNoProviderAsked
 		}
 		return models.Song{}, ErrLaneUnavailable
 	}

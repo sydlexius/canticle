@@ -141,7 +141,7 @@ func (o *Orchestrator) findParallel(ctx context.Context, track models.Track, sou
 				// Breaker open, provider not called: skip (matters only if ALL
 				// unavailable, or to hold back a timing-refused result, #950).
 			default:
-				r.consulted++
+				r.consult(res.local)
 				consulted = append(consulted, attemptedLane{name: res.name, local: res.local})
 				kind := candidateRetain
 				if res.err == nil {
@@ -261,7 +261,7 @@ func (o *Orchestrator) runStaged(ctx context.Context, lane *Lane, track models.T
 		// Breaker open, the lane was not run: skipped and not attributed.
 		return models.Song{}, false
 	}
-	r.consulted++
+	r.consult(lane.Local())
 	*consulted = append(*consulted, attemptedLane{name: lane.Name(), local: lane.Local()})
 	if err != nil {
 		r.noteTransport(class, lane.open())

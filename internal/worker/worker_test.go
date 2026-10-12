@@ -2998,7 +2998,7 @@ func TestRecordMissesRecorderErrorIsNonFatal(t *testing.T) {
 	w.SetProviderRecorder(rec)
 
 	// Must not panic; the worker has one lane ("musixmatch") via New.
-	w.recordMisses(context.Background())
+	w.recordMisses(context.Background(), []models.LaneAttempt{{Lane: "musixmatch"}})
 
 	// The recorder WAS called (iteration continued despite the error).
 	if len(rec.misses) != 1 || rec.misses[0] != "musixmatch" {

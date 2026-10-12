@@ -227,11 +227,26 @@ Composition across lanes:
   error) leaves its lane closed and feeds the global backoff as before;
   bounding those at the lane is #1375.
 - Known limit: while a lane is open, a row the remaining lanes miss is charged
-  an ordinary miss toward retirement (#1374).
+  an ordinary miss toward retirement (#1374). The per-lane miss counters follow
+  the lanes that were asked: a lane skipped on an open breaker is charged none.
 - If every available lane has its breaker open, the orchestrator reports that
   the whole dispatch is unavailable, and the worker releases the item back to
   `pending` with no failure increment (the existing `Release` semantics), rather
   than recording a miss. Cross-lane error precedence is specified in "Gap 4".
+- The same holds when the only lane that ran is the local detector lane and
+  every provider lane was skipped on an open breaker (#1502): no provider was
+  asked, so no miss is recorded. If the detector did not fail on the row (it
+  answered "not instrumental", or the row is one it is not asked about:
+  detection off for the item, no source path, a karaoke title under
+  `ordering = "front"`), the worker sets that row aside (`ReleaseUntil`, no
+  miss and no attempt) until the first provider breaker may be probed again,
+  and goes on to the next row, so an instrumental queued behind it is still
+  reached. If the detector failed on the row (an outage, or still starting
+  up), the row is released with no wait and the pass idles. Cost: every row
+  set aside in one outage becomes ready at the same instant, the breaker's
+  reopen, and is set aside again if the probe fails; a row whose stored
+  detector scores cannot be reused (a degraded response, or a model version
+  change) is re-analyzed from its audio once per breaker window.
 
 ## Resolved gaps
 
@@ -354,7 +369,9 @@ When lanes disagree, the orchestrator returns the highest-precedence outcome:
    without tripping any circuit.
 4. **All-lanes-unavailable** (every available lane's breaker is open). Treated
    like a rate-limit for queue purposes: the item is released back to `pending`
-   with no failure increment, because no lane was actually consulted.
+   with no failure increment, because no lane was actually consulted. A
+   dispatch in which only the local detector lane ran, with every provider lane
+   skipped, resolves the same way (#1502).
 
 The ordering rule is "least-certain-negative wins": any signal that we did not
 truly learn the track is absent (auth, rate-limit, transport, open circuit)

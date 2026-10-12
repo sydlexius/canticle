@@ -16,6 +16,12 @@ import (
 // lane was actually consulted, so the catalog answer is unknown).
 var ErrLaneUnavailable = errors.New("orchestrator: lane unavailable (circuit open)")
 
+// ErrNoProviderAsked is the ErrLaneUnavailable a dispatch resolves to when a
+// local lane ran but every provider lane was skipped on an open breaker
+// (#1502). It classifies as unavailable; the worker reads it to tell that
+// dispatch from one in which no lane ran at all.
+var ErrNoProviderAsked = fmt.Errorf("%w: no provider lane was asked", ErrLaneUnavailable)
+
 // ErrLaneBenignMiss is the provider-agnostic sentinel a non-provider lane
 // returns when it reached its backend and found no usable result (e.g. the
 // detector gate is negative). It classifies as a benign miss: the ramp resets
