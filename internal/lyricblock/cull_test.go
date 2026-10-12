@@ -121,7 +121,7 @@ func TestRemoveFilesCompanionFirstRecordsSelfwriteAndToleratesMissing(t *testing
 	dir := cullDir(t, map[string]string{"song.lrc": lrcBody, "song.elrc": elrcBody})
 	sw := selfwrite.New(time.Minute)
 	lrc, elrc, gone := filepath.Join(dir, "song.lrc"), filepath.Join(dir, "song.elrc"), filepath.Join(dir, "song.txt")
-	n, err := RemoveFiles([]string{lrc, gone, elrc}, sw)
+	n, err := RemoveFiles([]Backup{{Path: lrc, Content: []byte(lrcBody)}, {Path: gone}, {Path: elrc, Content: []byte(elrcBody)}}, sw)
 	if err != nil || n != 3 {
 		t.Fatalf("RemoveFiles = %d, %v", n, err)
 	}
@@ -134,8 +134,8 @@ func TestRemoveFilesCompanionFirstRecordsSelfwriteAndToleratesMissing(t *testing
 		}
 	}
 	// A failed companion removal leaves the .lrc too: the pair is never split.
-	// song.elrc is a non-empty directory so its removal fails whatever the
-	// process privilege.
+	// song.elrc is a directory, not the file backed up, so it is refused whatever
+	// the process privilege.
 	dir2 := cullDir(t, map[string]string{"song.lrc": lrcBody})
 	if err := os.MkdirAll(filepath.Join(dir2, "song.elrc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func TestRemoveFilesCompanionFirstRecordsSelfwriteAndToleratesMissing(t *testing
 	if err := os.WriteFile(filepath.Join(dir2, "song.elrc", "x"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	n, err = RemoveFiles([]string{filepath.Join(dir2, "song.lrc"), filepath.Join(dir2, "song.elrc")}, nil)
+	n, err = RemoveFiles([]Backup{{Path: filepath.Join(dir2, "song.lrc"), Content: []byte(lrcBody)}, {Path: filepath.Join(dir2, "song.elrc")}}, nil)
 	if err == nil || n != 0 {
 		t.Fatalf("RemoveFiles = %d, %v; want 0 removed and an error", n, err)
 	}
@@ -242,7 +242,7 @@ func TestRemoveFilesRecordsOnlyAttemptedPaths(t *testing.T) {
 	}
 	sw := selfwrite.New(time.Minute)
 	lrc := filepath.Join(dir, "song.lrc")
-	if n, err := RemoveFiles([]string{lrc, bad}, sw); err == nil || n != 0 {
+	if n, err := RemoveFiles([]Backup{{Path: lrc, Content: []byte(lrcBody)}, {Path: bad}}, sw); err == nil || n != 0 {
 		t.Fatalf("RemoveFiles = %d, %v; want 0 and an error", n, err)
 	}
 	if sw.Suppress(lrc) {
@@ -265,5 +265,50 @@ func TestAppendBackupSyncsTheContainingDirectory(t *testing.T) {
 	err = AppendBackup(f, Backup{Op: "op", Path: "p"})
 	if err == nil || !strings.Contains(err.Error(), "backup directory") {
 		t.Fatalf("err = %v, want a backup-directory error", err)
+	}
+}
+
+// Between the late read and the unlink a file can be replaced. The late Report
+// fires in exactly that window: the first report places a late song.txt, and
+// while that one is reported the case acts on a file already read.
+func TestMarkRemovesOnlyTheBytesItBackedUp(t *testing.T) {
+	other := func(p string) error { return os.WriteFile(p, []byte("[00:01.00]Words nobody backed up\n"), 0o600) }
+	for _, tc := range []struct {
+		name, target string
+		act          func(p string) error
+		removed      int
+		wantErr      string // empty for a mark that completes
+	}{
+		{"different words keep every file", "song.lrc", other, 0, "nothing was removed"},
+		{"different words in a later file keep it", "song.txt", other, 1, "only 1 of 2"},
+		{"the same bytes are the ones backed up", "song.lrc", func(p string) error { return os.WriteFile(p, []byte(lrcBody), 0o600) }, 2, ""},
+		{"a symlink is kept", "song.lrc", func(p string) error {
+			return errors.Join(os.Remove(p), os.Symlink(filepath.Join(filepath.Dir(p), "song.txt"), p))
+		}, 0, "nothing was removed"},
+		{"a vanished file counts as removed", "song.lrc", os.Remove, 2, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFx(t)
+			f.write(t, "song.lrc", lrcBody)
+			calls := 0
+			res, err := f.svc.Mark(f.ctx, f.req(func(Backup) error {
+				if calls++; calls == 1 {
+					f.write(t, "song.txt", "Late words nobody saw\n")
+					return nil
+				}
+				return tc.act(filepath.Join(f.dir, tc.target))
+			}))
+			keptLRC, keptTXT := tc.wantErr != "" && tc.removed == 0, tc.wantErr != ""
+			if res.Removed != tc.removed || res.Reopened == keptTXT || f.exists("song.lrc") != keptLRC || f.exists("song.txt") != keptTXT {
+				t.Errorf("Mark = %+v, lrc on disk %t, txt on disk %t; want the changed file and every later one kept", res, f.exists("song.lrc"), f.exists("song.txt"))
+			}
+			if tc.wantErr == "" && err == nil {
+				return
+			}
+			if !errors.Is(err, ErrChangedBeforeRemoval) || tc.wantErr == "" || !strings.Contains(err.Error(), tc.wantErr) ||
+				strings.Contains(err.Error(), "nothing was removed") != keptLRC {
+				t.Errorf("Mark = %v, want %q (empty: no error)", err, tc.wantErr)
+			}
+		})
 	}
 }

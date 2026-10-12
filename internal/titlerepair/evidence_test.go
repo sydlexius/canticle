@@ -440,3 +440,42 @@ func TestLateFileNeedsManualMark(t *testing.T) {
 		t.Errorf("rerun: %+v, row %s; want the row refused as not provable and left alone", res, s.rowState(t, tr.id))
 	}
 }
+
+// A file replaced after Mark's late read is kept with every other file, and the
+// row is counted as needing a manual mark, not as an error or a skip.
+func TestFileReplacedAfterItsBackupNeedsManualMark(t *testing.T) {
+	s := newShelf(t)
+	tr := s.row(t, "")
+	put(t, tr.stem+".lrc", lrcBody, 0)
+	res, seen := run(t, s.d, s.opts(true, func(lyricblock.Backup) error {
+		if !exists(tr.stem + ".txt") {
+			put(t, tr.stem+".txt", plainWords, 0)
+		} else {
+			put(t, tr.stem+".lrc", lrcBody+"[00:09.00]Glim the vorn\n", 0)
+		}
+		return nil
+	}))
+	if res.NeedsManualMark != 1 || res.Errors != 0 || res.Removed != 0 || seen[tr.id] != DispositionNeedsManualMark ||
+		!exists(tr.stem+".lrc") || !exists(tr.stem+".txt") {
+		t.Errorf("%+v, disposition %q; want one row needing a manual mark with both files kept", res, seen[tr.id])
+	}
+}
+
+// The vet dates a file by its record alone: one with no time is refused though
+// the file on disk is dated at the settle and its cached words pass an old one.
+func TestVetRefusesARecordWithNoModTime(t *testing.T) {
+	s := newShelf(t)
+	tr := s.row(t, "")
+	put(t, tr.stem+".txt", plainWords, 0)
+	s.cacheWords(t, shelfArtist, tr.title)
+	c := candidate{id: tr.id, artist: shelfArtist, title: tr.title, lane: providers.Musixmatch, completedAt: settled.Format(time.RFC3339)}
+	rec := lyricblock.Backup{Path: tr.stem + ".txt", Content: []byte(plainWords), ModTime: settled.Add(-year)}
+	r := New(s.d, nil)
+	if err := r.vet(context.Background(), c, []lyricblock.Backup{rec}); err != nil {
+		t.Fatalf("vet of a dated record with cached words = %v, want nil", err)
+	}
+	rec.ModTime = time.Time{}
+	if err := r.vet(context.Background(), c, []lyricblock.Backup{rec}); !errors.Is(err, errNotProvable) {
+		t.Errorf("vet of a record with no time = %v, want errNotProvable", err)
+	}
+}

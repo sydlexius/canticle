@@ -146,7 +146,8 @@ type target struct {
 // row; Report every file; ONE transaction inserts the blocks, invalidates the
 // cache and clears the row's edit marks (the row stays settled, so no worker can
 // claim it); re-read EVERY file and Report and block any that is new or changed;
-// unlink; a second transaction reopens the row and clears its word/upgrade state.
+// unlink each while it still holds the bytes reported (RemoveFiles); a second
+// transaction reopens the row and clears its word/upgrade state.
 //
 // A failure before the first transaction changes nothing; after it, the blocks
 // stand and the row is settled with whatever files remain. Calling Mark again
@@ -274,8 +275,11 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 		}
 		res.NewBlocks += more.NewBlocks
 	}
-	n, err := RemoveFiles(late, s.sw)
+	n, err := RemoveFiles(lateRecs, s.sw)
 	res.Removed = n
+	if n == 0 && errors.Is(err, ErrChangedBeforeRemoval) {
+		return res, fmt.Errorf("lyricblock: work item %d is blocked but a new or changed file was not backed up and nothing was removed; mark it by hand: %w", id, err)
+	}
 	if err != nil {
 		return res, fmt.Errorf("lyricblock: work item %d is blocked but only %d of %d lyric files were removed; retry the mark to finish: %w", id, n, len(late), err)
 	}

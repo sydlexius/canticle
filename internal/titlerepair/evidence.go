@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -69,9 +68,11 @@ func (r *Repairer) cull(ctx context.Context, c candidate, o Options, res *Result
 			res.Reopened++
 		}
 		return DispositionRepaired, files
-	case changed && (errors.Is(err, errSourceDisagrees) || errors.Is(err, errNotProvable)):
+	case changed && (errors.Is(err, errSourceDisagrees) || errors.Is(err, errNotProvable)),
+		mr.Removed == 0 && errors.Is(err, lyricblock.ErrChangedBeforeRemoval):
 		// Mark's late vet (see MarkRequest.Vet): blocked, nothing removed, and a
 		// rerun refuses the row at the first vet. Not retryable.
+		// A file replaced after its backup stops the same way; a rerun vets it.
 		res.NeedsManualMark++
 		r.log.Warn("titlerepair: a file appeared or changed mid-repair and was not vetted; mark the row wrong by hand", "id", c.id)
 		return DispositionNeedsManualMark, files
@@ -139,15 +140,15 @@ func (r *Repairer) vet(ctx context.Context, c candidate, recs []lyricblock.Backu
 				return errSourceDisagrees
 			}
 		}
-		fi, serr := os.Lstat(b.Path)
-		if settledErr != nil || serr != nil || fi.ModTime().Sub(settled) > mtimeSlack {
+		// The time of the handle the bytes came from; a record without one refuses.
+		if settledErr != nil || b.ModTime.IsZero() || b.ModTime.Sub(settled) > mtimeSlack {
 			return errNotProvable
 		}
 		fp := lyricblock.Fingerprint(string(b.Content))
 		if fp != "" && (slices.Contains(cached, fp) || r.store.Blocked(ctx, c.artistKey, c.titleKey, fp)) {
 			continue
 		}
-		if settled.Sub(fi.ModTime()) > mtimeSlack {
+		if settled.Sub(b.ModTime) > mtimeSlack {
 			return errNotProvable
 		}
 	}

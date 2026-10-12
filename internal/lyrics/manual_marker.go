@@ -64,6 +64,12 @@ func ReadRegularNoFollow(path string, limit int64) ([]byte, error) {
 	return readRegularNoFollow(path, limit)
 }
 
+// ReadRegularNoFollowInfo is ReadRegularNoFollow that also returns the FileInfo
+// of the handle the bytes came from, so a caller can date exactly those bytes.
+func ReadRegularNoFollowInfo(path string, limit int64) ([]byte, os.FileInfo, error) {
+	return readRegularNoFollowInfo(path, limit)
+}
+
 // ErrMarkerChanged is returned by RemoveManualMarker when the entry at the path
 // is no longer the file that was read and confirmed a manual marker. Nothing was
 // removed; the caller may retry.

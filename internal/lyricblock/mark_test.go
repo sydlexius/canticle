@@ -305,7 +305,7 @@ func TestMarkPartialUnlinkIsCompletedByRetry(t *testing.T) {
 	}
 	// The second file's removal must fail whatever the process privilege (a root
 	// CI container ignores directory modes): while the late pass reports it, turn
-	// its path into a non-empty directory, which os.Remove refuses. The extra
+	// its path into a non-empty directory, which is not the file backed up. The extra
 	// line makes the late pass see a changed file and report it again.
 	bad := filepath.Join(dir2, "song.lrc")
 	calls := 0
