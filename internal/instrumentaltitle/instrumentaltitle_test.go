@@ -95,7 +95,6 @@ func TestStrongFamilies(t *testing.T) {
 		{"オフ・ボーカル", FamilyOffVocal},
 		{"オフ　ヴォーカル", FamilyOffVocal},
 		{"オフボーカル・バージョン", FamilyOffVocal},
-		{"Minus One", FamilyMinusOne},
 		{"MR Ver.", FamilyMR},
 		{"M.R. Ver", FamilyMR},
 		{"MR Version", FamilyMR},
@@ -176,7 +175,7 @@ func TestWeakAndNone(t *testing.T) {
 		{"Instrumental", "", weak(FamilyInstrumental, PositionInline)},
 		{"Instrumentals", "", weak(FamilyInstrumental, PositionInline)},
 		{"Instrumental Weather", "", weak(FamilyInstrumental, PositionInline)},
-		{"Glass Harbor Minus One", "", weak(FamilyMinusOne, PositionInline)},
+		{"Glass Harbor Minus One", "", Verdict{}}, // a sing-along product: excluded
 		{"Instrumentalist", "", Verdict{}},
 		{"Glass Harbor (Instrumentalist)", "", Verdict{}},
 		// "inst" is a term only alone in a segment; inline it abbreviates anything.
@@ -196,7 +195,7 @@ func TestWeakAndNone(t *testing.T) {
 		{"Glass Harbor - Instrumental - Demo", "", weak(FamilyInstrumental, PositionInline)},
 		// A segment that qualifies nothing is a song named with the word.
 		{"(Instrumental)", "", weak(FamilyInstrumental, PositionBracket)},
-		{"[BGM] (Minus One)", "", weak(FamilyBGM, PositionBracket)},
+		{"[BGM] (Off Vocal)", "", weak(FamilyBGM, PositionBracket)},
 		{"~Instrumental~", "", weak(FamilyInstrumental, PositionSuffix)},
 		// Weak terms stay Weak in any position.
 		{"Glass Harbor (Orchestral Version)", "", weak(FamilyArrangement, PositionBracket)},
@@ -221,7 +220,7 @@ func TestRealBase(t *testing.T) {
 	} {
 		cases = append(cases,
 			tc{n + " - Off Vocal", "", weak(FamilyOffVocal, PositionSuffix)},
-			tc{n + " - Minus One", "", weak(FamilyMinusOne, PositionSuffix)},
+			tc{n + " - Minus One", "", Verdict{}}, // a sing-along product: excluded
 			tc{n + " (Instrumental)", "", weak(FamilyInstrumental, PositionBracket)},
 			tc{"(BGM) " + n, "", weak(FamilyBGM, PositionBracket)},
 			// The same number in front of a name is only a number.
@@ -239,7 +238,7 @@ func TestRealBase(t *testing.T) {
 		// A packaging word is still a name when it stands outside the brackets.
 		{"Original (Instrumental)", "", strong(FamilyInstrumental, PositionBracket)},
 		// The artist-prefix shape cannot be told apart here: the caller's check.
-		{"Tin Lantern Band - Minus One", "", strong(FamilyMinusOne, PositionSuffix)},
+		{"Tin Lantern Band - Off Vocal", "", strong(FamilyOffVocal, PositionSuffix)},
 		{"Lecture - Inst. 2020", "", strong(FamilyInst, PositionSuffix)},
 		// A title in its own bracket pair, before the qualifier, is a base.
 		{"「Glass Harbor」(Instrumental)", "", strong(FamilyInstrumental, PositionBracket)},
@@ -261,7 +260,7 @@ func TestRealBase(t *testing.T) {
 func TestContradiction(t *testing.T) {
 	run(t, []tc{
 		{"Glass Harbor (Off Vocal Version) [With Lead Vocal]", "", weak(FamilyOffVocal, PositionBracket)},
-		{"Glass Harbor (Minus One Version) (Vocal Version)", "", weak(FamilyMinusOne, PositionBracket)},
+		{"Glass Harbor (MR Version) (Vocal Version)", "", weak(FamilyMR, PositionBracket)},
 		{"Glass Harbor (Instrumental) (Vocal Mix)", "", weak(FamilyInstrumental, PositionBracket)},
 		{"Glass Harbor (Vocal Version) - Instrumental", "", weak(FamilyInstrumental, PositionSuffix)},
 		{"Glass Harbor (Not Instrumental) [BGM]", "", weak(FamilyInstrumental, PositionBracket)},
@@ -269,9 +268,9 @@ func TestContradiction(t *testing.T) {
 		{"Glass Harbor (Instrumental) - Vocals Up", "", weak(FamilyInstrumental, PositionBracket)},
 		{"Glass Harbor - Instrumental (Sung Demo)", "", weak(FamilyInstrumental, PositionSuffix)},
 		{"Glass Harbor (Vocal [Instrumental])", "", weak(FamilyInstrumental, PositionBracket)},
-		{"Glass Harbor (Minus One) [Guide Melody]", "", weak(FamilyMinusOne, PositionBracket)},
+		{"Glass Harbor (Off Vocal) [Guide Melody]", "", weak(FamilyOffVocal, PositionBracket)},
 		{"Glass Harbor (Backing Track) [Chorus On]", "", weak(FamilyBackingTrack, PositionBracket)},
-		{"Glass Harbor (Sing-Along) (Backing Track)", "", weak(FamilyBackingTrack, PositionBracket)},
+		{"Glass Harbor (Sing-Along) (Backing Track)", "", Verdict{}}, // a sing-along product: excluded
 		{"Glass Harbor (Vox) [Instrumental]", "", weak(FamilyInstrumental, PositionBracket)},
 		{"Glass Harbor (Sung) [Instrumental]", "", weak(FamilyInstrumental, PositionBracket)},
 		// "sung" is a hard word: it counts in a dash-suffix too.
@@ -283,7 +282,7 @@ func TestContradiction(t *testing.T) {
 		{"Glass Harbor (Instrumental) (with Singer)", "", weak(FamilyInstrumental, PositionBracket)},
 		{"Glass Harbor (Instrumental) (with Voice)", "", weak(FamilyInstrumental, PositionBracket)},
 		{"Glass Harbor (Instrumental) (with Rap)", "", weak(FamilyInstrumental, PositionBracket)},
-		{"Glass Harbor (Singalong) (Backing Track)", "", weak(FamilyBackingTrack, PositionBracket)},
+		{"Glass Harbor (Singalong) (Backing Track)", "", Verdict{}}, // a sing-along product: excluded
 		{"夜の灯台 (インスト) [ガイド入り]", "", weak(FamilyInst, PositionBracket)},
 		{"夜の灯台 (インスト) [新ボーカル]", "", weak(FamilyInst, PositionBracket)},
 		{"夜の灯台 (インスト) [ガイドボーカル入り]", "", weak(FamilyInst, PositionBracket)},
@@ -392,11 +391,30 @@ var karaokeSpellings = []string{
 	"カラオケ", "ｶﾗｵｹ", "カラ・オケ", "カラオケ版", "からおけ", "卡拉OK", "караоке", "가라오케", "kara\u200boke",
 }
 
-var excludedSpellings = slices.Concat(aCappellaSpellings, karaokeSpellings)
+// A sing-along product must get its lyrics exactly as karaoke does: the product
+// form of each term, spaced, hyphenated, glued, and with the phrases a product
+// name carries beside it. "Backing Track" is not here: it is a product on an
+// album only (TestBackingTrack).
+var singAlongSpellings = []string{
+	"Accompaniment Track", "Accompaniment Tracks", "Accompaniment Trax", "ACCOMPANIMENT-TRACK",
+	"Performance Track", "Performance Tracks", "Performance Trax", "PerformanceTrax",
+	"Split Track", "Split Tracks", "Split-Trax", "SplitTrax",
+	"Minus One", "Minus-One", "MinusOne", "Ｍｉｎｕｓ　Ｏｎｅ", "Minus‐One",
+	"Performance Track with Background Vocals", "Split Track Instrumental",
+	"Minus 1", "Minus-1", "Minus1",
+	"Sing Along", "Sing-Along", "Singalong", "Sing-Alongs", "SING ALONGS", "Play Along", "Play-Along", "Playalong",
+	// The phrases a karaoke label prints beside the title.
+	"Originally Performed by Tin Lantern Band", "In the Style of Tin Lantern Band", "in-the-style-of Tin Lantern Band",
+}
 
-// TestExclusion: a cappella and karaoke beat everything in the title, in every
-// position. In the album, a cappella cancels only the album's own signal, while
-// karaoke takes the title's verdict with it.
+// excludedSpellings is a cappella first: TestExclusion reads every spelling
+// after those as one that takes the title's verdict with it from the album.
+var excludedSpellings = slices.Concat(aCappellaSpellings, karaokeSpellings, singAlongSpellings)
+
+// TestExclusion: a cappella, karaoke and the sing-along products beat
+// everything in the title, in every position. In the album, a cappella cancels
+// only the album's own signal, while karaoke and a sing-along product take the
+// title's verdict with them.
 func TestExclusion(t *testing.T) {
 	var cases []tc
 	for i, s := range excludedSpellings {
@@ -407,7 +425,7 @@ func TestExclusion(t *testing.T) {
 		cases = append(cases,
 			tc{"Glass Harbor (" + s + ")", "", Verdict{}},
 			tc{"Glass Harbor (" + s + ") [Instrumental]", "", Verdict{}},
-			tc{"Glass Harbor (" + s + ") - Minus One", "", Verdict{}},
+			tc{"Glass Harbor (" + s + ") - Off Vocal", "", Verdict{}},
 			tc{"Glass Harbor - " + s, "", Verdict{}},
 			tc{"Glass Harbor " + s, "Low Tide (Instrumental)", Verdict{}},
 			tc{"Glass Harbor", "Low Tide " + s, Verdict{}},
@@ -440,7 +458,7 @@ func TestAlbumSignal(t *testing.T) {
 	run(t, []tc{
 		{"Glass Harbor", "Low Tide (Instrumental)", weak(FamilyInstrumental, PositionAlbum)},
 		{"Glass Harbor", "Low Tide (Instrumentals)", weak(FamilyInstrumental, PositionAlbum)},
-		{"Glass Harbor", "Low Tide - Minus One", weak(FamilyMinusOne, PositionAlbum)},
+		{"Glass Harbor", "Low Tide - Minus One", Verdict{}}, // a sing-along album
 		{"Glass Harbor", "Low Tide - Karaoke", Verdict{}},
 		{"Glass Harbor", "Instrumental Works", weak(FamilyInstrumental, PositionAlbum)},
 		{"Glass Harbor", "Low Tide (Original Score)", weak(FamilyScore, PositionAlbum)},
@@ -449,9 +467,184 @@ func TestAlbumSignal(t *testing.T) {
 		{"Glass Harbor", "インスト全集", weak(FamilyInst, PositionAlbum)},
 		// The title's own verdict wins over the album's, except on a karaoke album.
 		{"Glass Harbor (BGM)", "Low Tide (Karaoke)", Verdict{}},
-		{"Glass Harbor (BGM)", "Low Tide (Minus One)", strong(FamilyBGM, PositionBracket)},
+		{"Glass Harbor (BGM)", "Low Tide (Minus One)", Verdict{}},
+		{"Glass Harbor (BGM)", "Low Tide (Instrumentals)", strong(FamilyBGM, PositionBracket)},
 		{"Final Score", "Low Tide (Instrumental)", weak(FamilyScore, PositionInline)},
 	})
+}
+
+// TestSingAlongAndLabelExclusion: a sing-along or play-along release, and a
+// track carrying a karaoke label phrase, is excluded exactly as karaoke is,
+// from the title or from the album.
+func TestSingAlongAndLabelExclusion(t *testing.T) {
+	for _, c := range []struct{ title, album string }{
+		{"Glass Harbor", "Low Tide Sing-Along (Instrumental)"},
+		{"Glass Harbor", "Singalong Favorites (Instrumental Version)"},
+		{"Glass Harbor", "Low Tide (Instrumental) (Sing-Along)"},
+		{"Glass Harbor", "Playalong Favorites - Instrumentals"},
+		{"Glass Harbor - Sing-Along Version", "Low Tide (Instrumental)"},
+		{"Glass Harbor (Play Along) [Instrumental]", ""},
+		{"Glass Harbor (Minus 1)", ""},
+		{"Glass Harbor (Instrumental)", "Quiet Shelf (Performance Tracks)"},
+		{"Glass Harbor", "Low Tide (Originally Performed by Tin Lantern Band) [Instrumental]"},
+		{"Glass Harbor (Originally Performed by Tin Lantern Band) [Instrumental]", ""},
+		{"Glass Harbor (In the Style of Tin Lantern Band)", "Low Tide (Instrumental)"},
+		{"Glass Harbor (Instrumental)", "In the Style of Tin Lantern Band"},
+	} {
+		if got := Classify(c.title, c.album); got != (Verdict{}) {
+			t.Errorf("Classify(%q, %q) = %+v, want no verdict for a sing-along or karaoke-label name", c.title, c.album, got)
+		}
+		if !KaraokeExcluded(c.title, c.album) {
+			t.Errorf("KaraokeExcluded(%q, %q) = false for a sing-along or karaoke-label name", c.title, c.album)
+		}
+	}
+}
+
+// TestProductPhraseAdjacency: the words of a product phrase count only when
+// nothing but whitespace or one unspaced hyphen stands between them. Any other
+// punctuation makes them two separate things, and the verdict stands. So does
+// it for a head word on its own, in another order, or apart from its partner.
+func TestProductPhraseAdjacency(t *testing.T) {
+	bracket := strong(FamilyInstrumental, PositionBracket)
+	for _, c := range []tc{
+		{"Live Performance - Track 3", "", Verdict{}},
+		{"Performance, Track 2 (Instrumental)", "", bracket},
+		{"Split - Tracks From The Vault", "", Verdict{}},
+		{"Glass Harbor (Instrumental)", "Live Performance - Track 3", bracket},
+		{"Glass Harbor (Instrumental)", "Split - Tracks From The Vault", bracket},
+		{"Glass Harbor (Instrumental)", "Backing: Tracks", bracket},
+		{"Glass Harbor (Instrumental)", "Split / Trax", bracket},
+		{"Glass Harbor (Instrumental)", "Minus, One", bracket},
+		{"Glass Harbor (Instrumental)", "Minus - 1", bracket},
+		{"Glass Harbor (Instrumental)", "Performance -Tracks", bracket},
+		{"Glass Harbor (Instrumental)", "Play. Along the River", bracket},
+		{"Glass Harbor (Instrumental)", "In the Style. Of Course", bracket},
+		{"Glass Harbor", "Performance, Tracks (Instrumentals)", weak(FamilyInstrumental, PositionAlbum)},
+		// Bare words.
+		{"Glass Harbor (Instrumental)", "The Performance", bracket},
+		{"The Performance (Instrumental)", "", bracket},
+		{"Split (Instrumental)", "Tin Lantern Band / Paper Kites Split EP", bracket},
+		{"Sonata for Violin with Piano Accompaniment (Instrumental)", "", bracket},
+		{"Glass Harbor (Instrumental)", "Backing Vocals", bracket},
+		{"Glass Harbor (Instrumental)", "One Minus Two", bracket},
+		{"Track Performance (Instrumental)", "Tracks Split", bracket},
+		{"Glass Harbor (Instrumental)", "Performance of the Track", bracket},
+		{"Sing (Instrumental)", "Along the River", bracket},
+		{"Glass Harbor", "The Performance", Verdict{}},
+	} {
+		if got := Classify(c.title, c.album); got != c.want {
+			t.Errorf("Classify(%q, %q) = %+v, want %+v", c.title, c.album, got, c.want)
+		}
+		if KaraokeExcluded(c.title, c.album) {
+			t.Errorf("KaraokeExcluded(%q, %q) = true, want false: not a product phrase", c.title, c.album)
+		}
+	}
+}
+
+// TestBackingTrack: in a track title "Backing Track" is an instrumental
+// qualifier, since there it labels a studio outtake, and the plural or glued
+// form is nothing at all. In an album name every form is a sing-along product,
+// and that exclusion beats the title's qualifier.
+func TestBackingTrack(t *testing.T) {
+	bracket := strong(FamilyBackingTrack, PositionBracket)
+	for _, c := range []struct {
+		title, album string
+		want         Verdict
+		excluded     bool
+	}{
+		{"Glass Harbor (Backing Track)", "", bracket, false},
+		{"Glass Harbor - Backing Track", "", strong(FamilyBackingTrack, PositionSuffix), false},
+		{"Glass Harbor (Instrumental Backing Track)", "", strong(FamilyInstrumental, PositionBracket), false},
+		{"Glass Harbor (Take 14 / Instrumental Backing Track)", "", weak(FamilyInstrumental, PositionBracket), false},
+		{"Glass Harbor (Takes 1 & 2 / Backing Track)", "", weak(FamilyBackingTrack, PositionBracket), false},
+		{"Glass Harbor (Backing Track)", "Low Tide", bracket, false},
+		{"Glass Harbor (Backing Track)", "Low Tide (Instrumental)", bracket, false},
+		// Only the singular is the qualifier; no title form is an exclusion.
+		{"Glass Harbor (Backing Tracks)", "", Verdict{}, false},
+		{"Glass Harbor (Backing Trax) [Instrumental]", "", strong(FamilyInstrumental, PositionBracket), false},
+		{"Glass Harbor (BackingTrack) [Instrumental]", "", strong(FamilyInstrumental, PositionBracket), false},
+		// The album: a sing-along product, whatever the title says.
+		{"Glass Harbor", "Low Tide (Backing Tracks)", Verdict{}, true},
+		{"Glass Harbor", "Low Tide Backing Track (Instrumental)", Verdict{}, true},
+		{"Glass Harbor (Instrumental)", "Low Tide Backing Trax", Verdict{}, true},
+		{"Glass Harbor (Instrumental)", "Low Tide BackingTracks", Verdict{}, true},
+		{"Glass Harbor (Instrumental)", "Low Tide Backing-Track", Verdict{}, true},
+		{"Glass Harbor (Backing Track)", "Low Tide (Backing Tracks)", Verdict{}, true},
+		{"Glass Harbor (Backing Track)", "Quiet Shelf (Performance Tracks)", Verdict{}, true},
+		// A title carrying another excluded phrase beside it is excluded.
+		{"Glass Harbor (Sing-Along) (Backing Track)", "", Verdict{}, true},
+		{"Glass Harbor (Backing Track) [Minus One]", "", Verdict{}, true},
+		{"Glass Harbor (Karaoke Backing Track)", "", Verdict{}, true},
+	} {
+		if got := Classify(c.title, c.album); got != c.want {
+			t.Errorf("Classify(%q, %q) = %+v, want %+v", c.title, c.album, got, c.want)
+		}
+		if got := KaraokeExcluded(c.title, c.album); got != c.excluded {
+			t.Errorf("KaraokeExcluded(%q, %q) = %v, want %v", c.title, c.album, got, c.excluded)
+		}
+	}
+}
+
+// TestSingALongAndDashes: the three-word "sing a long" spellings and any one
+// dash between the words of a product phrase are exclusions; other separators
+// are not.
+func TestSingALongAndDashes(t *testing.T) {
+	for _, c := range []struct {
+		title, album string
+		excluded     bool
+	}{
+		{"Glass Harbor (Instrumental)", "Low Tide Sing-A-Long", true},
+		{"Glass Harbor (Instrumental)", "Low Tide Sing A Long", true},
+		{"Glass Harbor (Instrumental)", "Low Tide Sing-a-long", true},
+		{"Glass Harbor (Instrumental)", "Low Tide Play-A-Long", true},
+		{"Glass Harbor (Instrumental)", "Low Tide Sing-A-Longs", true},
+		{"Glass Harbor (Sing-A-Long)", "", true},
+		// Deliberate over-match: an ordinary title with the words adjacent costs
+		// one normal lookup, the safe direction.
+		{"Sing a Long Road Home", "", true},
+		{"Sing, a Long Night", "", false},
+		// Any one dash rune.
+		{"Glass Harbor (Minus\u2013One)", "", true},
+		{"Glass Harbor (Instrumental)", "Low Tide Sing\u2013Along", true},
+		{"Glass Harbor (Minus\u2014One)", "", true},
+		{"Glass Harbor (Minus\u2212One)", "", true},
+		{"Glass Harbor (Minus\u2011One)", "", true},
+		{"Glass Harbor (Minus\u2010One)", "", true},
+		{"Glass Harbor (Minus-One)", "", true},
+		// Not a single dash with nothing around it.
+		{"Glass Harbor (Minus_One)", "", false},
+		{"Glass Harbor (Minus.One)", "", false},
+		{"Glass Harbor (Minus--One)", "", false},
+		{"Glass Harbor (Minus, One)", "", false},
+		{"Glass Harbor (Minus - One)", "", false},
+		{"Glass Harbor (Minus/One)", "", false},
+	} {
+		if got := KaraokeExcluded(c.title, c.album); got != c.excluded {
+			t.Errorf("KaraokeExcluded(%q, %q) = %v, want %v", c.title, c.album, got, c.excluded)
+		}
+		if c.excluded {
+			if got := Classify(c.title, c.album); got != (Verdict{}) {
+				t.Errorf("Classify(%q, %q) = %+v, want no verdict", c.title, c.album, got)
+			}
+		}
+	}
+}
+
+// TestAcceptedTierRises pins two inputs whose tier rose against main (Weak to
+// Strong) when the qualifier scan stopped reading "Minus/One" as a term. They
+// are accepted because neither is a realistic tag.
+func TestAcceptedTierRises(t *testing.T) {
+	for _, c := range []struct {
+		title string
+		want  Verdict
+	}{
+		{"Glass Harbor (Backing Track) [Not Minus/One]", strong(FamilyBackingTrack, PositionBracket)},
+		{"(Minus/One) [Backing Track]", strong(FamilyBackingTrack, PositionBracket)},
+	} {
+		if got := Classify(c.title, ""); got != c.want {
+			t.Errorf("Classify(%q) = %+v, want %+v", c.title, got, c.want)
+		}
+	}
 }
 
 func TestTierString(t *testing.T) {
@@ -462,8 +655,8 @@ func TestTierString(t *testing.T) {
 
 // FuzzClassify checks that no input panics, that a verdict is always drawn from
 // the closed sets (so it can never carry any part of the title), that Strong is
-// only ever a bracket or a suffix, and that every pinned a cappella or karaoke
-// spelling turns any title into None.
+// only ever a bracket or a suffix, and that every pinned a cappella, karaoke or
+// sing-along spelling turns any title into None.
 func FuzzClassify(f *testing.F) {
 	for _, s := range []string{
 		"", " ", "(", ")", ")(", "((((", "]]]]", "([{【〔〈《「『", "』」》〉〕】}])", "()", "(())[]{}",
@@ -501,7 +694,8 @@ func FuzzClassify(f *testing.F) {
 }
 
 // TestKaraokeExcluded pins the one distinction Classify's None hides: karaoke
-// (title or album) is reported, an a cappella title and a clean one are not.
+// and the sing-along products (title or album) are reported, an a cappella
+// title and a clean one are not.
 func TestKaraokeExcluded(t *testing.T) {
 	for _, tc := range []struct {
 		title, album string
@@ -510,6 +704,9 @@ func TestKaraokeExcluded(t *testing.T) {
 		{"Glass Harbor (Karaoke Version)", "", true},
 		{"Glass Harbor - カラオケ", "", true},
 		{"Glass Harbor", "Paper Kites Karaoke", true},
+		{"Glass Harbor (Performance Track)", "", true},
+		{"Glass Harbor (Instrumental)", "Low Tide Split-Trax", true},
+		{"Glass Harbor", "Low Tide - Minus 1", true},
 		{"Glass Harbor (A Cappella)", "", false},
 		{"Glass Harbor (Instrumental)", "Paper Kites", false},
 	} {
@@ -592,7 +789,7 @@ func TestPlaceholderArtist(t *testing.T) {
 // artist that is not the text before the separator, whether the track artist
 // or the album artist carries it. The verdict is Classify's own either way.
 func TestActionable(t *testing.T) {
-	const suffix = "Tin Lantern Band - Minus One"
+	const suffix = "Tin Lantern Band - Off Vocal"
 	for _, tc := range []struct {
 		name                              string
 		title, album, artist, albumArtist string
@@ -615,6 +812,10 @@ func TestActionable(t *testing.T) {
 		{"suffix, no artist", suffix, "", "", "", false},
 		{"suffix, placeholders only", suffix, "", "Unknown Artist", "Various Artists", false},
 		{"weak", "Glass Harbor", "Glass Harbor (Instrumentals)", "Paper Kites", "", false},
+		{"backing track title", "Glass Harbor (Backing Track)", "", "Paper Kites", "", true},
+		{"backing track title on a sing-along album", "Glass Harbor (Backing Track)", "Low Tide (Backing Tracks)", "Paper Kites", "", false},
+		{"sing-along title", "Glass Harbor (Performance Track)", "", "Paper Kites", "", false},
+		{"sing-along album", "Glass Harbor (Instrumental)", "Low Tide Performance Tracks", "Paper Kites", "", false},
 		{"a cappella", "Glass Harbor (A Cappella Instrumental)", "", "Paper Kites", "", false},
 		{"karaoke title", "Glass Harbor (Karaoke Instrumental)", "", "Paper Kites", "", false},
 		{"karaoke album", "Glass Harbor (Instrumental)", "Karaoke Hits", "Paper Kites", "", false},

@@ -16,7 +16,7 @@ func strongTitle(t models.Track) bool {
 
 // A cached entry under a Strong instrumental-titled row reads as a miss (#1469):
 // the row is enqueued, not marked done. Non-matching titles, a nil predicate, and
-// a cappella and karaoke titles (Classify reports None for them) keep the cache hit.
+// a cappella, karaoke and sing-along titles (Classify reports None for them) keep the cache hit.
 func TestEnqueuePending_TitleInstrumentalCacheEntryIsAMiss(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {

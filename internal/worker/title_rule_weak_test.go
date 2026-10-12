@@ -179,7 +179,7 @@ func TestWeakTitle_Unchanged(t *testing.T) {
 		{name: "a cappella title", track: models.Track{ArtistName: tin, TrackName: "Glass Harbor (A Cappella)"}, want: "done|musixmatch|unsynced"},
 		{name: "karaoke title", track: models.Track{ArtistName: tin, TrackName: "Glass Harbor (Karaoke Version)"}, want: "done|musixmatch|unsynced"},
 		// Strong, but declined by the artist check: not Weak either.
-		{name: "strong title, declined", track: models.Track{ArtistName: tin, TrackName: tin + " - Minus One"}, want: "done|musixmatch|unsynced"},
+		{name: "strong title, declined", track: models.Track{ArtistName: tin, TrackName: tin + " - Off Vocal"}, want: "done|musixmatch|unsynced"},
 		// Every output is probed. The lyric there is the one the provider has, so
 		// the forced re-write leaves it byte-identical, where a detector settle
 		// would have replaced it with a marker.

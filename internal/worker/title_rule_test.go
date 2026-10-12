@@ -203,29 +203,36 @@ func TestTitleRule_StillFetches(t *testing.T) {
 		{"bare word", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Instrumental"}, true},
 		{"a cappella", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (A Cappella)"}, true},
 		{"karaoke", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Karaoke Instrumental)"}, true},
-		{"artist prefix", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Tin Lantern Band - Minus One"}, true},
-		{"artist prefix with a track number", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Tin Lantern Band - 03 - Minus One"}, true},
+		{"artist prefix", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Tin Lantern Band - Off Vocal"}, true},
+		{"artist prefix with a track number", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Tin Lantern Band - 03 - Off Vocal"}, true},
 		{"track number then artist", models.Track{ArtistName: "Tin Lantern Band", TrackName: "03 Tin Lantern Band - Instrumental"}, true},
 		{"artist starting with a number", models.Track{ArtistName: "3 Tin Lanterns", TrackName: "3 Tin Lanterns - Instrumental"}, true},
 		{"album artist prefix", models.Track{ArtistName: "Glass Harbor", AlbumArtist: "Tin Lantern Band", TrackName: "Tin Lantern Band - Off Vocal"}, true},
-		{"one artist of several", models.Track{ArtistName: "Tin Lantern Band feat. Paper Kites", TrackName: "Tin Lantern Band - Minus One"}, true},
-		{"no artist to compare", models.Track{TrackName: "Glass Harbor - Minus One"}, true},
-		{"article on the title only", models.Track{ArtistName: "Tin Lantern Band", TrackName: "The Tin Lantern Band - Minus One"}, true},
-		{"article on the tag only", models.Track{ArtistName: "The Tin Lantern Band", TrackName: "Tin Lantern Band - Minus One"}, true},
-		{"title credits a guest the tag lacks", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Tin Lantern Band feat. Paper Kites - Minus One"}, true},
-		{"ampersand spelled out", models.Track{ArtistName: "Tin & Lantern", TrackName: "Tin and Lantern - Minus One"}, true},
+		{"one artist of several", models.Track{ArtistName: "Tin Lantern Band feat. Paper Kites", TrackName: "Tin Lantern Band - Off Vocal"}, true},
+		{"no artist to compare", models.Track{TrackName: "Glass Harbor - Off Vocal"}, true},
+		{"article on the title only", models.Track{ArtistName: "Tin Lantern Band", TrackName: "The Tin Lantern Band - Off Vocal"}, true},
+		{"article on the tag only", models.Track{ArtistName: "The Tin Lantern Band", TrackName: "Tin Lantern Band - Off Vocal"}, true},
+		{"title credits a guest the tag lacks", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Tin Lantern Band feat. Paper Kites - Off Vocal"}, true},
+		{"ampersand spelled out", models.Track{ArtistName: "Tin & Lantern", TrackName: "Tin and Lantern - Off Vocal"}, true},
 		{"artist, title, then qualifier", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Tin Lantern Band - Glass Harbor - Instrumental"}, true},
 		// The compilation shape: the performer is the track artist and the album
 		// artist is someone else, so the resolved artist is not the prefix.
-		{"track artist prefix on a compilation", models.Track{ArtistName: "Tin Lantern Band", AlbumArtist: "Paper Kites Collective", TrackName: "Tin Lantern Band - Minus One"}, true},
+		{"track artist prefix on a compilation", models.Track{ArtistName: "Tin Lantern Band", AlbumArtist: "Paper Kites Collective", TrackName: "Tin Lantern Band - Off Vocal"}, true},
 		// A placeholder is no artist: nothing was compared, so nothing settles.
-		{"placeholder artist", models.Track{ArtistName: "Various Artists", TrackName: "Glass Harbor - Minus One"}, true},
-		{"placeholder artist and album artist", models.Track{ArtistName: "Unknown Artist", AlbumArtist: "V.A.", TrackName: "Glass Harbor - Minus One"}, true},
-		{"suffix on another title", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor - Minus One"}, false},
-		{"one real artist beside a placeholder", models.Track{ArtistName: "Tin Lantern Band", AlbumArtist: "Various Artists", TrackName: "Glass Harbor - Minus One"}, false},
+		{"placeholder artist", models.Track{ArtistName: "Various Artists", TrackName: "Glass Harbor - Off Vocal"}, true},
+		{"placeholder artist and album artist", models.Track{ArtistName: "Unknown Artist", AlbumArtist: "V.A.", TrackName: "Glass Harbor - Off Vocal"}, true},
+		{"suffix on another title", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor - Off Vocal"}, false},
+		{"one real artist beside a placeholder", models.Track{ArtistName: "Tin Lantern Band", AlbumArtist: "Various Artists", TrackName: "Glass Harbor - Off Vocal"}, false},
 		// The bracket position needs no artist check at all.
 		{"bracket with no artist", models.Track{TrackName: "Glass Harbor (Instrumental)"}, false},
 		{"bracket on a title equal to the artist", models.Track{ArtistName: "Glass Harbor", TrackName: "Glass Harbor (Instrumental)"}, false},
+		// A sing-along product keeps its lyrics, on the title or the album.
+		{"sing-along title", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Performance Track)"}, true},
+		{"sing-along album", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Instrumental)", AlbumName: "Low Tide Performance Tracks"}, true},
+		// "Backing Track" in a title is a qualifier (a studio outtake); on the
+		// album it names a sing-along product, and the album wins.
+		{"backing track title", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Backing Track)", AlbumName: "Paper Kites"}, false},
+		{"backing track title on a sing-along album", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Backing Track)", AlbumName: "Low Tide (Backing Tracks)"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTitleRig(t, tc.track)
@@ -360,8 +367,12 @@ func TestTitleRule_KaraokeSkipsDetectorFirst(t *testing.T) {
 	}{
 		{"karaoke title", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Karaoke Version)"}, true, 0, "musixmatch"},
 		{"karaoke album", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor", AlbumName: "Paper Kites Karaoke"}, true, 0, "musixmatch"},
+		{"sing-along title", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Minus One)"}, true, 0, "musixmatch"},
+		{"sing-along album", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor", AlbumName: "Low Tide Split-Trax"}, true, 0, "musixmatch"},
+		{"backing tracks album", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor", AlbumName: "Low Tide (Backing Tracks)"}, true, 0, "musixmatch"},
 		{"rule off", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor (Karaoke Version)"}, false, 1, "detector"},
 		{"ordinary title", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor"}, true, 1, "detector"},
+		{"bare product word", models.Track{ArtistName: "Tin Lantern Band", TrackName: "Glass Harbor", AlbumName: "The Performance"}, true, 1, "detector"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTitleRig(t, tc.track)

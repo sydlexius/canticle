@@ -178,7 +178,7 @@ func TestClassificationCounts(t *testing.T) {
 // wins, in that order. The one candidate reaches the cull, which refuses it:
 // these runs name no library root.
 func TestSkips(t *testing.T) {
-	const prefixed = "Tin Lantern Band - Minus One"
+	const prefixed = "Tin Lantern Band - Off Vocal"
 	d := dbtest.Open(t)
 	ids := seed(t, d,
 		wq{status: "processing"},
