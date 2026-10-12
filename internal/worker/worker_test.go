@@ -3427,16 +3427,11 @@ func TestRebuildOrchestrator_DetectorOrdering(t *testing.T) {
 	}
 }
 
-// TestRebuildOrchestratorSkipsDetectorLaneUnderParallelMode verifies that the
-// detector lane is NOT installed when providers.mode=parallel. Under parallel
-// dispatch every lane races, so a fast gate-positive detector verdict can be
-// held as the winning result before a slower provider answers - which would let
-// a lyrical track settle as instrumental. Detection is therefore left inactive
-// under parallel (staged dispatch is tracked in #528). Asserted through
-// observable behavior: the detector must never be invoked, and the item must
-// take the ordinary deferred-miss path instead of being completed as
-// instrumental.
-func TestRebuildOrchestratorSkipsDetectorLaneUnderParallelMode(t *testing.T) {
+// TestParallelDemotedDetectorSettlesAfterProviderMiss: the default demoted
+// ordering under providers.mode=parallel runs the detector once the provider
+// race has ended with nothing to commit (#528). The detector lane used to be
+// left out under parallel dispatch, so this row was an ordinary deferred miss.
+func TestParallelDemotedDetectorSettlesAfterProviderMiss(t *testing.T) {
 	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
 	q := &fakeQueue{items: []queue.WorkItem{{
 		ID: 210,
@@ -3450,7 +3445,8 @@ func TestRebuildOrchestratorSkipsDetectorLaneUnderParallelMode(t *testing.T) {
 	writer := &fakeWriter{}
 	det := &fakeDetector{instrumental: true, version: "9.9.9"}
 
-	w := New(q, &fakeCache{}, &fakeFetcher{err: musixmatch.ErrNotFound}, writer)
+	fetcher := &fakeFetcher{err: musixmatch.ErrNotFound}
+	w := New(q, &fakeCache{}, fetcher, writer)
 	w.EnableAudioDetector(det)
 	w.SetInstrumentalDetectionDefault(true)
 	w.SetProvidersMode(orchestrator.ModeParallel)
@@ -3459,25 +3455,23 @@ func TestRebuildOrchestratorSkipsDetectorLaneUnderParallelMode(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	if len(det.calls) != 0 {
-		t.Fatalf("detector calls = %v; want none (the detector lane must not be installed under parallel mode)", det.calls)
+	if len(det.calls) != 1 || fetcher.calls != 1 {
+		t.Fatalf("detector calls = %v, provider calls = %d; want one each (the provider is asked first)", det.calls, fetcher.calls)
 	}
-	if len(q.completed) != 0 {
-		t.Fatalf("completed = %v; want none (with detection inactive the item is an ordinary miss)", q.completed)
+	if len(q.completed) != 1 || q.completed[0] != 210 || q.outcomeTypes[210] != "instrumental" {
+		t.Fatalf("completed = %v, outcome = %q; want [210] settled instrumental", q.completed, q.outcomeTypes[210])
 	}
-	if len(q.deferred) != 1 {
-		t.Fatalf("deferred = %v; want the item deferred as a normal miss", q.deferred)
+	if len(q.deferred) != 0 || len(writer.writes) != 1 {
+		t.Fatalf("deferred = %v, writes = %v; want no deferral and one marker write", q.deferred, writer.writes)
 	}
-	if len(writer.writes) != 0 {
-		t.Fatalf("writes = %v; want none (no instrumental marker without a detector verdict)", writer.writes)
+	if !w.lastItemContactedProvider {
+		t.Error("no pacing wait owed although a provider was asked before the detector settled the row")
 	}
 }
 
-// TestRebuildOrchestratorInstallsDetectorLaneUnderOrderedMode is the positive
-// counterpart to the parallel case above: the same configuration under ordered
-// mode MUST install the lane and settle the track as instrumental. Without this
-// pair, the parallel test would also pass if the detector lane were broken
-// outright.
+// TestRebuildOrchestratorInstallsDetectorLaneUnderOrderedMode is the ordered
+// twin of the parallel case above: the same configuration under ordered mode
+// MUST install the lane and settle the track as instrumental.
 func TestRebuildOrchestratorInstallsDetectorLaneUnderOrderedMode(t *testing.T) {
 	track := models.Track{ArtistName: "Composer", TrackName: "Interlude"}
 	q := &fakeQueue{items: []queue.WorkItem{{
@@ -3625,25 +3619,28 @@ func TestAllLanesUnavailableConsultsDetectorLane(t *testing.T) {
 	}
 }
 
-// TestAllLanesUnavailableIgnoresDetectorUnderParallelMode confirms the gate does
-// not resurrect the detector under parallel dispatch, where rebuildOrchestrator
-// intentionally declines to install the lane. Without this, the availability fix
-// would quietly re-enable the racing behavior the parallel exclusion prevents.
-func TestAllLanesUnavailableIgnoresDetectorUnderParallelMode(t *testing.T) {
-	det := &fakeDetector{instrumental: true, version: "9.9.9"}
+// TestAllLanesUnavailableConsultsDetectorLaneUnderParallelMode is the parallel
+// twin of the test above: the lane is installed in both modes (#528), so a
+// healthy detector keeps the worker draining there too.
+func TestAllLanesUnavailableConsultsDetectorLaneUnderParallelMode(t *testing.T) {
 	w := New(&fakeQueue{}, &fakeCache{}, &fakeFetcher{}, &fakeWriter{})
-	w.EnableAudioDetector(det)
+	w.EnableAudioDetector(&fakeDetector{instrumental: true, version: "9.9.9"})
 	w.SetInstrumentalDetectionDefault(true)
 	w.SetProvidersMode(orchestrator.ModeParallel)
+	w.SetDetectorOrdering("front")
 
-	if w.detectorLane != nil {
-		t.Fatal("no detector lane may be installed under parallel mode")
+	if w.detectorLane == nil {
+		t.Fatal("no detector lane installed under parallel mode")
 	}
 	for _, l := range w.lanes {
 		l.Breaker().Trip()
 	}
+	if w.allLanesUnavailable() {
+		t.Fatal("worker must not idle while a healthy detector lane can still settle items")
+	}
+	w.detectorLane.Breaker().Trip()
 	if !w.allLanesUnavailable() {
-		t.Fatal("under parallel mode the gate must ignore the detector and idle on open provider breakers")
+		t.Fatal("with every lane open, including the detector, the worker must idle")
 	}
 }
 

@@ -11,7 +11,7 @@ selectable via `providers.mode`:
 - **`ordered`** (the default) queries the configured lanes in priority order -
   the primary first, then each entry in `providers.fallback_order` - and returns
   the first suitable result.
-- **`parallel`** dispatches every lane concurrently and races them; the first
+- **`parallel`** dispatches every provider lane concurrently and races them; the first
   suitable result wins, and an unsynced winner is held for a bounded window
   (`providers.race_wait_seconds`, default 2) so a slower synced result can
   preempt it.
@@ -176,6 +176,13 @@ orchestrator accepts an unsynced result but holds the write for a bounded
 window, during which a synced result (a strict quality upgrade) preempts it. A
 synced result that arrives first wins immediately and cancels the window; if the
 window elapses with no upgrade, the held unsynced result is committed.
+
+A lane that can only answer "instrumental" (the audio detector) never joins the
+race; it is staged outside it. Placed first it runs before any provider request
+starts, and a positive verdict ends the dispatch with no provider asked; placed
+last it runs only after at least one provider was asked and every provider
+that was asked answered without a lyric; when none could be asked (every
+circuit open), the track waits.
 
 This window is a configuration value, never a literal (see "Gap 2"). Its key is
 `[providers] race_wait_seconds` with a default of `2`.
