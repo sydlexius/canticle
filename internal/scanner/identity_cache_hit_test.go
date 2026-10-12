@@ -308,6 +308,7 @@ func TestIdentityCache_LookupErrorFallsBackToTheFile(t *testing.T) {
 			return fmt.Errorf("identity: %w", &fs.PathError{Op: "open", Path: p, Err: syscall.ENOENT})
 		}, "first_error=syscall.Errno"},
 		{"cause names the file", func(p string) error { return errors.New("cannot read " + filepath.Base(p)) }, "first_error=*errors.errorString"},
+		{"cause names the directory", func(p string) error { return errors.New("cannot open " + filepath.Dir(p)) }, "first_error=*errors.errorString"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newHitEnv(t, true)
@@ -333,7 +334,7 @@ func TestIdentityCache_LookupErrorFallsBackToTheFile(t *testing.T) {
 			if !strings.Contains(line, "level=WARN") || !strings.Contains(line, "hits=0 misses=0 lookup_errors=2") || !strings.Contains(line, tc.cause) {
 				t.Errorf("cache log line = %q, want WARN, lookup_errors=2 and %s", line, tc.cause)
 			}
-			for _, private := range []string{e.root, "flac", "Marlow", "Quiet", "Harbor", "Salt"} {
+			for _, private := range []string{e.root, filepath.Base(filepath.Dir(e.root)), "flac", "Marlow", "Quiet", "Harbor", "Salt"} {
 				if strings.Contains(line, private) {
 					t.Errorf("cache log line carries %q: %s", private, line)
 				}

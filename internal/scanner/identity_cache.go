@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/models"
@@ -61,8 +62,10 @@ type identityStats struct {
 
 // fail counts a store error in n and keeps the scan's first one as a cause that
 // cannot name a file: the INNERMOST error's text, as every wrapper quotes the
-// path, or only its type if the chain holds a path error or the text the name.
-func (st *identityStats) fail(n *int, err error, name string) {
+// path, or only its type if the chain holds a path error or the text contains
+// the file's base name, its directory or the key's directory (never a vacuous
+// "", "." or root candidate, which would match text that names nothing).
+func (st *identityStats) fail(n *int, err error, fullPath, key string) {
 	*n++
 	if st.firstError != "" {
 		return
@@ -72,7 +75,11 @@ func (st *identityStats) fail(n *int, err error, name string) {
 		inner = u
 	}
 	st.firstError = inner.Error()
-	if errors.As(err, new(*fs.PathError)) || errors.As(err, new(*os.LinkError)) || strings.Contains(st.firstError, name) {
+	redact := errors.As(err, new(*fs.PathError)) || errors.As(err, new(*os.LinkError))
+	for _, s := range []string{filepath.Base(fullPath), filepath.Dir(fullPath), filepath.Dir(key)} {
+		redact = redact || (s != "" && s != "." && s != string(filepath.Separator) && strings.Contains(st.firstError, s))
+	}
+	if redact {
 		st.firstError = fmt.Sprintf("%T", inner)
 	}
 }
@@ -143,7 +150,7 @@ func (sc *Scanner) cachedIdentity(ctx context.Context, opts ScanOptions, file os
 	mtimeNano, size := info.ModTime().UnixNano(), info.Size()
 	id, found, err := sc.identities.Identity(ctx, key, mtimeNano, size)
 	if err != nil {
-		stats.fail(&stats.lookupErrors, err, file.Name())
+		stats.fail(&stats.lookupErrors, err, fullPath, key)
 		return CachedIdentity{}, false
 	}
 	if !found {
@@ -157,7 +164,7 @@ func (sc *Scanner) cachedIdentity(ctx context.Context, opts ScanOptions, file os
 			err = sc.durations.Record(ctx, key, mtimeNano, size, id.TrackLength)
 		}
 		if err != nil {
-			stats.fail(&stats.bankErrors, err, file.Name())
+			stats.fail(&stats.bankErrors, err, fullPath, key)
 		}
 	}
 	return id, true
