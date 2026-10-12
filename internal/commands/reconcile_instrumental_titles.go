@@ -291,6 +291,9 @@ func printTitleRepair(out io.Writer, res titlerepair.Result, applied bool) {
 	line("rows examined", res.Examined)
 	line("no signal or excluded (a cappella, karaoke)", res.NoSignal)
 	line("weak", res.Weak)
+	line("weak, detector says instrumental", res.WeakDetectorInstrumental)
+	line("weak, detector says not instrumental", res.WeakDetectorNotInstrumental)
+	line("weak, never scored", res.WeakDetectorUnscored)
 	line("strong", res.Strong)
 	cells := make([]string, 0, len(res.StrongBy))
 	for k, n := range res.StrongBy {

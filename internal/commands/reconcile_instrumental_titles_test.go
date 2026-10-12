@@ -251,6 +251,33 @@ func TestReconcileInstrumentalTitlesDryRunThenApply(t *testing.T) {
 }
 
 // Each refusal exits non-zero before anything is changed.
+// The dry run splits the Weak rows by the verdict stored for them, from the
+// column alone, and a Strong row's verdict does not reach the weak lines.
+func TestReconcileInstrumentalTitlesSplitsWeakRowsByStoredVerdict(t *testing.T) {
+	f := newRITFixture(t, "strong", "", false)
+	set := func(id, result string) {
+		t.Helper()
+		f.db(t, func(q func(string, ...any) string) {
+			q("UPDATE work_queue SET instrumental_result = "+result+" WHERE id = ? RETURNING id", id)
+		})
+	}
+	w1, _ := f.titled(t, "- Instrumental Demo", "", 0)
+	w2, _ := f.titled(t, "- Instrumental Demo", "", 0)
+	f.titled(t, "- Instrumental Demo", "", 0) // never scored: NULL
+	strong, _ := f.row(t, "", 0)
+	set(w1, "1")
+	set(w2, "0")
+	set(strong, "1")
+
+	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{Tail: f.tail, Backup: f.backup})
+	if code != 0 {
+		t.Fatalf("dry run = %d:\n%s", code, out)
+	}
+	ritWant(t, "dry run", out, "weak: 3", "weak, detector says instrumental: 1", "weak, detector says not instrumental: 1",
+		"weak, never scored: 1", "strong: 1", "strong, detector says instrumental: 1")
+	ritNoLeak(t, "dry run stdout", out, f)
+}
+
 func TestReconcileInstrumentalTitlesRefusals(t *testing.T) {
 	f := newRITFixture(t, "off", "", false)
 	id, lrc := f.row(t, "", 0)
