@@ -50,3 +50,39 @@ func TestSaveInstrumentalTitleMode(t *testing.T) {
 		t.Error("config mutated on a rejected save")
 	}
 }
+
+func TestSettingsInstrumentalTitleModeLegacyAliasSelectsAll(t *testing.T) {
+	cfg := config.Config{InstrumentalTitle: config.InstrumentalTitleConfig{Mode: "strong_weak"}}
+	sel := titleModeSelectedRE.FindString(renderSettings(t, cfg))
+	if !regexp.MustCompile(`<option[^>]*value="all"[^>]*selected|<option[^>]*selected[^>]*value="all"`).MatchString(sel) {
+		t.Errorf("all is not selected for a strong_weak config:\n%s", sel)
+	}
+	if regexp.MustCompile(`value="strong_weak"`).MatchString(sel) {
+		t.Errorf("the dropdown offers the deprecated spelling:\n%s", sel)
+	}
+}
+
+// TestSaveInstrumentalTitleModeLegacyAliasStoresAll covers both save lanes:
+// the alias is accepted and the file holds the canonical value, not the typed one.
+func TestSaveInstrumentalTitleModeLegacyAliasStoresAll(t *testing.T) {
+	seed := "[server]\naddr = \"127.0.0.1:3876\"\n"
+	for name, post := range map[string]func(*testing.T, http.Handler) int{
+		"field": func(t *testing.T, mux http.Handler) int {
+			return postField(t, mux, url.Values{"path": {"instrumental_title.mode"}, "value": {"strong_weak"}}).Code
+		},
+		"section": func(t *testing.T, mux http.Handler) int {
+			return postSection(t, mux, [][2]string{{"instrumental_title.mode", "strong_weak"}}).Code
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mux, cfgPath := detectorOrderingTestUI(t, seed)
+			if code := post(t, mux); code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", code)
+			}
+			raw := readConfig(t, cfgPath)
+			if !bytes.Contains(raw, []byte(`mode = "all"`)) || bytes.Contains(raw, []byte("strong_weak")) {
+				t.Errorf("file does not hold the canonical value:\n%s", raw)
+			}
+		})
+	}
+}

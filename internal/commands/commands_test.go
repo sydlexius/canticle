@@ -4046,15 +4046,15 @@ func TestConfigInstrumentalTitleModeGetSetRoundTrip(t *testing.T) {
 	if err := setConfigValue(&cfg, "instrumental_title.mode", " Strong_Weak "); err != nil {
 		t.Fatalf("setConfigValue: %v", err)
 	}
-	if cfg.InstrumentalTitle.Mode != "strong_weak" {
-		t.Fatalf("mode = %q; want strong_weak", cfg.InstrumentalTitle.Mode)
+	if cfg.InstrumentalTitle.Mode != "all" {
+		t.Fatalf("mode = %q; want all", cfg.InstrumentalTitle.Mode)
 	}
 	for _, bad := range []string{"bogus", ""} {
 		if err := setConfigValue(&cfg, "instrumental_title.mode", bad); err == nil {
 			t.Fatalf("setConfigValue accepted %q for instrumental_title.mode", bad)
 		}
-		if cfg.InstrumentalTitle.Mode != "strong_weak" {
-			t.Fatalf("rejected value %q changed the mode to %q; want it left at strong_weak", bad, cfg.InstrumentalTitle.Mode)
+		if cfg.InstrumentalTitle.Mode != "all" {
+			t.Fatalf("rejected value %q changed the mode to %q; want it left at all", bad, cfg.InstrumentalTitle.Mode)
 		}
 	}
 	for _, mode := range []string{"off", "strong"} {

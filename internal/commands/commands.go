@@ -1002,9 +1002,9 @@ func titleRuleOn(cfg config.Config) bool {
 }
 
 // titleRuleWeakOn reports whether the rule's Weak tier is on (#1471): only
-// strong_weak asks the detector first for a weakly instrumental-titled track.
+// all asks the detector first for a weakly instrumental-titled track.
 func titleRuleWeakOn(cfg config.Config) bool {
-	return cfg.InstrumentalTitleMode() == config.InstrumentalTitleStrongWeak
+	return cfg.InstrumentalTitleMode() == config.InstrumentalTitleAll
 }
 
 func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func(string) musixmatch.Fetcher, newWriter func(roots ...string) lyrics.Writer) int {
@@ -4073,7 +4073,7 @@ func setConfigValue(cfg *config.Config, key string, value string) error {
 	case "instrumental_title.mode":
 		mode, ok := config.NormalizeInstrumentalTitleMode(value)
 		if !ok {
-			return fmt.Errorf("instrumental_title.mode must be one of off, strong, strong_weak")
+			return fmt.Errorf("instrumental_title.mode must be one of off, strong, all")
 		}
 		cfg.InstrumentalTitle.Mode = mode
 	case "timing_validation.enabled":

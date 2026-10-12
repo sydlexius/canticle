@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sydlexius/canticle/internal/config"
@@ -53,4 +54,22 @@ func TestConfigSetAcceptsOrderingFrontWhenModeParallel(t *testing.T) {
 func TestConfigSetAcceptsModeParallelWhenOrderingFront(t *testing.T) {
 	path := writeConfigTOML(t, "[instrumental_detector]\nordering = \"front\"\n")
 	assertConfigSetAccepted(t, path, "providers.mode", "parallel")
+}
+
+// TestConfigSetTitleModeAliasStoresAll: the deprecated strong_weak spelling is
+// accepted by `config set` and the FILE holds the canonical all.
+func TestConfigSetTitleModeAliasStoresAll(t *testing.T) {
+	path := writeConfigTOML(t, "[instrumental_title]\nmode = \"strong\"\n")
+	var out bytes.Buffer
+	code := runConfig(&out, ConfigCmd{Set: &ConfigSetCmd{Key: "instrumental_title.mode", Value: "strong_weak", ConfigPath: path}})
+	if code != 0 {
+		t.Fatalf("config set strong_weak: exit code = %d (output %q); want 0", code, out.String())
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // reason: G304: test temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `mode = "all"`) || strings.Contains(string(raw), "strong_weak") {
+		t.Errorf("file does not hold the canonical value:\n%s", raw)
+	}
 }

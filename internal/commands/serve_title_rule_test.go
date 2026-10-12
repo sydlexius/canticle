@@ -27,7 +27,8 @@ import (
 func TestRunServe_WiresInstrumentalTitleMode(t *testing.T) {
 	for _, tc := range []struct{ name, section, want string }{
 		{"strong", "[instrumental_title]\nmode = \" Strong \"\n\n", "[source:title-rule]"},
-		{"strong_weak", "[instrumental_title]\nmode = \"strong_weak\"\n\n", "[source:title-rule]"},
+		{"all", "[instrumental_title]\nmode = \"all\"\n\n", "[source:title-rule]"},
+		{"legacy strong_weak alias", "[instrumental_title]\nmode = \"strong_weak\"\n\n", "[source:title-rule]"},
 		{"off by default", "", "words from the provider"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,18 +86,20 @@ func TestRunServe_WiresInstrumentalTitleMode(t *testing.T) {
 // built in code can hold a mode the loader would have normalized or reset, and
 // the raw field then disagrees with the accessor in both directions.
 func TestTitleRuleOn(t *testing.T) {
-	for mode, want := range map[config.InstrumentalTitleMode]bool{
-		"": false, "off": false, " OFF ": false, "sometimes": false,
-		"strong": true, " Strong ": true, "STRONG_WEAK": true,
+	// on is the rule at all; weak is the Weak tier, all's alone (#1471).
+	// strong_weak is the old name for all.
+	type want struct{ on, weak bool }
+	for mode, want := range map[config.InstrumentalTitleMode]want{
+		"": {}, "off": {}, " OFF ": {}, "sometimes": {},
+		"strong": {on: true}, " Strong ": {on: true},
+		"ALL": {on: true, weak: true}, "STRONG_WEAK": {on: true, weak: true},
 	} {
 		cfg := config.Config{InstrumentalTitle: config.InstrumentalTitleConfig{Mode: mode}}
-		if got := titleRuleOn(cfg); got != want {
-			t.Errorf("titleRuleOn(mode %q) = %v, want %v", mode, got, want)
+		if got := titleRuleOn(cfg); got != want.on {
+			t.Errorf("titleRuleOn(mode %q) = %v, want %v", mode, got, want.on)
 		}
-		// The Weak tier is strong_weak's alone (#1471).
-		weak := strings.EqualFold(strings.TrimSpace(string(mode)), "strong_weak")
-		if got := titleRuleWeakOn(cfg); got != weak {
-			t.Errorf("titleRuleWeakOn(mode %q) = %v, want %v", mode, got, weak)
+		if got := titleRuleWeakOn(cfg); got != want.weak {
+			t.Errorf("titleRuleWeakOn(mode %q) = %v, want %v", mode, got, want.weak)
 		}
 	}
 }

@@ -373,8 +373,15 @@ func validatorFor(f FieldSpec) Validator {
 		// would reject a value the next boot accepts.
 		return ValidateNormalizedEnum(enumValues[f.Path]...)
 	case "instrumental_title.mode":
-		// NORMALIZED like the timing enums: the loader lowercases and trims first.
-		return ValidateNormalizedEnum(enumValues[f.Path]...)
+		// NORMALIZED like the timing enums, and the deprecated strong_weak alias
+		// is accepted: the loader folds it to all, so refusing it here would
+		// reject a spelling the next boot accepts.
+		return func(value string) error {
+			if _, ok := normalizeInstrumentalTitleMode(value); ok {
+				return nil
+			}
+			return fmt.Errorf("must be one of %v", enumValues[f.Path])
+		}
 	case "instrumental_detector.ordering":
 		// NORMALIZED: `config set`, the env override and the loader all trim and
 		// lowercase this value, so a verbatim comparison here would refuse a
@@ -492,8 +499,13 @@ func ApplyChanges(configPath string, changes map[string]string) error {
 		f, _ := FieldByPath(path)
 		// The validator accepted this key after trimming and lowercasing; store
 		// the same spelling `config set` stores, not the one that was typed.
-		if path == "instrumental_detector.ordering" {
+		switch path {
+		case "instrumental_detector.ordering":
 			value = strings.ToLower(strings.TrimSpace(value))
+		case "instrumental_title.mode":
+			// Also folds the deprecated strong_weak alias to all.
+			m, _ := normalizeInstrumentalTitleMode(value)
+			value = string(m)
 		}
 		if err := SetValue(doc, path, f.Type, value, f.Description); err != nil {
 			return err

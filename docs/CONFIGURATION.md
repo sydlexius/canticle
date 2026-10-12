@@ -139,7 +139,7 @@ The table below is the complete env-var surface; the watcher and verification se
 | `MXLRC_TIMING_VALIDATION_REVALIDATE_BATCH` | `100` | Sidecars judged per sweep cycle; values below 1 reset to the default. |
 | `MXLRC_TIMING_VALIDATION_ON_MIS_SYNCED` | `demote` | Action for a lyric whose cues overrun the audio: `demote`, `quarantine`, `purge`, `off`. |
 | `MXLRC_TIMING_VALIDATION_ON_CATEGORICAL` | `quarantine` | Action for a lyric belonging to a different song: `quarantine`, `purge`, `off`. |
-| `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | The instrumental title rule: `off`, `strong`, `strong_weak`. See `[instrumental_title]`. |
+| `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | The instrumental title rule: `off`, `strong`, `all`. See `[instrumental_title]`. |
 | `MXLRC_WORD_SYNC_RECHECK_ENABLED` | `false` | Master switch for the serve-mode word-timing re-check sweep. |
 | `MXLRC_WORD_SYNC_RECHECK_BATCH` | `100` | Most rows in word-recheck mode at once (1-1000); out-of-range values are ignored. |
 | `MXLRC_UPGRADE_SWEEP_ENABLED` | `false` | Master switch for the serve-mode upgrade sweep. |
@@ -523,7 +523,7 @@ mode = "off"
 
 | Key | Env | Default | Meaning |
 |---|---|---|---|
-| `mode` | `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | `off`: the track title is ignored (today's behavior). `strong`: a track whose title carries a strong instrumental qualifier (a bracketed or dash-suffixed "Instrumental" or "Off Vocal") is settled with an instrumental marker without asking a lyric provider. `strong_weak`: as `strong`, and a track with a weaker title or album signal (the word outside a qualifier, a `Piano Version`, an album named Instrumental) is put to the audio detector first and settled with the detector's marker only if it agrees; otherwise it is looked up as usual. The weak tier needs the detector and ordered provider dispatch. An unrecognized file value resets to `off`; `config set` rejects an unrecognized value and leaves the setting unchanged; an invalid env value warns and keeps the current setting. |
+| `mode` | `MXLRC_INSTRUMENTAL_TITLE_MODE` | `off` | `off`: the track title is ignored (today's behavior). `strong`: a track whose title carries a strong instrumental qualifier (a bracketed or dash-suffixed "Instrumental" or "Off Vocal") is settled with an instrumental marker without asking a lyric provider. `all`: as `strong`, and a track with a weaker title or album signal (the word outside a qualifier, a `Piano Version`, an album named Instrumental) is put to the audio detector first and settled with the detector's marker only if it agrees; otherwise it is looked up as usual. The weak tier needs the detector and ordered provider dispatch. `strong_weak` is the old name for `all` and is still accepted. An unrecognized file value resets to `off`; `config set` rejects an unrecognized value and leaves the setting unchanged; an invalid env value warns and keeps the current setting. |
 
 ### `[word_sync_recheck]`
 

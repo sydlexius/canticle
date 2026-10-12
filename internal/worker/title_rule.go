@@ -182,7 +182,7 @@ func (w *Worker) completeTitleInstrumental(ctx context.Context, item queue.WorkI
 }
 
 // SetTitleRuleWeak turns the Weak tier on or off (#1471). The caller sets it
-// only for instrumental_title.mode = strong_weak: under strong and off a Weak
+// only for instrumental_title.mode = all: under strong and off a Weak
 // title is looked up like any other.
 func (w *Worker) SetTitleRuleWeak(enabled bool) { w.titleRuleWeak = enabled }
 
