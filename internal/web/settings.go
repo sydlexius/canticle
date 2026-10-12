@@ -461,9 +461,11 @@ var modeOptionLabels = map[string]string{
 }
 
 // detectorOrderingLabels says when the detector is asked relative to the lyrics
-// sources, in place of the bare "demoted" and "front" tokens.
+// sources, in place of the bare "demoted" and "front" tokens. "demoted" names
+// its one exception: with instrumental_title.mode = "strong_weak" a Weak-titled
+// row is put to the detector first whatever the ordering.
 var detectorOrderingLabels = map[string]string{
-	"demoted": "After the lyrics sources miss",
+	"demoted": "After the lyrics sources miss, except weak instrumental titles",
 	"front":   "Before any lyrics source",
 }
 

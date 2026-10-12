@@ -139,8 +139,8 @@ func TestSaveSectionRefusesUnknownDetectorOrdering(t *testing.T) {
 }
 
 // TestSaveAcceptsMixedCaseDetectorOrdering: both web lanes accept a mixed-case
-// spelling, as `config set` does, and the loaded value is the lowercase one
-// `config set` would have stored.
+// spelling, as `config set` does, and the file is written with the lowercase
+// one `config set` would have stored.
 func TestSaveAcceptsMixedCaseDetectorOrdering(t *testing.T) {
 	seed := "[server]\naddr = \"127.0.0.1:3876\"\n\n[instrumental_detector]\nordering = \"demoted\"\n"
 	for name, post := range map[string]func(http.Handler) *httptest.ResponseRecorder{
@@ -162,6 +162,10 @@ func TestSaveAcceptsMixedCaseDetectorOrdering(t *testing.T) {
 		if cfg.InstrumentalDetector.Ordering != "front" {
 			t.Errorf("%s: loaded ordering = %q; want front", name, cfg.InstrumentalDetector.Ordering)
 		}
+		// The file itself holds the lowercase spelling, not only the loaded value.
+		if raw := string(readConfig(t, cfgPath)); !strings.Contains(raw, `ordering = "front"`) {
+			t.Errorf("%s: file does not hold ordering = \"front\":\n%s", name, raw)
+		}
 	}
 }
 
@@ -178,7 +182,7 @@ var detectorOrderingOptionRE = regexp.MustCompile(`<option value="([^"]*)"([^>]*
 // "front". The options carry plain labels, not the bare tokens.
 func TestSettingsPageSelectsStoredDetectorOrdering(t *testing.T) {
 	labels := map[string]string{
-		"demoted": "After the lyrics sources miss",
+		"demoted": "After the lyrics sources miss, except weak instrumental titles",
 		"front":   "Before any lyrics source",
 	}
 	for _, tc := range []struct{ stored, want string }{

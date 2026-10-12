@@ -490,6 +490,11 @@ func ApplyChanges(configPath string, changes map[string]string) error {
 	}
 	for path, value := range changes {
 		f, _ := FieldByPath(path)
+		// The validator accepted this key after trimming and lowercasing; store
+		// the same spelling `config set` stores, not the one that was typed.
+		if path == "instrumental_detector.ordering" {
+			value = strings.ToLower(strings.TrimSpace(value))
+		}
 		if err := SetValue(doc, path, f.Type, value, f.Description); err != nil {
 			return err
 		}
