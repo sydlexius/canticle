@@ -462,11 +462,19 @@ var modeOptionLabels = map[string]string{
 
 // detectorOrderingLabels says when the detector is asked relative to the lyrics
 // sources, in place of the bare "demoted" and "front" tokens. "demoted" names
-// its one exception: with instrumental_title.mode = "strong_weak" a Weak-titled
+// its one exception: with instrumental_title.mode = "all" a Weak-titled
 // row is put to the detector first whatever the ordering.
 var detectorOrderingLabels = map[string]string{
 	"demoted": "After the lyrics sources miss, except weak instrumental titles",
 	"front":   "Before any lyrics source",
+}
+
+// instrumentalTitleModeLabels gives instrumental_title.mode's values plain
+// labels in place of the bare tokens.
+var instrumentalTitleModeLabels = map[string]string{
+	"off":    "Off (ignore the title)",
+	"strong": "Clear instrumental qualifiers only",
+	"all":    "Clear qualifiers, and weaker hints the detector confirms",
 }
 
 // timingActionLabels gives the two remediation dropdowns plain-language labels.
@@ -590,6 +598,10 @@ func selectOptions(path, effective string) []templates.SettingsOption {
 			}
 		case "instrumental_detector.ordering":
 			if l, ok := detectorOrderingLabels[v]; ok {
+				label = l
+			}
+		case "instrumental_title.mode":
+			if l, ok := instrumentalTitleModeLabels[v]; ok {
 				label = l
 			}
 		}
@@ -1204,7 +1216,7 @@ func rawConfigValue(cfg config.Config, path string) string {
 	case "timing_validation.on_categorical":
 		return string(cfg.TimingValidation.OnCategorical)
 	case "instrumental_title.mode":
-		return string(cfg.InstrumentalTitle.Mode)
+		return string(cfg.InstrumentalTitleMode())
 	// [word_sync_recheck]
 	case "word_sync_recheck.enabled":
 		return strconv.FormatBool(cfg.WordSyncRecheck.Enabled)

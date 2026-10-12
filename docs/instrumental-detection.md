@@ -126,7 +126,7 @@ the default ordering it only runs after every provider misses), and a cached
 answer never reaches a provider at all. The track ends up with lyrics for
 singing that is not in the file.
 
-**The policy.** With the mode at `strong` (or `strong_weak`), serve mode settles
+**The policy.** With the mode at `strong` (or `all`), serve mode settles
 a track whose title carries a strong instrumental qualifier with an
 instrumental marker, without asking any provider, the cache, or the detector.
 The title alone decides. Requiring the detector to agree was weighed and
@@ -148,7 +148,7 @@ real title: `(Instrumental)`, `- Off Vocal`, `[Backing Track]`, `(Inst)`,
 - any karaoke title, or any track on a karaoke album: a karaoke track is for
   singing along, so it gets its lyrics (see "Karaoke and the detector" below);
 - weaker signals (an album named Instrumental, `Piano Version`, `Score`),
-  unless the mode is `strong_weak` (see "Weaker signals" below).
+  unless the mode is `all` (see "Weaker signals" below).
 
 **The artist check.** A dash-suffix title is acted on only when the text before
 the last dash is known not to be the artist. It is compared against the track
@@ -162,10 +162,10 @@ not acting. The cost is stated plainly: a genuine `Artist - Title -
 Instrumental` title is declined too, and that track is simply looked up like any
 other.
 
-**Weaker signals (`strong_weak`).** A weak signal is the word used inline or
+**Weaker signals (`all`).** A weak signal is the word used inline or
 as the whole title, a qualifier beside other words, `Piano Version` or
 `Orchestral Version`, `Score`, or an album that carries the signal over a clean
-title. None of these is reliable enough to act on alone, so under `strong_weak`
+title. None of these is reliable enough to act on alone, so under `all`
 such a track is put to the audio detector before the cache and the providers.
 That order holds in the worker only: the scan's own title check is for strong
 titles, so a weak-titled track with a cached lyric can still be settled from the
@@ -588,7 +588,7 @@ under both `providers.mode` values, `"ordered"` and `"parallel"`.
   fresh row. And the audio is read before any provider is asked, for each row
   that reaches the detector with no stored scores to answer from. A row never
   reaches it while detection is off or the detector's breaker is open.
-- **A Weak instrumental title.** With `instrumental_title.mode = "strong_weak"`,
+- **A Weak instrumental title.** With `instrumental_title.mode = "all"`,
   a row whose title carries only a weak instrumental signal is put to the
   detector first under either ordering, with the same costs as `front` for that
   row. See "Title rule".
@@ -605,7 +605,7 @@ under both `providers.mode` values, `"ordered"` and `"parallel"`.
   scores) or the sidecar's model version changes (the audio is then scored
   again).
 - **A Strong instrumental title.** With `instrumental_title.mode` set to
-  `strong` or `strong_weak`, such a title settles with no lookup at all: no
+  `strong` or `all`, such a title settles with no lookup at all: no
   provider, no cache and no detector. See "Title rule".
 
 ## Configuration reference and tuning
@@ -661,7 +661,7 @@ If you do tune:
 
 Under the default `demoted` ordering, detection is otherwise reached only after
 a provider miss, which is paced to the provider's rate limit. The one exception
-is a Weak instrumental title under `instrumental_title.mode = "strong_weak"`,
+is a Weak instrumental title under `instrumental_title.mode = "all"`,
 which is put to the detector first (see "Which setting drains which backlog"). A
 track the detector has never scored therefore waits on a throttle it does not
 use, and an install where nobody runs `scan reconcile-instrumental` drifts

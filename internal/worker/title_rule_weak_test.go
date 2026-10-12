@@ -27,7 +27,7 @@ var (
 	bareWordTrack = models.Track{ArtistName: "Tin Lantern Band", TrackName: "Instrumental", AlbumName: "Paper Kites"}
 )
 
-// newWeakRig is the title rig under instrumental_title.mode = strong_weak with
+// newWeakRig is the title rig under instrumental_title.mode = all with
 // a detector that answers verdict, at the default (demoted) ordering.
 func newWeakRig(t *testing.T, track models.Track, verdict bool) (*titleRig, *fakeDetector) {
 	t.Helper()

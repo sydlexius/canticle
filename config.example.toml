@@ -729,7 +729,7 @@ on_categorical = "quarantine"
 #                 dash-suffixed "Instrumental" or "Off Vocal") is
 #                 settled with an instrumental marker without asking a lyric
 #                 provider
-#   strong_weak - as strong, and a track with a weaker title or album signal
+#   all         - as strong, and a track with a weaker title or album signal
 #                 (the word outside a qualifier, a "Piano Version", an album
 #                 named Instrumental) is put to the audio detector first and
 #                 settled with the detector's marker only if it agrees;

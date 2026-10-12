@@ -47,7 +47,7 @@ func TestStrongTitlePredicate_TierContract(t *testing.T) {
 	if got := instrumentaltitle.Classify(karaoke.TrackName, karaoke.AlbumName).Tier; got == instrumentaltitle.Strong {
 		t.Fatalf("fixture drifted: karaoke album still classifies Strong")
 	}
-	for _, mode := range []config.InstrumentalTitleMode{config.InstrumentalTitleStrong, config.InstrumentalTitleStrongWeak} {
+	for _, mode := range []config.InstrumentalTitleMode{config.InstrumentalTitleStrong, config.InstrumentalTitleAll} {
 		var cfg config.Config
 		cfg.InstrumentalTitle.Mode = mode
 		p := strongTitlePredicate(cfg)

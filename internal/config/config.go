@@ -550,7 +550,7 @@ const (
 // InstrumentalTitleMode is the instrumental_title.mode policy (#1467). Off
 // (the default) ignores the track title, which is today's behavior; Strong
 // settles a title carrying a strong instrumental qualifier without a provider
-// request; StrongWeak additionally honors weaker title or album signals when
+// request; All additionally honors weaker title or album signals when
 // the audio detector agrees. Serve mode reads it once at startup
 // (commands.titleRuleOn and titleRuleWeakOn).
 type InstrumentalTitleMode string
@@ -560,26 +560,56 @@ const (
 	InstrumentalTitleOff InstrumentalTitleMode = "off"
 	// InstrumentalTitleStrong honors strong title qualifiers only.
 	InstrumentalTitleStrong InstrumentalTitleMode = "strong"
-	// InstrumentalTitleStrongWeak also honors weak signals when the detector agrees.
-	InstrumentalTitleStrongWeak InstrumentalTitleMode = "strong_weak"
+	// InstrumentalTitleAll also honors weak signals when the detector agrees.
+	InstrumentalTitleAll InstrumentalTitleMode = "all"
 )
+
+// instrumentalTitleModeLegacyStrongWeak is the pre-rename spelling of
+// InstrumentalTitleAll (shipped in v1.48.0). It is a deprecated alias accepted
+// on every input path and folded to "all" by normalizeInstrumentalTitleMode, so
+// nothing downstream ever sees it.
+const instrumentalTitleModeLegacyStrongWeak = "strong_weak"
 
 // instrumentalTitleModes is the one list the loader, the env arm, the registry
 // enum and `config set` all read, so none can accept a mode another rejects.
 func instrumentalTitleModes() []InstrumentalTitleMode {
-	return []InstrumentalTitleMode{InstrumentalTitleOff, InstrumentalTitleStrong, InstrumentalTitleStrongWeak}
+	return []InstrumentalTitleMode{InstrumentalTitleOff, InstrumentalTitleStrong, InstrumentalTitleAll}
 }
 
-// normalizeInstrumentalTitleMode lowercases and trims a raw mode and reports
-// whether it is one of the supported values.
+// normalizeInstrumentalTitleMode lowercases and trims a raw mode, folds the
+// deprecated strong_weak alias to all, and reports whether the result is one of
+// the supported values.
 func normalizeInstrumentalTitleMode(v string) (InstrumentalTitleMode, bool) {
+	m, _ := normalizeInstrumentalTitleModeAlias(v)
+	return m, isInstrumentalTitleMode(m)
+}
+
+// normalizeInstrumentalTitleModeAlias is normalizeInstrumentalTitleMode's fold
+// step; the second result reports that the deprecated alias was met, so a
+// caller that logs can tell.
+func normalizeInstrumentalTitleModeAlias(v string) (InstrumentalTitleMode, bool) {
 	m := InstrumentalTitleMode(strings.ToLower(strings.TrimSpace(v)))
-	for _, ok := range instrumentalTitleModes() {
-		if m == ok {
-			return m, true
-		}
+	if m == instrumentalTitleModeLegacyStrongWeak {
+		return InstrumentalTitleAll, true
 	}
 	return m, false
+}
+
+// isInstrumentalTitleMode reports whether m is a canonical mode.
+func isInstrumentalTitleMode(m InstrumentalTitleMode) bool {
+	for _, ok := range instrumentalTitleModes() {
+		if m == ok {
+			return true
+		}
+	}
+	return false
+}
+
+// warnInstrumentalTitleModeAlias logs the deprecated-alias notice once per
+// load; it never rewrites the user's file.
+func warnInstrumentalTitleModeAlias(source, old string) {
+	slog.Warn("deprecated config value; using its replacement",
+		"key", "instrumental_title.mode", "source", source, "value", old, "replacement", string(InstrumentalTitleAll)) //nolint:gosec // reason: G706: tainted config value passed as a structured slog field, not a format string
 }
 
 // NormalizeInstrumentalTitleMode exposes normalizeInstrumentalTitleMode to
@@ -590,7 +620,8 @@ func NormalizeInstrumentalTitleMode(v string) (InstrumentalTitleMode, bool) {
 
 // InstrumentalTitleConfig holds the [instrumental_title] settings.
 type InstrumentalTitleConfig struct {
-	// Mode is off (default), strong or strong_weak. An unrecognized value
+	// Mode is off (default), strong or all (strong_weak is the deprecated
+	// alias of all). An unrecognized value
 	// resets to off. Override: MXLRC_INSTRUMENTAL_TITLE_MODE.
 	Mode InstrumentalTitleMode `toml:"mode"`
 }
@@ -1433,6 +1464,9 @@ func LoadWithSources(path string) (Config, map[string]bool, error) {
 			// An unrecognized mode resets to off (the conservative default), the
 			// same rule as timing_validation's action enums.
 			if m, ok := normalizeInstrumentalTitleMode(string(cfg.InstrumentalTitle.Mode)); ok {
+				if _, alias := normalizeInstrumentalTitleModeAlias(string(cfg.InstrumentalTitle.Mode)); alias {
+					warnInstrumentalTitleModeAlias("file", string(cfg.InstrumentalTitle.Mode))
+				}
 				cfg.InstrumentalTitle.Mode = m
 			} else {
 				cfg.InstrumentalTitle.Mode = d.InstrumentalTitle.Mode
@@ -2290,6 +2324,9 @@ func applyEnvOverrides(cfg *Config, applied map[string]bool) {
 		if m, ok := normalizeInstrumentalTitleMode(v); !ok {
 			slog.Warn("env var is invalid; using current value", "var", "MXLRC_INSTRUMENTAL_TITLE_MODE", "value", v, "current", cfg.InstrumentalTitle.Mode) //nolint:gosec // reason: G706: tainted env var passed as a structured slog field value (not a format string); no log-injection vector since slog escapes values
 		} else {
+			if _, alias := normalizeInstrumentalTitleModeAlias(v); alias {
+				warnInstrumentalTitleModeAlias("env", v)
+			}
 			cfg.InstrumentalTitle.Mode = m
 			applied["instrumental_title.mode"] = true
 		}
