@@ -140,21 +140,26 @@ func TestClassificationCounts(t *testing.T) {
 	seed(t, d,
 		wq{detector: 1}, wq{detector: 0}, wq{},
 		wq{title: "Glass Harbor - Off Vocal", detector: 1},
-		wq{title: "Glass Harbor - Instrumental Demo"},        // Weak
-		wq{title: "Glass Harbor", album: "Instrumentals"},    // Weak, by album
-		wq{title: "Glass Harbor (A Cappella)"},               // excluded
-		wq{title: "Glass Harbor (Karaoke Instrumental)"},     // excluded
-		wq{title: strongTitle, album: "Karaoke Night Vol 2"}, // excluded by album
+		wq{title: "Glass Harbor - Instrumental Demo", detector: 1}, // Weak, detector says instrumental
+		wq{title: "Glass Harbor", album: "Instrumentals"},          // Weak, by album, never scored
+		wq{title: "Glass Harbor (Piano Version)", detector: 0},     // Weak, detector says not instrumental
+		wq{title: "Glass Harbor (A Cappella)"},                     // excluded
+		wq{title: "Glass Harbor (Karaoke Instrumental)"},           // excluded
+		wq{title: strongTitle, album: "Karaoke Night Vol 2"},       // excluded by album
 		wq{title: "Glass Harbor"},
 	)
 	res, seen := run(t, d, Options{})
 	want := Result{
-		Examined: 10, NoSignal: 4, Weak: 2, Strong: 4, Candidates: 4, OutsideRoots: 4, // no root is named
+		Examined: 11, NoSignal: 4, Weak: 3, Strong: 4, Candidates: 4, OutsideRoots: 4, // no root is named
 		StrongBy: map[StrongKey]int{
 			{it.FamilyInstrumental, it.PositionBracket}: 3,
 			{it.FamilyOffVocal, it.PositionSuffix}:      1,
 		},
 		DetectorInstrumental: 2, DetectorNotInstrumental: 1, DetectorUnscored: 1,
+		WeakDetectorInstrumental: 1, WeakDetectorNotInstrumental: 1, WeakDetectorUnscored: 1,
+	}
+	if sum := res.WeakDetectorInstrumental + res.WeakDetectorNotInstrumental + res.WeakDetectorUnscored; sum != res.Weak {
+		t.Errorf("weak detector split sums to %d, want Weak %d", sum, res.Weak)
 	}
 	if !maps.Equal(res.StrongBy, want.StrongBy) {
 		t.Errorf("StrongBy = %v, want %v", res.StrongBy, want.StrongBy)

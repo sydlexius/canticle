@@ -298,6 +298,7 @@ appear only inside the backup file.
 | `rows examined` | Tracks whose lyrics came from a provider: settled ones, and ones a worker holds right now (`processing`). Equals no signal + weak + strong. |
 | `no signal or excluded` | The title carries no qualifier, or is a cappella or karaoke. Never touched. |
 | `weak` | A weak signal only. Never touched. |
+| `weak, detector says instrumental` / `weak, detector says not instrumental` / `weak, never scored` | The weak rows by the verdict the detector already stored for them; the three add up to `weak`. Nothing is run to get it. It sizes a possible weak-tier repair. |
 | `strong` | A strong qualifier. The `strong <family> <position>` lines and the three detector lines break this number down. It equals the four `strong, skipped` lines plus `candidates`. |
 | `strong, skipped, audio file unreadable` | The audio file's album tag could not be read, so the title could not be judged the way the worker judges it. |
 | `strong, skipped, in flight` | A worker holds the row right now. |

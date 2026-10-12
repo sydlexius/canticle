@@ -96,6 +96,9 @@ type Result struct {
 	StrongBy map[StrongKey]int
 	// The detector's verdict on the Strong rows, from instrumental_result.
 	DetectorInstrumental, DetectorNotInstrumental, DetectorUnscored int
+	// The same split for the Weak rows, read from instrumental_result and never
+	// scored again. They sum to Weak, and inform whether a weak tier is worth building.
+	WeakDetectorInstrumental, WeakDetectorNotInstrumental, WeakDetectorUnscored int
 	// Unreadable: the file's album could not be read. InFlight: held by a worker.
 	// HandMarked: a hand edit or mark. ArtistPrefixed: the rule declines the title.
 	// InFlight and HandMarked include a row found so only when the cull reached it.
@@ -254,6 +257,14 @@ func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Re
 		return
 	case instrumentaltitle.Weak:
 		res.Weak++
+		switch {
+		case !c.detector.Valid:
+			res.WeakDetectorUnscored++
+		case c.detector.Int64 == 1:
+			res.WeakDetectorInstrumental++
+		default:
+			res.WeakDetectorNotInstrumental++
+		}
 		return
 	case instrumentaltitle.Strong:
 	}
