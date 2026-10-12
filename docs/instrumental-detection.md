@@ -180,10 +180,12 @@ cache at scan time. In the worker:
 
 Everything else is left on the ordinary path, unchanged: no detector
 configured, detection off for the track's library, the detector's breaker open,
-parallel provider dispatch, an upgrade re-fetch, and any track that already has
-a lyric or a marker on disk. A detector that fails or is still starting settles
-nothing and the track is looked up as usual; the early ask still counts as a
-detector call, so a failing detector can open its breaker sooner.
+an upgrade re-fetch, and any track that already has a lyric or a marker on
+disk. `providers.mode` makes no difference: the weak tier asks the detector
+first under ordered and parallel dispatch alike. A detector that fails or is
+still starting settles nothing and the track is looked up as usual; the early
+ask still counts as a detector call, so a failing detector can open its breaker
+sooner.
 `strong` and `off` never ask the detector early. The tier inherits the
 detector's accuracy: a sung track with a weak title that the detector hears as
 instrumental gets a marker and no lyrics. With the upgrade sweep on and

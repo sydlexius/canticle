@@ -1195,6 +1195,10 @@ func TestConfigInstrumentalDetectorOrderingGetSetRoundTrip(t *testing.T) {
 			t.Fatalf("instrumental_detector.ordering = %q; want %q", cfg.InstrumentalDetector.Ordering, ordering)
 		}
 	}
+	// Mixed case is folded, the same spelling the settings page accepts (#1507).
+	if err := setConfigValue(&cfg, "instrumental_detector.ordering", "FrOnT"); err != nil || cfg.InstrumentalDetector.Ordering != "front" {
+		t.Fatalf("setConfigValue FrOnT: err = %v, ordering = %q; want nil, front", err, cfg.InstrumentalDetector.Ordering)
+	}
 	if err := setConfigValue(&cfg, "instrumental_detector.ordering", "sideways"); err == nil {
 		t.Fatal("setConfigValue accepted an unknown instrumental_detector.ordering")
 	}

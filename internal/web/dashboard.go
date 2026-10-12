@@ -490,9 +490,11 @@ const (
 // status exists for. A health-only lane renders zero counts ("0/0", 0%), the
 // same markup a recorded-but-empty lane gets. A Local lane (the detector) is
 // not a lyrics source: it gets no status line, and no tile at all unless it has
-// recorded attempts. In parallel mode, or with the detector off, it is absent
-// from health but its history still renders a tile, identified by its
-// persisted lane name (detectorbackfill.LaneName), still with no status line.
+// recorded attempts. With no classifier configured it is absent from health
+// (with one configured the lane is installed, and reported with Local set,
+// under either dispatch mode, whatever instrumental_detector.enabled says),
+// but its history still renders a tile, identified by its persisted lane name
+// (detectorbackfill.LaneName), still with no status line.
 // Any other lane with attempts but absent from health is no longer configured
 // and reads "Not active". When
 // musixmatchInactive is set (no token: the worker never starts, the banner
