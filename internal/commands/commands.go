@@ -3173,6 +3173,10 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 				slog.Info("scan: moved settled queue rows to the files that replaced their sources",
 					"library", lib.Name, "trigger", string(trigger), "moved", n)
 			}
+			// A settled file (lyrics already beside it) has an index row but never a
+			// queue row, so the queue-only readers cannot see it (#1409). Adopt
+			// them for the scanned path now, after the scan has walked it.
+			adoptSettledAfterScan(ctx, sqlDB, workQueue, lib, path, string(trigger))
 			enqueued, cacheHits, err := enq.EnqueuePending(ctx, lib)
 			if err != nil {
 				// Counts are partial on an aborted enqueue; don't log "complete".
