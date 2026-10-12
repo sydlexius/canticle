@@ -198,12 +198,12 @@ func (s *shelf) state(t *testing.T) string {
 // A dry run reads and vets and changes nothing. The apply then backs the exact
 // bytes up, removes the file, blocks the words under the row's keys, drops the
 // cache entry (stored under the album artist, as the worker stores it) and
-// reopens the row. The file's mtime is a year off: the cache entry alone proves it.
+// reopens the row. The file's mtime is a minute before the settle.
 func TestDryRunChangesNothingThenApplyRepairs(t *testing.T) {
 	const albumArtist = "Copper Finch Trio"
 	s := newShelf(t)
 	tr := s.row(t, `album_artist = '`+albumArtist+`'`)
-	put(t, tr.stem+".lrc", lrcBody, -year)
+	put(t, tr.stem+".lrc", lrcBody, -time.Minute)
 	s.cacheWords(t, albumArtist, tr.title)
 	before := s.state(t)
 	res, seen := run(t, s.d, s.opts(false, func(lyricblock.Backup) error { t.Error("Report called in a dry run"); return nil }))
@@ -249,8 +249,10 @@ func TestDryRunChangesNothingThenApplyRepairs(t *testing.T) {
 
 // Each skip refuses its row and changes nothing, under Apply, and the run goes
 // on to the next row. Apply with no Report is refused before any row is read.
-// Three minutes either side is outside the window. A file touched long after the
-// settle is refused though its words are cached or blocked; another title's cache proves nothing.
+// Three minutes either side is outside the window, and words never widen it: a
+// file touched long after the settle is refused though its words are cached or
+// blocked, and so is one written a month before a completed_at that a later
+// settle moved forward, though it still matches the cache (#1505).
 func TestSkipCountersChangeNothing(t *testing.T) {
 	s := newShelf(t)
 	elsewhere := t.TempDir()
@@ -283,9 +285,9 @@ func TestSkipCountersChangeNothing(t *testing.T) {
 		s.block(t, tr)
 		put(t, tr.stem+".lrc", lrcBody, year)
 	})
-	add(DispositionNotProvable, "", func(tr track) {
-		s.cacheWords(t, shelfArtist, "Paper Orchard (Instrumental)")
-		put(t, tr.stem+".lrc", lrcBody, -year)
+	add(DispositionNotProvable, `completed_at = '`+settled.Add(30*24*time.Hour).Format(time.RFC3339)+`'`, func(tr track) {
+		s.cacheWords(t, shelfArtist, tr.title)
+		put(t, tr.stem+".lrc", lrcBody, 0)
 	})
 	add(DispositionNotProvable, `completed_at = 'last spring'`, inWindow(lrcBody))
 	add(DispositionStemOccupied, "", func(tr track) {
@@ -313,16 +315,16 @@ func TestSkipCountersChangeNothing(t *testing.T) {
 	}
 }
 
-// Each proof alone is enough: an mtime just after the settle (with a [source:]
-// tag in another case), one just before it on an untagged .txt, and words
-// already blocked under the row's keys, which is how a repair that crashed
-// after Mark's first transaction resumes.
-func TestEachProofAloneSuffices(t *testing.T) {
+// The window alone is enough, on either side: an mtime just after the settle
+// (with a [source:] tag in another case) and one just before it on an untagged
+// .txt. A repair that crashed after Mark's first transaction (words blocked, no
+// cache entry, the file and completed_at as they were) finishes on a rerun.
+func TestWindowAloneSufficesAndACrashedRepairResumes(t *testing.T) {
 	s := newShelf(t)
 	after, earlier, blocked := s.row(t, ""), s.row(t, `outcome_type = 'unsynced'`), s.row(t, "")
 	put(t, after.stem+".lrc", "[source: MusixMatch ]\n"+lrcWords, 90*time.Second)
 	put(t, earlier.stem+".txt", plainWords, -90*time.Second)
-	put(t, blocked.stem+".lrc", lrcBody, -year)
+	put(t, blocked.stem+".lrc", lrcBody, 0)
 	s.block(t, blocked)
 	res, _ := run(t, s.d, s.opts(true, func(lyricblock.Backup) error { return nil }))
 	if res.Repaired != 3 || res.Removed != 3 || res.NewBlocks != 2 || res.Reopened != 3 {
@@ -461,21 +463,29 @@ func TestFileReplacedAfterItsBackupNeedsManualMark(t *testing.T) {
 	}
 }
 
-// The vet dates a file by its record alone: one with no time is refused though
-// the file on disk is dated at the settle and its cached words pass an old one.
-func TestVetRefusesARecordWithNoModTime(t *testing.T) {
-	s := newShelf(t)
-	tr := s.row(t, "")
-	put(t, tr.stem+".txt", plainWords, 0)
-	s.cacheWords(t, shelfArtist, tr.title)
-	c := candidate{id: tr.id, artist: shelfArtist, title: tr.title, lane: providers.Musixmatch, completedAt: settled.Format(time.RFC3339)}
-	rec := lyricblock.Backup{Path: tr.stem + ".txt", Content: []byte(plainWords), ModTime: settled.Add(-year)}
-	r := New(s.d, nil)
-	if err := r.vet(context.Background(), c, []lyricblock.Backup{rec}); err != nil {
-		t.Fatalf("vet of a dated record with cached words = %v, want nil", err)
+// The vet judges a record by its own bytes and time, never by its path: bytes
+// tagged with another lane are refused though the file on disk carries the
+// row's. A record with no time is refused even on a row whose completed_at is
+// the zero time, where the window alone would pass it.
+func TestVetJudgesTheRecordNotThePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "1.lrc")
+	put(t, path, lrcBody, 0)
+	c := candidate{lane: providers.Musixmatch, completedAt: settled.Format(time.RFC3339)}
+	rec := lyricblock.Backup{Path: path, Content: []byte(lrcBody), ModTime: settled}
+	if err := vet(c, []lyricblock.Backup{rec}); err != nil {
+		t.Fatalf("vet of a record tagged with the row's lane, dated at the settle = %v, want nil", err)
+	}
+	rec.Content = []byte("[source:petitlyrics]\n" + lrcWords)
+	if err := vet(c, []lyricblock.Backup{rec}); !errors.Is(err, errSourceDisagrees) {
+		t.Errorf("vet of bytes tagged with another lane = %v, want errSourceDisagrees", err)
+	}
+	c.completedAt = time.Time{}.Format(time.RFC3339)
+	rec = lyricblock.Backup{Path: path, Content: []byte(lrcBody), ModTime: time.Time{}.Add(time.Minute)}
+	if err := vet(c, []lyricblock.Backup{rec}); err != nil {
+		t.Fatalf("vet of a record dated a minute after a zero completed_at = %v, want nil", err)
 	}
 	rec.ModTime = time.Time{}
-	if err := r.vet(context.Background(), c, []lyricblock.Backup{rec}); !errors.Is(err, errNotProvable) {
+	if err := vet(c, []lyricblock.Backup{rec}); !errors.Is(err, errNotProvable) {
 		t.Errorf("vet of a record with no time = %v, want errNotProvable", err)
 	}
 }

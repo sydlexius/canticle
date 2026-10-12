@@ -107,7 +107,7 @@ type Result struct {
 	// an output directory is in no root, or is gone. StemOccupied: the cull would
 	// leave a file on the lyric stem, so no marker could land. NoFile: no lyric
 	// file, or none with words. SourceDisagrees: a .lrc names another lane in
-	// [source:]. NotProvable: a file with no proof that canticle wrote it for the row.
+	// [source:]. NotProvable: a file not dated within two minutes of the row's settle.
 	Symlink, OutsideRoots, StemOccupied, NoFile, SourceDisagrees, NotProvable int
 	// NeedsManualMark: a file appeared or changed mid-repair and failed the vet.
 	// The row stays done with its words blocked and its cache entry gone, nothing
@@ -125,10 +125,9 @@ type Result struct {
 
 // Repairer runs the repair over one database.
 type Repairer struct {
-	db    *sql.DB
-	svc   *lyricblock.Service
-	store *lyricblock.Store
-	log   *slog.Logger
+	db  *sql.DB
+	svc *lyricblock.Service
+	log *slog.Logger
 }
 
 // New returns a Repairer over db. A nil log is slog.Default().
@@ -137,18 +136,17 @@ func New(db *sql.DB, log *slog.Logger) *Repairer {
 		log = slog.Default()
 	}
 	// No self-write registry: this runs in a CLI process (see lyricblock.New).
-	return &Repairer{db: db, svc: lyricblock.New(db, log, nil), store: lyricblock.NewStore(db, log), log: log}
+	return &Repairer{db: db, svc: lyricblock.New(db, log, nil), log: log}
 }
 
 // candidate is one selected row. The text fields never leave this package.
 type candidate struct {
 	id                                                int64
 	artist, title, album, albumArtist, source, status string
-	// What the vet reads: the keys blocks are stored under, the lane that settled
-	// the row and when.
-	artistKey, titleKey, lane, completedAt string
-	hand                                   bool
-	detector                               sql.NullInt64
+	// What the vet reads: the lane that settled the row and when.
+	lane, completedAt string
+	hand              bool
+	detector          sql.NullInt64
 }
 
 // Run selects every row a provider lane settled with lyrics, classifies its
@@ -194,7 +192,7 @@ func selector(libraryID *int64, after int64) (string, []any) {
 	for _, l := range lanes {
 		args = append(args, l)
 	}
-	query := `SELECT id, artist, title, album, album_artist, source_path, status, artist_key, title_key,
+	query := `SELECT id, artist, title, album, album_artist, source_path, status,
                  provider_lane, COALESCE(completed_at, ''), ` +
 		queue.HandProtectedPredicate + `, instrumental_result
           FROM work_queue
@@ -220,7 +218,7 @@ func (r *Repairer) page(ctx context.Context, libraryID *int64, after int64) ([]c
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.id, &c.artist, &c.title, &c.album, &c.albumArtist, &c.source, &c.status,
-			&c.artistKey, &c.titleKey, &c.lane, &c.completedAt, &c.hand, &c.detector); err != nil {
+			&c.lane, &c.completedAt, &c.hand, &c.detector); err != nil {
 			return nil, fmt.Errorf("titlerepair: scan row after id %d: %w", after, err)
 		}
 		out = append(out, c)

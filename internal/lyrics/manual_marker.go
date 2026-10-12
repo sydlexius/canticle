@@ -3,6 +3,8 @@ package lyrics
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -68,6 +70,17 @@ func ReadRegularNoFollow(path string, limit int64) ([]byte, error) {
 // of the handle the bytes came from, so a caller can date exactly those bytes.
 func ReadRegularNoFollowInfo(path string, limit int64) ([]byte, os.FileInfo, error) {
 	return readRegularNoFollowInfo(path, limit)
+}
+
+// ProvenanceFromBytes is ReadProvenanceHeader over bytes already read: the same
+// tags under the same MaxHeaderBytes bound, for a caller that must judge a tag
+// against exactly the bytes it holds and not a second read of their path.
+func ProvenanceFromBytes(b []byte) (ProvenanceTags, error) {
+	tags, _, err := parseLRCHeaderFrom(io.LimitReader(bytes.NewReader(b), MaxHeaderBytes))
+	if err != nil {
+		return ProvenanceTags{}, fmt.Errorf("scan: %w", err)
+	}
+	return provenanceFromTags(tags), nil
 }
 
 // ErrMarkerChanged is returned by RemoveManualMarker when the entry at the path
