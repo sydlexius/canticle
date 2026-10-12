@@ -112,6 +112,21 @@ Behavior worth knowing before you rely on it:
 
 Choosing a cutoff is an evidence question, not a guess. Sidecar mtime is a filesystem attribute, and a copy or restore can rewrite it, so confirm it still reflects write time before trusting it: Canticle never writes audio files, so if the sidecars in a suspected cohort carry timestamps that their sibling audio files do not share, no bulk filesystem event produced them. A genuine write cohort also spreads across time at roughly the provider's pace, where a bulk copy compresses into seconds.
 
+### Re-examining only bare instrumental markers
+
+`scan --upgrade --bare-markers` reopens only instrumental markers that have no `[source:]` header. A "bare" marker is one written before provenance stamping existed (every marker Canticle writes today carries a `[source:]` header), so this selects the legacy population and leaves everything else alone: unsynced `.txt` lyrics, markers with any `[source:]` value (detector, title rule, a provider lane, or `manual`), and every `.lrc`. A marker that cannot be read, or is a symlink, is not treated as bare and is left alone. Tracks with no sidecar are enqueued as in any scan; the flag only narrows which existing sidecars reopen. The flag is refused without `--upgrade` and refused with `--update`, and it composes with `--unsynced-before` (both conditions must hold).
+
+```sh
+canticle scan --upgrade --bare-markers
+canticle scan --upgrade --bare-markers --unsynced-before 2026-04-01
+```
+
+- **A hand-typed marker with no header looks exactly like a legacy one, so it WILL be reopened.** To protect one, mark it with `queue mark-instrumental`, which stamps `[source:manual]` and records the mark so no automatic path replaces it.
+- **Cost.** Each reopened marker costs at least one provider lookup, paced by the cooldown, as with any `--upgrade` (see above).
+- **What a re-examination does.** The row is re-queued and goes through the normal lookup (providers and the instrumental detector, per your configuration). If it is decided again it comes back stamped with its source; a better result replaces the marker, and a worse one never does.
+- **Order of operations.** The provenance backfill (`scan reconcile-marker-provenance`) rewrites file dates. If you also want a dated run with `--unsynced-before`, do that first.
+- **Markers whose queue row is already `done`** are not re-queued by a scan, so this flag reaches markers with no queue row (a rebuilt database, or files that predate it). A marker with a `done` row is reached by the serve-mode [`[upgrade_sweep]`](CONFIGURATION.md#upgrade_sweep), not by this flag.
+
 In directory mode, when audio tags carry ISRC, MusicBrainz recording ID, or duration, those values are read and passed to Musixmatch to improve match precision - for example, distinguishing two recordings of the same title.
 
 ## Serve

@@ -547,6 +547,13 @@ type ScanOptions struct {
 	// structural rather than incidental: each check runs inside the branch that
 	// granted the reopen, so it can only ever subtract from one.
 	UnsyncedBefore time.Time
+	// BareMarkersOnly narrows an --upgrade reopen to instrumental markers that
+	// carry no [source:] header (#618), and drops the unsynced-.txt-lyric reopen.
+	// Like UnsyncedBefore it only SUBTRACTS inside the branches that granted a
+	// reopen, composes with it (both must hold), and never adds a reopen class.
+	// A marker whose provenance cannot be read is not bare and is left alone.
+	// The zero value leaves --upgrade exactly as it was.
+	BareMarkersOnly bool
 }
 
 // sidecarWithinWindow reports whether a .txt sidecar is inside a dated repair
@@ -1258,6 +1265,14 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 				slog.Debug("skipping file, instrumental marker settled", "file", file.Name())
 				continue
 			}
+			// --bare-markers (#618): only a marker with no [source:] header stays
+			// reopened. Checked after the manual probe, so a manual marker is
+			// excluded by both; an unreadable or symlinked marker reads as not bare.
+			if opts.BareMarkersOnly && !lyrics.BareMarkerOnDisk(txtPath) {
+				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
+				slog.Debug("skipping file, instrumental marker has provenance or is unreadable", "file", file.Name())
+				continue
+			}
 			// Reopen granted. A dated repair run narrows it to the target cohort --
 			// checked HERE, inside the branch that granted the reopen, so a marker
 			// this switch already decided to reconsider cannot escape the window.
@@ -1289,6 +1304,12 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 				// matters as much as the .lrc one above.
 				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
 				slog.Debug("skipping file, unsynced lyrics exist", "file", file.Name())
+				continue
+			}
+			if opts.BareMarkersOnly {
+				// --bare-markers (#618) reopens markers only, never lyrics.
+				sc.indexSettledFile(ctx, dir, filepath.Join(dir, file.Name()), stem, results)
+				slog.Debug("skipping file, unsynced lyrics are not a bare marker", "file", file.Name())
 				continue
 			}
 			if !sidecarWithinWindow(txtPath, opts.UnsyncedBefore) {

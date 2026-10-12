@@ -107,3 +107,20 @@ func parseCutoff(flag, raw string) (time.Time, error) {
 	}
 	return time.Time{}, fmt.Errorf("invalid %s %q: want a date (2026-04-01) or an RFC3339 instant (2026-04-01T00:00:00Z)", flag, raw)
 }
+
+// resolveBareMarkers validates scan --bare-markers (#618). The flag narrows an
+// --upgrade reopen to instrumental markers with no [source:] header, so it is
+// refused without --upgrade (it would silently match nothing) and with --update
+// (which reopens every settled .lrc whatever the flag says).
+func resolveBareMarkers(bare, upgrade, update bool) error {
+	if !bare {
+		return nil
+	}
+	if update {
+		return fmt.Errorf("--bare-markers cannot be combined with --update: --update re-fetches every settled .lrc, so it would not be limited to bare markers. Use --upgrade --bare-markers")
+	}
+	if !upgrade {
+		return fmt.Errorf("--bare-markers requires --upgrade: it narrows an --upgrade re-fetch, and without --upgrade no .txt sidecar is reopened")
+	}
+	return nil
+}
