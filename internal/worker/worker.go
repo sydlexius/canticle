@@ -220,9 +220,20 @@ type MetadataReader func(path string) (scanner.AudioMetadata, error)
 // Facts takes the CURRENT (mtimeNano, size) and returns found=false unless the
 // row still matches them, which is what preserves the identity guarantee: a
 // re-encoded or retagged file misses and the caller reads from disk.
+//
+// Record stores the full tag read of a file the cache missed on, so the next
+// attempt on the same row is a hit instead of another open (#1576). It replaces
+// every column of the row, so it is only ever handed a complete
+// scanner.ReadAudioFacts result, stamped with the (mtime, size) of the handle
+// that was read.
 type MetadataCache interface {
 	Facts(ctx context.Context, path string, mtimeNano, size int64) (scanner.AudioFacts, bool, error)
+	Record(ctx context.Context, path string, facts scanner.AudioFacts) error
 }
+
+// factsReader reads every tag fact of an audio file from one open handle. It is
+// scanner.ReadAudioFacts in production and a field so tests can count opens.
+type factsReader func(path string) (scanner.AudioFacts, error)
 
 // DurationStore banks the exact audio duration the fetch path already re-read
 // from disk, so the revalidation path (#441) does not have to open the file
@@ -256,6 +267,11 @@ type Worker struct {
 	// answers with its default recording, which writes a live or remastered cut's
 	// lyrics onto a studio track. Defaults to scanner.ReadAudioMetadata.
 	readMetadata MetadataReader
+	// readFacts is the full tag read behind a metadata-cache miss, kept so the
+	// miss can bank the whole row (#1576). Nil when SetMetadataReader replaced
+	// the reader: a caller-supplied reader returns three of the cached columns,
+	// and a row recorded from those would blank the rest, so nothing is banked.
+	readFacts factsReader
 	// metaCache, when set, answers the fetch-time metadata read from
 	// audio_metadata so the item's audio file is never opened (#712). A miss or
 	// any error falls through to readMetadata. Nil disables it.
@@ -566,6 +582,7 @@ func New(q Queue, c Cache, fetcher musixmatch.Fetcher, writer lyrics.Writer) *Wo
 		// config.Enrichment.Enabled's own default, so a caller that never calls the
 		// setters still gets fetch-mode parity rather than a silently disabled fix.
 		readMetadata:           scanner.ReadAudioMetadata,
+		readFacts:              scanner.ReadAudioFacts,
 		statFile:               statFileIdentity,
 		enrichRecordingDefault: true,
 		baseBackoff:            backoff.DefaultBase,
@@ -930,11 +947,14 @@ func (w *Worker) SetRecordingEnrichmentDefault(enabled bool) {
 // SetMetadataReader overrides the fetch-time metadata reader. Production uses the
 // scanner.ReadAudioMetadata default set in New; tests inject a fake. A nil reader
 // is ignored so the default can never be cleared into a no-op refresh.
+//
+// A replaced reader also turns off the metadata-cache write: see readFacts.
 func (w *Worker) SetMetadataReader(r MetadataReader) {
 	if r == nil {
 		return
 	}
 	w.readMetadata = r
+	w.readFacts = nil
 }
 
 // SetMetadataCache wires the metadata index so the fetch-time read is answered
@@ -2320,6 +2340,11 @@ func (w *Worker) resolveMetadata(ctx context.Context, path string) (scanner.Audi
 	// never a wrong hit (divergent keys cannot collide), so this is a performance
 	// defect rather than a correctness one, but it would have removed the entire
 	// benefit on the deployment that motivated the work.
+	//
+	// For a file reached through a symlink INSIDE the library this canonical key
+	// differs from the walk-path key `scan index-metadata` writes, so the worker
+	// may bank a second row for the same file (#1576); readers validate a row by
+	// the caller's current mtime and size, so neither row can serve a stale hit.
 	key := pathutil.CanonicalPath(path)
 
 	facts, found, cerr := w.metaCache.Facts(ctx, key, mtimeNano, size)
@@ -2328,7 +2353,7 @@ func (w *Worker) resolveMetadata(ctx context.Context, path string) (scanner.Audi
 		return w.readMetadata(path)
 	}
 	if !found {
-		return w.readMetadata(path)
+		return w.readAndBankMetadata(ctx, path, key, mtimeNano, size)
 	}
 
 	// A hit still yields the identity stamp, because recordDuration banks the
@@ -2341,6 +2366,84 @@ func (w *Worker) resolveMetadata(ctx context.Context, path string) (scanner.Audi
 		MTimeNano:   mtimeNano,
 		SizeBytes:   size,
 	}, nil
+}
+
+// readAndBankMetadata is the cache-miss read: it reads the file's tags and
+// stores the result under key, so a later attempt on the same row is answered
+// from audio_metadata instead of opening the file again (#1576). Without the
+// write a file added since the last `scan index-metadata` is opened by every
+// attempt.
+//
+// THE WHOLE READ IS BANKED, NEVER THE THREE FIELDS THE FETCH NEEDS. Record
+// replaces every column and stamps the row as written by the current tag
+// reader, so a partial row would blank composer, genre, year, track and disc
+// while claiming to be current. That is why this goes through readFacts and
+// why nothing is banked when only a caller-supplied MetadataReader is present.
+//
+// THE STAMP IS THE READ HANDLE'S OWN. facts.MTimeNano/SizeBytes are an fstat of
+// the handle the tags came from, which is what `scan index-metadata` records
+// too; a path stat taken here would describe whatever the path names now. The
+// row is also written only when that stamp equals the stat the lookup just
+// missed on. A difference means the file changed between the stat and the end
+// of the read, so the bytes read may be a mix of two versions; the attempt
+// keeps the values it read and the next one reads again. A zero stamp (the
+// handle could not be statted) is never stored, as in recordDuration.
+//
+// A READ WHOSE DURATION PARSE FAILED IS NOT BANKED. scanner.ReadAudioFacts
+// returns a nil error with TrackLength 0 and DurationErr set when the duration
+// parser ran and failed, and that failure can be transient (an I/O error on a
+// slow disk). This path runs unattended, so a row stamped current from it would
+// pin duration 0 until the file itself changed. The cost is that a file whose
+// duration is permanently unparsable is read again on every attempt, which is
+// what happened before this write existed.
+//
+// A failed write is logged and nothing else: the attempt already has what it
+// needs. The store's error text quotes the path, so only its class is logged.
+// A write cut short by a canceled context is shutdown, not a fault, and logs
+// at Debug; every other class logs at Warn. The write is synchronous and can
+// wait up to the SQLite busy timeout before the fetch proceeds.
+func (w *Worker) readAndBankMetadata(ctx context.Context, path, key string, mtimeNano, size int64) (scanner.AudioMetadata, error) {
+	if w.readFacts == nil {
+		return w.readMetadata(path)
+	}
+	facts, err := w.readFacts(path)
+	if err != nil {
+		return scanner.AudioMetadata{}, err
+	}
+	stamped := facts.MTimeNano != 0 || facts.SizeBytes != 0
+	if stamped && facts.DurationErr == nil && facts.MTimeNano == mtimeNano && facts.SizeBytes == size {
+		if rerr := w.metaCache.Record(ctx, key, facts); rerr != nil {
+			class := cacheWriteErrClass(rerr)
+			level := slog.LevelWarn
+			if class == cacheWriteCanceled {
+				level = slog.LevelDebug
+			}
+			slog.Log(ctx, level, "metadata cache write failed; the attempt continues", "error_class", class)
+		}
+	}
+	return scanner.AudioMetadata{
+		TrackLength: facts.TrackLength,
+		ISRC:        facts.ISRC,
+		AlbumName:   facts.Album,
+		MTimeNano:   facts.MTimeNano,
+		SizeBytes:   facts.SizeBytes,
+	}, nil
+}
+
+// cacheWriteCanceled is the class of a write the context canceled.
+const cacheWriteCanceled = "canceled"
+
+// cacheWriteErrClass names the kind of a metadata-cache write error without
+// printing it: the store wraps the file path into its message.
+func cacheWriteErrClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return cacheWriteCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	default:
+		return "store"
+	}
 }
 
 // recordDuration banks a fetch-time duration for the revalidation path (#441).
