@@ -166,6 +166,7 @@ type ScanCmd struct {
 	ReconcileUpstream                *ScanReconcileUpstreamCmd                `arg:"subcommand:reconcile-upstream" help:"fill the upstream licensor on settled rows from the [upstream:] tag in their sidecar (issue #1298)"`
 	ReconcileRemediated              *ScanReconcileRemediatedCmd              `arg:"subcommand:reconcile-remediated" help:"re-describe synced rows whose sidecar is gone or demoted (reset for re-fetch, unsynced, or record tier), draining 'tier unknown' (issue #1143)"`
 	ReconcileEditorTag               *ScanReconcileEditorTagCmd               `arg:"subcommand:reconcile-editor-tag" help:"backfill [re:canticle] onto existing canticle-written .lrc/.elrc files (issue #483)"`
+	ReconcileInstrumentalTitles      *ScanReconcileInstrumentalTitlesCmd      `arg:"subcommand:reconcile-instrumental-titles" help:"repair rows a provider settled with lyrics that the instrumental title rule would settle as instrumental: back up and remove the lyric file, block its words and reopen the row; dry-run unless --yes (issue #1470)"`
 	MarkWrong                        *ScanMarkWrongCmd                        `arg:"subcommand:mark-wrong" help:"mark one track's current lyrics as wrong: back them up, remove them, block those words and re-queue the track; dry-run unless --yes (issue #1398)"`
 	ListBlocks                       *ScanListBlocksCmd                       `arg:"subcommand:list-blocks" help:"count the blocked lyric results (per-block detail with --tail) (issue #1398)"`
 	Unblock                          *ScanUnblockCmd                          `arg:"subcommand:unblock" help:"remove a block (--id) or every block on a track (--work-item) and reopen it, or every block whose track no longer exists (--orphans); dry-run unless --yes (issue #1398)"`
@@ -2789,6 +2790,12 @@ func runScanCmd(ctx context.Context, out io.Writer, args ScanCmd) int {
 			sub.ConfigPath = args.ConfigPath
 		}
 		return runReconcileMarkerProvenance(ctx, out, sub)
+	case args.ReconcileInstrumentalTitles != nil:
+		sub := *args.ReconcileInstrumentalTitles
+		if sub.ConfigPath == "" {
+			sub.ConfigPath = args.ConfigPath
+		}
+		return runReconcileInstrumentalTitles(ctx, out, sub)
 	case args.MarkWrong != nil:
 		sub := *args.MarkWrong
 		if sub.ConfigPath == "" {
