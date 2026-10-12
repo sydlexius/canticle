@@ -21,6 +21,16 @@ type fakeMetaCache struct {
 	gotMtime int64
 	gotSize  int64
 	calls    int
+
+	recordErr   error
+	recorded    []scanner.AudioFacts
+	recordedKey string
+}
+
+func (f *fakeMetaCache) Record(_ context.Context, path string, facts scanner.AudioFacts) error {
+	f.recordedKey = path
+	f.recorded = append(f.recorded, facts)
+	return f.recordErr
 }
 
 func (f *fakeMetaCache) Facts(_ context.Context, path string, mtimeNano, size int64) (scanner.AudioFacts, bool, error) {
