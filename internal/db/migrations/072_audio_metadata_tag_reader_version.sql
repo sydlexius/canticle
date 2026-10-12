@@ -1,0 +1,35 @@
+-- +goose Up
+-- +goose StatementBegin
+-- Give audio_metadata a TAG-READER version, next to the duration-reader
+-- identity of 042 (#1573, part of #721).
+--
+-- A row is validated by (mtime_nsec, size_bytes, reader_version), and
+-- reader_version names the DURATION parser only. The artist extraction changed
+-- after many rows were written (the multi-value artist work) and nothing made
+-- those rows stale, so a cached artist can differ from what the tag reader
+-- returns today for the same unchanged file. That is harmless to the current
+-- readers, but the scanner is about to build scan rows from this table, and
+-- artist + title is the unique key of scan_results and work_queue.
+--
+-- The column holds scanner.TagReaderVersion as written by audiometa.Record.
+-- Only the new identity read (audiometa.Identity) compares it. Lookup and Facts
+-- do NOT, so `scan index-metadata` and the worker treat every existing row
+-- exactly as before and nothing is re-read because of this migration.
+--
+-- Same mechanism as 042: nullable, existing rows left NULL, and the comparison
+-- is =, so NULL never matches and a row written before this change is a miss
+-- for the identity read with no backfill. ALTER TABLE ADD COLUMN on a nullable
+-- column with no default is metadata-only: no row is rewritten and the table
+-- is not rebuilt. No index: every read reaches the row through its primary key.
+ALTER TABLE audio_metadata ADD COLUMN tag_reader_version INTEGER;
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+-- Drop the column and KEEP the rows. Dropping it is what makes a real Down
+-- safe. The unsafe case is an older binary run against a database that still
+-- HAS the column (no goose Down): its upsert rewrites the tag columns without
+-- touching the stamp, so a row can carry a current-looking stamp over values an
+-- older reader wrote.
+ALTER TABLE audio_metadata DROP COLUMN tag_reader_version;
+-- +goose StatementEnd

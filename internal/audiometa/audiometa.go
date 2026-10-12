@@ -140,7 +140,70 @@ func (s *Store) Facts(ctx context.Context, path string, mtimeNano, size int64) (
 	return scanner.AudioFacts{}, false, fmt.Errorf("audiometa: facts %q: %w", path, err)
 }
 
-// Record stores facts as the metadata for path, replacing any previous row.
+// Identity is the subset of a cached row a scan row is built from: exactly the
+// models.Track fields scanner.scanDir fills from a file's tags. Field names
+// follow scanner.AudioFacts.
+//
+// ISRC, MBID and TrackLength are what the tag read found. The scanner leaves
+// all three empty when recording enrichment is off, so a caller serving a scan
+// row from here applies that switch itself.
+type Identity struct {
+	Artist      string
+	AlbumArtist string
+	Title       string
+	Album       string
+	ISRC        string
+	MBID        string
+	TrackLength int
+}
+
+// Identity returns the cached identity values for path when the row is current
+// for the file AND was written by the current tag reader: same mtime, size and
+// duration-reader identity as Lookup requires, plus a tag_reader_version equal
+// to scanner.TagReaderVersion. found is false otherwise, and as everywhere in
+// this package a miss is not an error: the caller reads the file.
+//
+// WHY THIS IS STRICTER THAN Facts (#1573). artist + title is the unique key of
+// scan_results and work_queue. mtime and size prove the FILE is unchanged, not
+// that the READER is: a row written before the multi-value artist recovery
+// holds the artist that reader produced, and serving it would re-key the
+// track. A row from before the column existed holds NULL, which never equals
+// the current version, so the whole pre-existing population misses here with
+// no row rewritten. Lookup and Facts deliberately do not compare the column;
+// their callers do not build keys from the result.
+//
+// A MISS IS THE NORMAL STATE for a row the current tag reader did not write:
+// every row that predates the column, and every row after a TagReaderVersion
+// bump. Nothing in this package refreshes such a row, and `scan index-metadata`
+// does not either: it skips a row Lookup accepts before it reaches its Record
+// call, so the stamp stays non-current until the file's mtime or size changes.
+// A caller that wants a later hit must re-read the file and Record the FULL
+// scanner.ReadAudioFacts output. Never Record a partial set of scan-loop
+// values: Record overwrites every column, so that would blank duration, ISRC,
+// MBID, composer, genre, year, track and disc while stamping them current.
+//
+// Like Facts, the caller passes the CURRENT stat values; this never stats.
+func (s *Store) Identity(ctx context.Context, path string, mtimeNano, size int64) (Identity, bool, error) {
+	var id Identity
+	err := s.db.QueryRowContext(ctx,
+		`SELECT artist, album_artist, title, album, isrc, mbid, duration_seconds
+		 FROM audio_metadata
+		 WHERE file_path=? AND mtime_nsec=? AND size_bytes=? AND reader_version=?
+		   AND tag_reader_version=? LIMIT 1`,
+		path, mtimeNano, size, s.readerVersion, scanner.TagReaderVersion,
+	).Scan(&id.Artist, &id.AlbumArtist, &id.Title, &id.Album, &id.ISRC, &id.MBID, &id.TrackLength)
+	if err == nil {
+		return id, true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return Identity{}, false, nil
+	}
+	return Identity{}, false, fmt.Errorf("audiometa: identity %q: %w", path, err)
+}
+
+// Record stores facts as the metadata for path, replacing any previous row,
+// stamped with this Store's duration-reader identity and the current
+// scanner.TagReaderVersion.
 //
 // path MUST be the canonical form (#643): use
 // pathutil.RebaseUnderCanonicalRoot under a walk, or pathutil.CanonicalPath for
@@ -152,8 +215,8 @@ func (s *Store) Record(ctx context.Context, path string, facts scanner.AudioFact
 		     file_path, mtime_nsec, size_bytes, mbid, isrc,
 		     artist, album_artist, title, album, composer, genre,
 		     year, track_no, track_total, disc_no, disc_total,
-		     format, file_type, duration_seconds, reader_version
-		 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		     format, file_type, duration_seconds, reader_version, tag_reader_version
+		 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(file_path) DO UPDATE SET
 		     mtime_nsec       = excluded.mtime_nsec,
 		     size_bytes       = excluded.size_bytes,
@@ -174,11 +237,12 @@ func (s *Store) Record(ctx context.Context, path string, facts scanner.AudioFact
 		     file_type        = excluded.file_type,
 		     duration_seconds = excluded.duration_seconds,
 		     reader_version   = excluded.reader_version,
+		     tag_reader_version = excluded.tag_reader_version,
 		     indexed_at       = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`,
 		path, facts.MTimeNano, facts.SizeBytes, facts.MBID, facts.ISRC,
 		facts.Artist, facts.AlbumArtist, facts.Title, facts.Album, facts.Composer, facts.Genre,
 		facts.Year, facts.TrackNo, facts.TrackTotal, facts.DiscNo, facts.DiscTotal,
-		facts.Format, facts.FileType, facts.TrackLength, s.readerVersion,
+		facts.Format, facts.FileType, facts.TrackLength, s.readerVersion, scanner.TagReaderVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("audiometa: record %q: %w", path, err)
