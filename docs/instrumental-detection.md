@@ -247,6 +247,119 @@ instrumental gets a marker and no lyrics. With the upgrade sweep on and
 the sweep's population like any detector marker, and a later provider lyric can
 replace it.
 
+**Instrumental releases (counted, not acted on).** Some releases are
+instrumental as a whole and say so in the album name, not in each title:
+`Low Tide (Instrumental)`. Canticle recognizes a plain-titled track on such a
+release, and `scan reconcile-instrumental-titles` counts those tracks on two
+lines of its dry run:
+
+```
+weak, album named as instrumental: N
+weak, plain title on an instrumental release (counted only, a lower bound): N
+```
+
+Both lines count rows inside `weak`. The first is the upper bound: every weak
+row whose own title carries no signal and whose stored album name says
+instrumental in any shape, the unrecognized shapes below included. The second
+is the lower bound: the rows of the first line that pass every check in this
+section. The second is never above the first, and the first is never above
+`weak`. Among the weak rows, the true number on instrumental releases is
+between the two. Rows outside `weak` are on neither line, so neither count
+bounds the library as a whole.
+
+Nothing acts on either count yet. The track is looked up like any other, keeps
+the lyrics it has, and its album stays the weaker signal it always was. The
+reason: the queue row, the lyric cache and the lyric block identify a track by
+artist and title, with no album. A library holding both the sung album and its
+instrumental edition has one row per artist and title, carrying the album of
+whichever copy settled first, so such a track is counted or not by scan order,
+and acting on it would affect the sung copy. That is why nothing acts yet
+(#1525).
+
+The album name must end in the marker. The marker's whole content is one of
+`Instrumental`, `Instrumentals`, `Instrumental Version`, `Instrumental Edition`
+or `Instrumental Album`, in any case. Two shapes count:
+
+- in round or square brackets at the end: `Low Tide (Instrumental)`,
+  `Low Tide [Instrumentals]`. Full-width forms of those brackets count too;
+- after a dash at the end: `Low Tide - Instrumental`. The dash needs a space
+  before it. A tilde is not a dash here.
+
+Every doubt withholds the answer. These common shapes are NOT recognized. All
+but the last are still counted on the first line:
+
+- the bare trailing word: `Low Tide Instrumentals`;
+- `(The Instrumentals)`;
+- a suffix after the marker: `(Instrumental) - Single`;
+- a second bracket pair anywhere in the name;
+- a comma, `&`, `and` or `with` in the album base;
+- `(Instrumental Versions)`;
+- `(Inst.)`. This one is on neither line.
+
+The full list of albums that are not counted on the second line:
+
+- the bare trailing word or the word inline;
+- other words inside the marker: `(Instrumental Demos)`, `(Deluxe /
+  Instrumental)`, `(Instrumental Mix)`, `(The Instrumentals)`,
+  `(Instrumental Versions)`;
+- a marker that is not last, any second bracket pair, or any other kind of
+  bracket;
+- a name that is only the word, or the word after a track or disc number;
+- a name containing `score`: a score album can be sung;
+- a name that reads as a list before the marker: it holds `/`, `+`, `&`, `;`,
+  `,`, `|` or `、`, or the word `and`, `plus`, `bw`, `vs` or `with`. A single
+  such as `Quiet Shelf / Quiet Shelf (Instrumental)` is one sung track and its
+  instrumental. `Salt and Stone (Instrumental)` is withheld too, by choice;
+- a name holding a sing-over product: `made famous by`, `tribute to`,
+  `accompaniment`, `playback`, `trax`, `for singers`, `cast recording`,
+  `cover version`;
+- a name with a voice word before the marker (the title list below);
+- karaoke, sing-along and a cappella, in the album or the title.
+
+The track title is checked in two ways. A bracket pair or a dash-suffix is
+where a sung version is named, so it may hold only these words:
+
+- a year, meaning 1900 to 2099;
+- `remaster`, `remastered`, `remasters`, `reprise`, `album`, `interlude`,
+  `intro`, `outro`, `prelude`, `mono`, `stereo`;
+- `pt`, `part` or `parts`, alone or followed by numbers of up to three digits
+  or short roman numerals (`i`, `v` and `x`, up to four letters);
+- `version`, only directly after `album`.
+
+Any other word there withholds the answer: `(Radio Edit)`, `(Extended)`,
+`(English)`, `(Version)`, `- Paper Lantern`. An empty bracket pair withholds it
+too. The whole title must also hold none of these:
+
+- a word containing `vocal`, `lyric`, `voice`, `choir`, `choral`, `chorus`,
+  `duet`, `narrat`, `speech`, `spoken` or `skit`, or starting with `sing`,
+  `sang` or `sung`. `Single` and `Invoice` are withheld by this, by choice;
+- the words `voc`, `live`, `demo`, `demos`, `remix`, `cover`, `acoustic`,
+  `bonus`, `rap`, `raps`, `rapped`, `rapper`;
+- the vocal words of the title rule, which also withhold here: `vocal`,
+  `vocals`, `vox`, `sung`, `guide`, `chorus`, `sing`, `singalong`, `lyric`,
+  `lyrics`, `hook`, `voice`, `singer`, `rap`, and the Japanese words that rule
+  knows for a vocal, a chorus, a guide and a sung version;
+- an `&` anywhere in the title;
+- a credit: the words `feat`, `featuring`, `ft`, `f` or `w`; `with`, `con`,
+  `avec` or `mit` followed by a word; `x` or `vs` between two words;
+- `made famous by` or `tribute to`;
+- `歌`, `唱`, `보컬` or `라이브` anywhere in the text. This list holds no kana
+  word. So a title that says live or demo in Japanese is withheld only inside a
+  bracket pair or a dash-suffix, by the allowed-word rule above.
+
+A title with an instrumental signal of its own, strong or weak, is on neither
+line: it is already counted on its own line. An empty title is not counted.
+Invisible format characters are ignored, so they cannot hide a word.
+
+The artist tags are checked last. A guest credit in the track artist or the
+album artist withholds the answer: the words `feat`, `featuring`, `ft`, `f` or
+`w`; `with`, `con`, `avec` or `mit` followed by a word; `x` or `vs` between two
+words. A band named with `&` or `and` is not a credit. An album
+tagged `Artist - Instrumental` is an album named with the word, so the text
+before a dash is compared with both artists as in "The artist check" above.
+When the marker itself follows a dash and no real artist is known, the answer
+is withheld. The bracket form needs no artist.
+
 **Karaoke and the detector.** Under `instrumental_detector.ordering = "front"`
 the detector answers before any provider, and a karaoke backing track sounds
 instrumental to it. So while the rule is on, a karaoke or sing-along track is not sent
@@ -341,6 +454,8 @@ appear only inside the backup file.
 | `no signal or excluded (a cappella, karaoke, sing-along)` | The title carries no qualifier, or is a cappella, or the title or album names karaoke or a sing-along product. Never touched. |
 | `weak` | A weak signal only. Never touched. |
 | `weak, detector says instrumental` / `weak, detector says not instrumental` / `weak, never scored` | The weak rows by the verdict the detector already stored for them; the three add up to `weak`. Nothing is run to get it. It sizes a possible weak-tier repair. |
+| `weak, album named as instrumental` | The weak rows whose own title carries no signal and whose stored album name says instrumental in any shape. An upper bound on the weak rows that sit on instrumental releases, not on the library as a whole; never above `weak`. A count only. |
+| `weak, plain title on an instrumental release (counted only, a lower bound)` | The rows of the line above whose title is plain and whose stored album name ends in an instrumental marker, with every check passed (see "Instrumental releases" above). A lower bound on the same weak rows, never above the line above; the truth for the weak rows is between the two. A count only: no such row is repaired, skipped or reported differently because of it, with or without `--yes`. The album and artists are the ones stored for the row; no audio file is read for these two lines. |
 | `strong` | A strong qualifier. The `strong <family> <position>` lines and the three detector lines break this number down. It equals the four `strong, skipped` lines plus `candidates`. |
 | `strong, skipped, audio file unreadable` | The audio file's album tag could not be read, so the title could not be judged the way the worker judges it. |
 | `strong, skipped, in flight` | A worker holds the row right now. |
