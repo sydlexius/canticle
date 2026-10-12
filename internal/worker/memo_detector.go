@@ -52,6 +52,10 @@ type memoDetector struct {
 
 	last         detector.Result
 	ranInference bool
+	// errored reports that the last Detect for the item primed last failed (an
+	// outage, a sidecar not ready). An item Detect was never called for has not
+	// errored.
+	errored bool
 }
 
 // newMemoDetector wraps inner. If inner implements storedDecider, the memo can
@@ -80,6 +84,7 @@ func (m *memoDetector) prime(p *storedTelemetry) {
 	m.primed = p
 	m.last = detector.Result{}
 	m.ranInference = false
+	m.errored = false
 }
 
 // Detect reuses the primed stored scores when they are still valid, otherwise
@@ -99,6 +104,7 @@ func (m *memoDetector) Detect(ctx context.Context, audioPath string) (detector.R
 		}
 		m.last = res
 		m.ranInference = false
+		m.errored = false
 		return res, nil
 	}
 	res, err := m.inner.Detect(ctx, audioPath)
@@ -108,10 +114,12 @@ func (m *memoDetector) Detect(ctx context.Context, audioPath string) (detector.R
 		// mistaken for this pass's outcome.
 		m.last = detector.Result{}
 		m.ranInference = true
+		m.errored = true
 		return detector.Result{}, err
 	}
 	m.last = res
 	m.ranInference = true
+	m.errored = false
 	return res, nil
 }
 
@@ -137,4 +145,14 @@ func (m *memoDetector) canReuse() bool {
 // detection, never on a reuse pass.
 func (m *memoDetector) lastInference() (detector.Result, bool) {
 	return m.last, m.ranInference
+}
+
+// detectErrored reports that the detector was asked about the current item and
+// failed (an outage, a booting sidecar). It is false after a verdict, live or
+// from stored scores, and when Detect was never called (detection off for the
+// item, an empty source path, a karaoke title under front ordering), so the
+// worker can tell a detector that is down from one this row had no use for
+// (#1502).
+func (m *memoDetector) detectErrored() bool {
+	return m.errored
 }

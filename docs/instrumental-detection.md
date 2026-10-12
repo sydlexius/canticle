@@ -80,7 +80,11 @@ every provider that was asked has answered without a usable lyric. When no
 provider could be asked (every circuit open), the track waits. With
 `ordering = "front"` the detector is asked before any provider: a track it
 calls instrumental is settled with no provider request, and the providers race
-only when it says not instrumental or is unavailable. With no
+only when it says not instrumental or is unavailable. Under either mode, a
+track the detector calls not instrumental while no provider could be asked
+(every provider circuit open) waits too: it is not counted as a miss, and no
+provider that was not asked is charged one. It is set aside until a provider
+may be tried again, so tracks queued behind it are still checked. With no
 `classifier_url` set, no detector is built and Canticle behaves as if the feature
 did not exist: providers only.
 
