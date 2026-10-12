@@ -447,6 +447,43 @@ new Canticle tolerates an old flat-map (mean-only) sidecar response and degrades
 safely; an old Canticle **cannot** parse the new `{mean, max}` response. Upgrading
 the sidecar first can break classification until the app catches up.
 
+## Which setting drains which backlog
+
+A row the detector settles can cost a provider request and a provider pacing
+wait, or neither. Which one depends on the settings below. These rules hold
+under both `providers.mode` values, `"ordered"` and `"parallel"`.
+
+- **`ordering = "demoted"` (the default).** The providers are asked first. A row
+  the detector ends up settling has already cost a provider request, and the
+  worker then waits out the provider pacing before the next row. This is by
+  design: a provider lyric is never overridden by the audio model, so the
+  detector only sees a row once every provider that was asked has missed.
+- **`ordering = "front"`.** The detector is asked first. A row it settles as
+  instrumental costs no provider request and no pacing wait. A row it calls not
+  instrumental goes on to the providers and pays their pacing as usual. The cost
+  is twofold. A detector false positive can now override a provider lyric on a
+  fresh row. And the audio is read before any provider is asked, for every row
+  that has no stored scores to answer from.
+- **A Weak instrumental title.** With `instrumental_title.mode = "strong_weak"`,
+  a row whose title carries only a weak instrumental signal is put to the
+  detector first under either ordering, with the same costs as `front` for that
+  row. See "Title rule".
+- **The serve-mode backfill sweep.** It drains rows the detector has never
+  scored (`instrumental_result` is empty, status deferred, a source path on
+  file, and detection on for the row). It makes no provider request, so provider
+  pacing does not slow it. Its rate is `backfill.batch_size` rows (default
+  `100`) every `backfill.interval_minutes` minutes (default `60`). See "The
+  background backfill sweep" below.
+- **A row deferred while the detector was on.** It is usually already scored. The
+  first full not-instrumental answer is stored on the row, so asking again reads
+  the stored scores and gives the same answer without reading the audio. The
+  answer changes only if the thresholds change (they are applied to the stored
+  scores) or the sidecar's model version changes (the audio is then scored
+  again).
+- **A Strong instrumental title.** With `instrumental_title.mode` set to
+  `strong` or `strong_weak`, such a title settles with no lookup at all: no
+  provider, no cache and no detector. See "Title rule".
+
 ## Configuration reference and tuning
 
 All keys live under `[instrumental_detector]`; each has an
@@ -498,11 +535,12 @@ If you do tune:
 
 ### The background backfill sweep
 
-Detection is otherwise reachable only as a side effect of a provider miss, which
-is paced to the provider's rate limit. A track the detector has never scored
-therefore waits on a throttle it does not use, and an install where nobody runs
-`scan reconcile-instrumental` drifts forever - on one real library that produced a
-backlog of over 7,000 never-scored tracks.
+Under the default `demoted` ordering, detection is otherwise reached only after
+a provider miss, which is paced to the provider's rate limit (see "Which setting
+drains which backlog" for the settings that ask the detector first). A track the
+detector has never scored therefore waits on a throttle it does not use, and an
+install where nobody runs `scan reconcile-instrumental` drifts forever - on one
+real library that produced a backlog of over 7,000 never-scored tracks.
 
 Serve mode runs a bounded periodic sweep to fix that. It is **on by default**: the
 work is local, bounded, and makes no provider request.
