@@ -290,6 +290,12 @@ func (q *fakeQueue) RetireMiss(_ context.Context, id int64) (queue.WorkItem, err
 	return queue.WorkItem{ID: id, Status: queue.StatusDone}, nil
 }
 
+func (q *fakeQueue) SettleGoneUpgradeTrip(_ context.Context, _ int64, _ time.Duration) (queue.GoneOutcome, error) {
+	return queue.GoneNotTrip, nil
+}
+
+func (q *fakeQueue) ClearSourceGone(context.Context, int64) error { return nil }
+
 // instrumentalStamp captures one SetInstrumentalResult call so tests can
 // assert both the result flag and the telemetry that round-tripped through
 // the stamp path.

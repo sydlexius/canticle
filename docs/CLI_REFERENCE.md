@@ -367,6 +367,7 @@ canticle scan reconcile-instrumental-titles --yes --backup repair.jsonl
 
 - **What `--yes` does:** each lyric file is appended to `--backup` (required) before it is removed, its words are blocked for that track, and the track is reopened for the worker to settle with a marker. Refused while `instrumental_title.mode` is `off`.
 - **Only provable files are removed:** the lyric file must be dated within two minutes of the row's settle. Everything else is counted and skipped.
+- **Strong by title and strong by album:** the dry run splits the strong rows into those its title decides and those an instrumental release's album name decides; the two sum to `strong`. A row strong by album is counted and not repaired yet.
 - **Aggregate-only output.** `--tail <file>` appends one line per strong-titled row (work item id and disposition, nothing private); with `--yes` it defaults to `<backup>.rows.tsv`, and a restore needs it. `--library <name|id>` narrows the rows.
 - **Exit status:** 1 if a row errored or needs a manual mark, or the run was interrupted or stopped; 2 for a missing or unsafe `--backup` or `--tail`.
 
