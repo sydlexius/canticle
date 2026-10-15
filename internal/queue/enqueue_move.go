@@ -178,11 +178,13 @@ const (
 	// moveUnretireSQL moves a row the worker retired (#1597) whose source turned
 	// up at a new path: the retirement's premise (the file is gone) is false, so
 	// the sentinel and the mark are dropped, but status and outcome stay (that
-	// fetch landed), so the row is eligible for the upgrade sweep again.
+	// fetch landed), so the row is eligible for the upgrade sweep again. A
+	// hand-protected row is un-retired too, as prune's relinkUnretirePathSQL
+	// does: nothing here reopens the row or touches what the person set.
 	moveUnretireSQL = `UPDATE work_queue SET source_path = ?, scan_result_id = COALESCE(?, scan_result_id),
              last_error = '', source_gone_at = NULL
          WHERE id = ? AND source_path = ? AND status = 'done' AND last_error = ?
-           AND source_gone_at IS NOT NULL` + notHandProtected
+           AND source_gone_at IS NOT NULL`
 	movePathSQL = `UPDATE work_queue SET source_path = ?, scan_result_id = COALESCE(?, scan_result_id)
          WHERE id = ? AND source_path = ? AND status != 'processing'`
 )
