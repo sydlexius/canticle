@@ -115,7 +115,8 @@ func (m *MemStore) Finish(id int64, s Snapshot) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cur.ID == id && m.cur.State == StateRunning {
-		s.ID, s.Done, s.Total = id, m.cur.Done, m.cur.Total
+		s.ID = id
+		s.Counts = append([]Count(nil), s.Counts...)
 		m.cur = s
 	}
 }

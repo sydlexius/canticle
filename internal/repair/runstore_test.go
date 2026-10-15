@@ -76,3 +76,21 @@ func TestMemStoreLoadCopiesCounts(t *testing.T) {
 		t.Errorf("a caller's write reached the store: checked = %d", n)
 	}
 }
+
+// Finish keeps the final progress it is given, even when it differs from the
+// last Progress call, and owns its own copy of the counts.
+func TestMemStoreFinishKeepsItsSnapshot(t *testing.T) {
+	var m MemStore
+	id, _ := m.Begin(Snapshot{})
+	m.Progress(id, 3, 10)
+	counts := []Count{{Key: "checked", N: 1}}
+	m.Finish(id, Snapshot{State: StateDone, Done: 9, Total: 9, Counts: counts})
+	counts[0].N = 99
+	got := m.Load()
+	if got.Done != 9 || got.Total != 9 {
+		t.Errorf("Load = done %d of %d, want the final 9 of 9", got.Done, got.Total)
+	}
+	if n, ok := count(got, "checked"); !ok || n != 1 {
+		t.Errorf("a write to the caller's counts after Finish reached the store: checked = %d (present %v)", n, ok)
+	}
+}
