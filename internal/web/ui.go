@@ -142,6 +142,10 @@ type UI struct {
 	// empty DBPath makes them answer 404.
 	mark *MarkDeps
 
+	// repairs backs the operator repair routes (#1544); nil, or a nil
+	// registry or runner, makes them answer 404.
+	repairs *RepairDeps
+
 	// editor backs the lyric offset editor's save/revert routes (#481 Stage
 	// 2); nil leaves the player read-only. editLocks serializes edits per row.
 	editor    *EditDeps
@@ -388,6 +392,7 @@ func (u *UI) Register(mux *http.ServeMux) {
 	u.registerFailureGroupRoutes(reg)
 	u.registerPreviewRoutes(reg)
 	u.registerSourceRoutes(reg)
+	u.registerRepairRoutes(reg)
 	reg("POST /preview/{id}/offset", u.handlePreviewOffset)
 	reg("POST /preview/{id}/revert", u.handlePreviewRevert)
 	reg("POST /preview/{id}/auto", u.handleAutoStart)
