@@ -1,6 +1,7 @@
 package instrumentaltitle
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -267,6 +268,252 @@ func FuzzInstrumentalRelease(f *testing.F) {
 		}
 		if cut < 0 || strings.ContainsAny(a[:cut], "/+&;,|") {
 			t.Fatalf("release over album %q: its base holds a list separator", album)
+		}
+	})
+}
+
+var releaseVerdict = strong(FamilyInstrumental, PositionRelease)
+
+// settlesCheck runs Settles over every title with every album, under a known
+// artist that is nowhere in either, and wants v and ok.
+func settlesCheck(t *testing.T, want Verdict, wantOK bool, titles, albums []string) {
+	t.Helper()
+	for _, title := range titles {
+		for _, a := range albums {
+			if v, ok := Settles(title, a, relArtist, ""); v != want || ok != wantOK {
+				t.Errorf("Settles(%q, %q) = %+v, %v; want %+v, %v", title, a, v, ok, want, wantOK)
+			}
+		}
+	}
+}
+
+// TestSettlesRelease: a plain title on an album that ends in a covered marker
+// is Strong, family instrumental, at the release position, and acted on.
+func TestSettlesRelease(t *testing.T) {
+	settlesCheck(t, releaseVerdict, true,
+		[]string{"Quiet Shelf", "Quiet Shelf (Reprise)", "Quiet Shelf - 2004 Remaster", "Quiet Shelf (Album Version)"},
+		[]string{
+			"Low Tide (Instrumental)", "Low Tide [Instrumentals]", "Low Tide (Instrumental Version)",
+			"Low Tide [Instrumental Edition]", "Low Tide (Instrumental Album)", "Low Tide - Instrumental",
+			"Low Tide – Instrumentals", "Low Tide（Ｉｎｓｔｒｕｍｅｎｔａｌ）",
+			// A soundtrack its own release marks instrumental is not a score.
+			"Low Tide Soundtrack (Instrumental)", "Low Tide OST (Instrumental)",
+			// Near misses of the cast and musical rows: the words are whole.
+			"Broadcast Static (Instrumental)", "Castle Lights (Instrumental)", "Musically Speaking - Instrumental",
+		})
+	if releaseVerdict.Position == PositionAlbum || releaseVerdict.Position == PositionNone {
+		t.Fatalf("PositionRelease = %q collides with another position", PositionRelease)
+	}
+}
+
+// TestSettlesNotCovered pins, one each, the album shapes #1523 leaves out on
+// purpose, and near misses that only mention the word: no album-level verdict,
+// so the result is Classify's own, not acted on.
+func TestSettlesNotCovered(t *testing.T) {
+	for _, tc := range []struct{ name, album string }{
+		{"bare trailing word", "Low Tide Instrumentals"},
+		{"word inline", "A Bluegrass Instrumental Tribute to Glass Harbor"},
+		{"word leading", "Instrumental Low Tide"},
+		{"other words in the marker", "Low Tide (Instrumental Demos)"},
+		{"other words in a dash marker", "Low Tide - Deluxe Instrumental"},
+		{"marker not last", "Low Tide (Instrumental) [Deluxe]"},
+		{"another bracket beside a dash marker", "Low Tide (Deluxe) - Instrumental"},
+		{"bracket pair not accepted", "Low Tide {Instrumental}"},
+		{"tilde is not a dash", "Low Tide ~ Instrumental"},
+		{"score album with a marker", "Low Tide Score (Instrumental)"},
+		{"score album, dash marker", "Low Tide Original Score - Instrumental"},
+		{"score album, no marker", "Low Tide (Original Score)"},
+		{"soundtrack, no marker", "Low Tide (Original Motion Picture Soundtrack)"},
+		{"soundtrack bracket beside a dash marker", "Low Tide (Original Soundtrack) - Instrumental"},
+		// A cast album or a musical is a sing-over product (#1515).
+		{"cast album", "Low Tide Original Cast (Instrumental)"},
+		{"cast album, dash marker", "Low Tide London Cast - Instrumental"},
+		{"broadway album", "Low Tide Broadway Favorites (Instrumental)"},
+		{"broadway cast album", "Low Tide Original Broadway Cast (Instrumental)"},
+		{"musical", "Low Tide Musical (Instrumental)"},
+		{"the musical, dash marker", "Low Tide: The Musical - Instrumental"},
+		{"the whole name is the word", "Instrumental"},
+		{"instrumentalist is not the word", "Low Tide (Instrumentalist)"},
+		{"a list: a single and its instrumental", "Quiet Shelf / Quiet Shelf (Instrumental)"},
+		{"a voice in the base", "Low Tide Live (Instrumental)"},
+		{"no album", ""},
+	} {
+		want, _ := Actionable("Quiet Shelf", tc.album, relArtist, "")
+		if want.Tier == Strong {
+			t.Fatalf("%s: fixture drifted, the title alone is Strong", tc.name)
+		}
+		if v, ok := Settles("Quiet Shelf", tc.album, relArtist, ""); ok || v != want {
+			t.Errorf("%s: Settles(plain, %q) = %+v, %v; want %+v, false", tc.name, tc.album, v, ok, want)
+		}
+	}
+	// The dash form needs a real artist that is not the text before the dash.
+	for _, tc := range []struct{ name, album, artist string }{
+		{"dash form, no artist", "Low Tide - Instrumental", ""},
+		{"dash form, placeholder artist", "Low Tide - Instrumental", "Various Artists"},
+		{"dash form, album is the artist then the word", "Tin Lantern Band - Instrumental", relArtist},
+		{"guest credit on the artist", "Low Tide (Instrumental)", "Tin Lantern feat. Wren Hollow"},
+	} {
+		if v, ok := Settles("Quiet Shelf", tc.album, tc.artist, ""); ok || v.Position == PositionRelease {
+			t.Errorf("%s: Settles(plain, %q, %q) = %+v, %v; want no verdict acted on", tc.name, tc.album, tc.artist, v, ok)
+		}
+	}
+}
+
+// TestSettlesTitleGuard: on a good release, a title the release rule withholds
+// gets exactly what the title alone gives (Actionable), and a verdict from the
+// title keeps its own family and position.
+func TestSettlesTitleGuard(t *testing.T) {
+	albums := []string{"Low Tide (Instrumental)", "Low Tide - Instrumentals"}
+	for _, a := range albums {
+		for _, title := range []string{
+			"Quiet Shelf (Vocal)", "Quiet Shelf (Vocal Version)", "Quiet Shelf (A Cappella)", "Quiet Shelf (feat. Wren Hollow)",
+			"Quiet Shelf (with Wren Hollow)", "Quiet Shelf (Live)", "Live at the Quiet Shelf", "Quiet Shelf (Demo)",
+			"Quiet Shelf (Radio Edit)", "Quiet Shelf (Acoustic)", "Quiet Shelf (Remix)", "Sing Quiet Shelf", "Quiet Shelf (",
+			"Quiet Shelf (Piano Version)", "Final Score", "",
+		} {
+			want, wantOK := Actionable(title, a, relArtist, "")
+			if wantOK {
+				t.Fatalf("fixture drifted: %q on %q is acted on by the title alone", title, a)
+			}
+			if v, ok := Settles(title, a, relArtist, ""); v != want || ok {
+				t.Errorf("Settles(%q, %q) = %+v, %v; want the title's own %+v, false", title, a, v, ok, want)
+			}
+		}
+		// A Strong title keeps its own family and position.
+		for _, tc := range []struct {
+			title string
+			want  Verdict
+		}{
+			{"Quiet Shelf (Off Vocal)", strong(FamilyOffVocal, PositionBracket)},
+			{"Quiet Shelf - Instrumental", strong(FamilyInstrumental, PositionSuffix)},
+			{"Quiet Shelf (Instrumental)", strong(FamilyInstrumental, PositionBracket)},
+			{"Quiet Shelf [BGM]", strong(FamilyBGM, PositionBracket)},
+		} {
+			if v, ok := Settles(tc.title, a, relArtist, ""); v != tc.want || !ok {
+				t.Errorf("Settles(%q, %q) = %+v, %v; want %+v, true", tc.title, a, v, ok, tc.want)
+			}
+		}
+		// A Strong title the rule declines (the text before the dash is the
+		// artist) stays declined: the album does not rescue it.
+		const declined = "Tin Lantern Band - Off Vocal"
+		if v, ok := Settles(declined, a, relArtist, ""); ok || v != strong(FamilyOffVocal, PositionSuffix) {
+			t.Errorf("Settles(%q, %q) = %+v, %v; want the declined suffix verdict, false", declined, a, v, ok)
+		}
+	}
+}
+
+// TestSettlesExclusionWins: karaoke, sing-along and a cappella, in the title
+// or the album, beat the album-level verdict. A sing-along release keeps its
+// lyrics as karaoke does (#1515 tracks opting it in).
+func TestSettlesExclusionWins(t *testing.T) {
+	for _, tc := range []struct{ title, album string }{
+		{"Quiet Shelf (Karaoke)", "Low Tide (Instrumental)"},
+		{"Quiet Shelf (Sing-Along)", "Low Tide (Instrumental)"},
+		{"Quiet Shelf (A Cappella)", "Low Tide - Instrumental"},
+		{"Quiet Shelf (Performance Track)", "Low Tide [Instrumentals]"},
+		{"Quiet Shelf", "Low Tide Karaoke (Instrumental)"},
+		{"Quiet Shelf", "Low Tide Sing-Along - Instrumental"},
+		{"Quiet Shelf", "Low Tide Singalong (Instrumental Version)"},
+		{"Quiet Shelf", "Low Tide A Cappella (Instrumental)"},
+		{"Quiet Shelf", "Low Tide Backing Tracks (Instrumental)"},
+		{"Quiet Shelf", "Low Tide Play-Along [Instrumental]"},
+	} {
+		if v, ok := Settles(tc.title, tc.album, relArtist, ""); ok || v.Tier != None {
+			t.Errorf("Settles(%q, %q) = %+v, %v; want None, false", tc.title, tc.album, v, ok)
+		}
+	}
+}
+
+// settlesCorpus is the input set of the differential test below.
+var settlesCorpus = []struct{ title, album, artist, albumArtist string }{
+	{"Quiet Shelf", "Low Tide (Instrumental)", relArtist, ""},
+	{"Quiet Shelf", "Low Tide - Instrumentals", relArtist, ""},
+	{"Quiet Shelf", "Low Tide - Instrumental", "", ""},
+	{"Quiet Shelf", "Low Tide Instrumentals", relArtist, ""},
+	{"Quiet Shelf", "Low Tide Score (Instrumental)", relArtist, ""},
+	{"Quiet Shelf", "Low Tide (Original Score)", relArtist, ""},
+	{"Quiet Shelf", "Low Tide Karaoke (Instrumental)", relArtist, ""},
+	{"Quiet Shelf", "Low Tide Sing-Along - Instrumental", relArtist, ""},
+	{"Quiet Shelf", "Low Tide A Cappella (Instrumental)", relArtist, ""},
+	{"Quiet Shelf", "Low Tide", relArtist, ""},
+	{"Quiet Shelf", "", "", ""},
+	{"Quiet Shelf (Live)", "Low Tide (Instrumental)", relArtist, ""},
+	{"Quiet Shelf (Vocal)", "Low Tide (Instrumental)", relArtist, ""},
+	{"Quiet Shelf (Karaoke)", "Low Tide (Instrumental)", relArtist, ""},
+	{"Quiet Shelf (Instrumental)", "Low Tide", relArtist, ""},
+	{"Quiet Shelf (Instrumental)", "Low Tide Karaoke", relArtist, ""},
+	{"Quiet Shelf - Off Vocal", "Low Tide (Instrumental)", relArtist, ""},
+	{"Tin Lantern Band - Off Vocal", "Low Tide (Instrumental)", relArtist, ""},
+	{"Quiet Shelf - Off Vocal", "Low Tide", "Various Artists", ""},
+	{"Quiet Shelf (BGM)", "Low Tide - Instrumental", relArtist, "Various Artists"},
+	{"Quiet Shelf (Piano Version)", "Low Tide (Instrumental)", relArtist, ""},
+	{"Final Score", "Low Tide (Instrumental)", relArtist, ""},
+	{"Quiet Shelf", "Low Tide (Instrumental)", "Tin Lantern feat. Wren Hollow", ""},
+	{"Quiet Shelf", "Tin Lantern Band - Instrumental", relArtist, ""},
+}
+
+// settlesGolden is Classify, Actionable and KaraokeExcluded over settlesCorpus,
+// one line per row, captured from main before Settles existed.
+const settlesGolden = `{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:weak Family:score Position:album} | {Tier:weak Family:score Position:album} false | false
+{Tier:none Family: Position:} | {Tier:none Family: Position:} false | true
+{Tier:none Family: Position:} | {Tier:none Family: Position:} false | true
+{Tier:none Family: Position:} | {Tier:none Family: Position:} false | false
+{Tier:none Family: Position:} | {Tier:none Family: Position:} false | false
+{Tier:none Family: Position:} | {Tier:none Family: Position:} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:none Family: Position:} | {Tier:none Family: Position:} false | true
+{Tier:strong Family:instrumental Position:bracket} | {Tier:strong Family:instrumental Position:bracket} true | false
+{Tier:none Family: Position:} | {Tier:none Family: Position:} false | true
+{Tier:strong Family:off_vocal Position:suffix} | {Tier:strong Family:off_vocal Position:suffix} true | false
+{Tier:strong Family:off_vocal Position:suffix} | {Tier:strong Family:off_vocal Position:suffix} false | false
+{Tier:strong Family:off_vocal Position:suffix} | {Tier:strong Family:off_vocal Position:suffix} false | false
+{Tier:strong Family:bgm Position:bracket} | {Tier:strong Family:bgm Position:bracket} true | false
+{Tier:weak Family:arrangement Position:bracket} | {Tier:weak Family:arrangement Position:bracket} false | false
+{Tier:weak Family:score Position:inline} | {Tier:weak Family:score Position:inline} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false
+{Tier:weak Family:instrumental Position:album} | {Tier:weak Family:instrumental Position:album} false | false`
+
+// TestSettlesLeavesTheClassifierAlone is the differential test: Classify,
+// Actionable and KaraokeExcluded answer the corpus exactly as on main, and
+// Settles differs from Actionable only where InstrumentalRelease holds.
+func TestSettlesLeavesTheClassifierAlone(t *testing.T) {
+	lines := make([]string, 0, len(settlesCorpus))
+	for _, c := range settlesCorpus {
+		v, ok := Actionable(c.title, c.album, c.artist, c.albumArtist)
+		lines = append(lines, fmt.Sprintf("%+v | %+v %v | %v", Classify(c.title, c.album), v, ok, KaraokeExcluded(c.title, c.album)))
+		sv, sok := Settles(c.title, c.album, c.artist, c.albumArtist)
+		want, wantOK := v, ok
+		if InstrumentalRelease(c.title, c.album, c.artist, c.albumArtist) {
+			want, wantOK = releaseVerdict, true
+		}
+		if sv != want || sok != wantOK {
+			t.Errorf("Settles(%q, %q) = %+v, %v; want %+v, %v", c.title, c.album, sv, sok, want, wantOK)
+		}
+	}
+	if got := strings.Join(lines, "\n"); got != settlesGolden {
+		t.Errorf("Classify, Actionable or KaraokeExcluded changed:\n got:\n%s\nwant:\n%s", got, settlesGolden)
+	}
+}
+
+func FuzzSettles(f *testing.F) {
+	for _, c := range settlesCorpus {
+		f.Add(c.title, c.album, c.artist, c.albumArtist)
+	}
+	f.Fuzz(func(t *testing.T, title, album, artist, albumArtist string) {
+		v, ok := Settles(title, album, artist, albumArtist)
+		av, aok := Actionable(title, album, artist, albumArtist)
+		release := InstrumentalRelease(title, album, artist, albumArtist)
+		switch {
+		case release && (aok || v != releaseVerdict || !ok):
+			t.Fatalf("Settles(%q, %q) = %+v, %v on a release (Actionable %v)", title, album, v, ok, aok)
+		case !release && (v != av || ok != aok):
+			t.Fatalf("Settles(%q, %q) = %+v, %v; Actionable gives %+v, %v", title, album, v, ok, av, aok)
 		}
 	})
 }

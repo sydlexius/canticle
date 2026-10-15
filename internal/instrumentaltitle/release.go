@@ -58,11 +58,15 @@ var (
 	listMarks = "/+&;,|、"
 	listWords = []string{"and", "plus", "bw", "vs", "with"}
 	// The sing-over products the exclusion does not cover. Either set in an
-	// album name withholds the answer; coverSet in a title does too.
+	// album name withholds the answer; coverSet in a title does too. A cast
+	// album or a musical's instrumental is sold to sing over, so it keeps its
+	// lyrics as a sing-along does (#1515): "cast", "broadway" and "musical" are
+	// whole words, so "Broadcast", "Castle" and "Musically" do not count.
 	coverSet    = phraseSet{rows: [][][]string{{{"made"}, {"famous"}, {"by"}}, {{"tribute"}, {"to"}}}}
 	singOverSet = phraseSet{rows: [][][]string{
 		{{"accompaniment"}}, {{"playback", "playbacks"}}, {{"trax"}}, {{"for"}, {"singers"}},
 		{{"cast"}, {"recording"}}, {{"cover"}, {"version", "versions"}},
+		{{"cast"}}, {{"broadway"}}, {{"musical", "musicals"}},
 	}}
 )
 
@@ -84,15 +88,49 @@ func init() {
 	singOverSet.build(fold)
 }
 
+// PositionRelease is the position of a verdict the album decided: a plain
+// title on an instrumental release (InstrumentalRelease). Only Settles returns
+// it. It is not PositionAlbum, which is Classify's Weak album signal and is
+// never acted on.
+const PositionRelease Position = "release"
+
+// Settles reports the verdict a caller may act on for a track, and whether it
+// may act. It is Actionable, plus the album-level verdict: when the title rule
+// declines and the track is a plain title on an instrumental release
+// (InstrumentalRelease), the answer is Strong FamilyInstrumental at
+// PositionRelease, and ok.
+//
+// The title decides first. A verdict from the title keeps its own family and
+// position, and a title the release rule withholds (one that carries any signal
+// of its own, Weak or a declined Strong included, or names a voice or another
+// version) gets exactly what Actionable gives. Karaoke and a sing-along
+// product, in either field, and an a cappella title win over both. An a
+// cappella album withholds only the album-level verdict: a Strong title on it
+// still settles, as Classify lets such an album cancel only its own signal. A
+// score album is never a release: some are sung.
+//
+// ok says the rule may act. For a PositionRelease verdict the caller must also
+// hold it to a row that is that release's own (the edition row of #1525): the
+// queue row, the lyric cache and the lyric block are keyed by artist and
+// title, so the sung twin shares them otherwise. Every other verdict is
+// decided on ok alone, as with Actionable. Classify, Actionable and
+// KaraokeExcluded do not know this rule.
+func Settles(title, album, artist, albumArtist string) (v Verdict, ok bool) {
+	if v, ok = Actionable(title, album, artist, albumArtist); ok {
+		return v, true
+	}
+	if InstrumentalRelease(title, album, artist, albumArtist) {
+		return Verdict{Tier: Strong, Family: FamilyInstrumental, Position: PositionRelease}, true
+	}
+	return v, false
+}
+
 // InstrumentalRelease reports whether a track is a plain-titled track on a
 // release whose album name ends in an instrumental marker, such as
 // "Low Tide (Instrumental)" or "Low Tide - Instrumentals".
 //
-// Nothing acts on the answer yet. It is counted by the title repair's dry run
-// and that is all: the queue row, the lyric cache and the lyric block are keyed
-// by artist and title with no album, so an instrumental edition shares them
-// with its sung twin, and a marker or a block for one would land on the other
-// (#1525). Classify and Actionable do not know this rule.
+// Settles turns the answer into a verdict; this is the count-only form the
+// title repair's dry run reads. Classify and Actionable do not know this rule.
 //
 // Every doubt is a no. All of these must hold:
 //
