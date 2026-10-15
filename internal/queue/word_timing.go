@@ -97,14 +97,17 @@ type WordRecheckOptions struct {
 // post-settle one (#1120) and a result that lands re-stamps it, while forced
 // alignment of the existing words is only the on-demand #1008 Auto action.
 // A hand-edited or manually marked row is excluded (notHandProtected).
-// source_path is required because the sidecar is derived from it.
+// source_path is required because the sidecar is derived from it. A row
+// retired with the gone sentinel is excluded (#1597): the flip clears last_error,
+// so it would otherwise be wiped and re-enter the upgrade sweep.
 func wordRecheckPredicate(opts WordRecheckOptions) (string, []any) {
 	var b strings.Builder
 	var args []any
 	b.WriteString(` status = 'done'
    AND outcome_type = 'synced'
    AND COALESCE(timing_outcome, '') NOT IN ('categorical', 'mis_synced', 'degenerate')
-   AND TRIM(COALESCE(source_path, '')) <> ''`)
+   AND TRIM(COALESCE(source_path, '')) <> ''
+   AND COALESCE(last_error, '') <> '` + UnresolvableGoneError + `'`)
 	b.WriteString(notHandProtected)
 	b.WriteString(`
    AND ((word_timing_state IS NULL`)

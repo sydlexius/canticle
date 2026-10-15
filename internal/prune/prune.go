@@ -237,6 +237,10 @@ func countHoldingWork(rows []RetainedRow) int {
 // The text is written for someone reading it six months from now with no context:
 // it states the mechanism, not a verdict. The literal lives in queue so the
 // reconcile-remediated guard (#1143) recognizes a retired row without a copy.
+//
+// A row the worker settles as source-gone (#1597) carries this value too,
+// identity or not, so the text is a match key and not a description of why a
+// row was retired.
 const unresolvableGoneError = queue.UnresolvableGoneError
 
 // Result reports the totals and per-row detail of a prune (or, in dry-run, what
@@ -1155,11 +1159,11 @@ func (p *Pruner) classify(ctx context.Context, idx *presentIndex, policy Policy,
 		// the first sweep lock the tier out would make the whole feature a coin
 		// flip against the scan scheduler.
 		//
-		// Gated on the sentinel, never on 'done' generally: a row that genuinely
-		// completed its work must never be resurrected. retireUnresolvable is the
-		// only writer of this exact string, so it identifies our own retirements
-		// and nothing else -- including retirements by SHIPPED builds, which this
-		// therefore also recovers.
+		// Gated on the sentinel, never on 'done' generally. A row the worker
+		// retires (#1597) carries the sentinel on a settled row, which is why the
+		// tier may relink such a row but relinkResurrectSQL reopens only a row
+		// with no source_gone_at: a worker-retired row is un-retired in place.
+		// Retirements by SHIPPED builds are recovered too.
 		//
 		// The same carve-out covers an 'unavailable' row (#477, holdsUnavailable):
 		// the tier may relink it, and on a decline it drops out silently below.
@@ -1767,8 +1771,12 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 	// not smuggled through status. completed_at and last_error are cleared so the
 	// row does not read as settled to any report that joins on them.
 	//
-	// Applied ONLY to our own sentinel-retired rows (see retiredAsUnresolvable),
-	// so a genuinely completed row is never resurrected by a relink.
+	// Applied ONLY to sentinel-retired rows that never completed a fetch (see
+	// retiredAsUnresolvable): the worker's retirement (#1597) is a sentinel on a
+	// settled row whose fetch landed, marked source_gone_at; relinkResurrectSQL
+	// skips such a row and it takes the un-retire relink below, so a genuinely
+	// completed row is never resurrected. outcome_type cannot tell the two apart:
+	// a reset row prune retires may still carry a stale one.
 	//
 	// priority is deliberately NOT reset here. A row retired while 'deferred'
 	// carries priority=-100 from that miss, and resurrecting it to 'pending'
@@ -1827,6 +1835,12 @@ func relinkOne(ctx context.Context, tx *sql.Tx, c *candidate, target presentRowD
 					target.filePath, target.outdir, target.filename, string(outputPathsJSON), w.id, w.rawOutputPaths)
 				if err == nil && rowsAffected(res) > 0 {
 					decision.editHeld++
+				} else if err == nil {
+					// Neither reopened nor hand-edited: a row the worker retired
+					// (#1597) keeps its status and outcome, moves its paths and is
+					// un-retired (sentinel and mark dropped): its file is here.
+					res, err = tx.ExecContext(ctx, relinkUnretirePathSQL,
+						target.filePath, target.outdir, target.filename, string(outputPathsJSON), w.id, w.rawOutputPaths)
 				}
 			}
 		} else {
@@ -2649,16 +2663,25 @@ const (
                      outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL,
                      ` + queue.ClearWordRecheckQueued + `
                  WHERE id = ? AND status != 'processing' AND output_paths IS ?
+                   AND source_gone_at IS NULL
                    ` + queue.NotHandProtected
 	// relinkPathSQL moves only the path columns: an ordinary relink, and (with
 	// relinkHeldOnly appended) a hand-edited or manually marked row a resurrect skipped (#1228, #1405).
 	relinkPathSQL = `UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?
                  WHERE id = ? AND status != 'processing' AND output_paths IS ?`
+	// relinkUnretirePathSQL is the path-only relink of a row the worker retired
+	// (#1597): its file turned up, so the retirement's premise is false. The
+	// sentinel and the mark are dropped; status and outcome stay (that fetch
+	// landed), which makes the row eligible for the upgrade sweep again.
+	relinkUnretirePathSQL = `UPDATE work_queue SET source_path = ?, outdir = ?, filename = ?, output_paths = ?,
+                     last_error = '', source_gone_at = NULL
+                 WHERE id = ? AND status != 'processing' AND output_paths IS ?`
 	relinkHeldOnly        = ` AND ` + queue.HandProtectedPredicate
 	retireUnresolvableSQL = `UPDATE work_queue
              SET status = 'done',
                  completed_at = ?,
-                 last_error = ?
+                 last_error = ?,
+                 source_gone_at = NULL
              WHERE id = ?
                AND status NOT IN ('processing', 'done', 'unavailable')`
 )

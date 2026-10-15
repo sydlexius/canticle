@@ -761,7 +761,8 @@ func (q *DBQueue) completeOnce(ctx context.Context, id int64) error {
              refused_waits = 0,
              missync_recheck_generation = CASE WHEN upgrade_queued = 1 AND timing_outcome = 'mis_synced'
                  THEN ? ELSE missync_recheck_generation END,
-             upgrade_miss_count = CASE WHEN upgrade_queued = 1 THEN 0 ELSE upgrade_miss_count END
+             upgrade_miss_count = CASE WHEN upgrade_queued = 1 THEN 0 ELSE upgrade_miss_count END,
+             source_gone_at = NULL
          WHERE id = ?
            AND status = 'processing'`,
 		now,
@@ -1555,8 +1556,16 @@ func (q *DBQueue) deferRefusedOnce(ctx context.Context, id int64, retryAfter tim
 // bind, the tests, and any log/inspection of the sentinel cannot drift.
 const missLimitReachedError = "miss limit reached"
 
-// UnresolvableGoneError is the last_error value prune writes when it retires a
-// row to 'done' whose source file is gone and which carries no ISRC or MBID.
+// UnresolvableGoneError is the last_error value that marks a row retired to
+// 'done' because its source file is gone. Prune writes it for a row that carries
+// no ISRC or MBID; a row the worker settles as source-gone (#1597) carries it
+// too, whatever identity it has. The text is therefore a MATCH KEY, stored and
+// compared by equality in several places, not a description of any one row: do
+// not reword it without a data migration. A worker-retired row keeps a non-NULL
+// source_gone_at (the first sighting); a prune-retired one has NULL, which is
+// how the resurrect statements tell them apart (outcome_type cannot: a reset
+// row prune retires may still carry a stale one). Prune's retirement, a reopen
+// and a completed fetch all clear the mark, so that holds by construction.
 // Owned here (prune aliases it) so queue can recognize a retired row.
 const UnresolvableGoneError = "source file is gone and the row carries no ISRC or MBID, so it can never be relinked; retired as unactionable"
 
@@ -4182,6 +4191,7 @@ func ReopenDoneRowTx(ctx context.Context, tx *sql.Tx, id int64, now time.Time) (
              overrun_ratio = NULL,
              evaluated_at = NULL,
              refused_waits = 0,
+             source_gone_at = NULL,
              `+ClearWordRecheckQueued+`
          WHERE id = ? AND (status = 'done' OR (status = 'deferred' AND word_timing_state = 'queued'))
            AND manual_instrumental_at IS NULL`,

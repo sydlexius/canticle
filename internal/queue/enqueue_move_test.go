@@ -94,6 +94,9 @@ func TestEnqueueMovesRowToSameStemReplacement(t *testing.T) {
 			moveNew + "|deferred|2|synced|ok|line|musixmatch|2026-01-10T00:00:00Z|queued|0" + moveTail},
 		{"row prune retired is reopened at the new path", "last_error = '" + UnresolvableGoneError + "'", gone, moveNew,
 			moveNew + "|pending|0|||line|musixmatch|||0" + moveTail},
+		{"row the worker retired (source_gone_at set) moves but is not reopened (#1597)",
+			"last_error = '" + UnresolvableGoneError + "', source_gone_at = '2026-02-01T00:00:00Z'", gone, moveNew,
+			moveNew + settled + "|0" + moveTail},
 		{"hand-edited retired row moves but is not reopened",
 			"last_error = '" + UnresolvableGoneError + "', lyric_edited_at = '2026-02-01T00:00:00Z'", gone, moveNew,
 			moveNew + settled + "|0" + moveTail},
@@ -357,4 +360,50 @@ func TestGoneSourceMoveIsLibraryScoped(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A row the worker retired (#1597) whose source turns up at a new path is moved
+// and un-retired: the sentinel and the mark go (its file is here), status and
+// outcome stay (that fetch landed). A hand-protected row is un-retired the same
+// way and keeps its protection (prune's relink does the same).
+func TestEnqueueMoveUnretiresWorkerRetiredRow(t *testing.T) {
+	const retired = "last_error = '" + UnresolvableGoneError + "', source_gone_at = '2026-02-01T00:00:00Z'"
+	for _, tc := range []struct{ name, extra, wantProtect string }{
+		{"plain", "", "||"},
+		{"hand-edited", ", lyric_edited_at = '2026-02-02T00:00:00Z'", "|2026-02-02T00:00:00Z|"},
+		{"manually marked", ", manual_instrumental_at = '2026-02-02T00:00:00Z'", "||2026-02-02T00:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			sqlDB := openQueueTestDB(t)
+			q := NewDBQueue(sqlDB)
+			q.stat = fakeStat(map[string]error{moveOld: fs.ErrNotExist})
+			id := seedMoveRow(t, sqlDB, retired+tc.extra)
+			if _, err := q.Enqueue(ctx, models.Inputs{
+				Track:      models.Track{ArtistName: "Artist", TrackName: "Song"},
+				Outdir:     "/lib/album",
+				Filename:   "01 song.lrc",
+				SourcePath: moveNew,
+			}, PriorityScan); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			var lastErr, protect string
+			var mark sql.NullString
+			if err := sqlDB.QueryRow(`SELECT last_error, source_gone_at,
+                     '|' || COALESCE(lyric_edited_at, '') || '|' || COALESCE(manual_instrumental_at, '')
+                 FROM work_queue WHERE id = ?`, id).Scan(&lastErr, &mark, &protect); err != nil {
+				t.Fatal(err)
+			}
+			if lastErr != "" || mark.Valid {
+				t.Errorf("last_error = %q, source_gone_at = %v; want both cleared", lastErr, mark)
+			}
+			if protect != tc.wantProtect {
+				t.Errorf("protection = %q, want %q", protect, tc.wantProtect)
+			}
+			want := moveNew + "|done|2|synced|ok|line|musixmatch|2026-01-10T00:00:00Z||0" + moveTail
+			if got := moveRow(t, sqlDB, id); got != want {
+				t.Errorf("row after un-retire:\n got %s\nwant %s", got, want)
+			}
+		})
+	}
 }
