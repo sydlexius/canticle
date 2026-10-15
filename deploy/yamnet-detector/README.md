@@ -79,7 +79,7 @@ Point compose at the published image:
 ```yaml
 services:
   yamnet:
-    image: ghcr.io/sydlexius/canticle-yamnet:1.26.0 # match your Canticle version
+    image: ghcr.io/sydlexius/canticle-yamnet:1.49.0 # match your Canticle version
 ```
 
 > **Unsupported: a hand-copied `build.context`.** Do not deploy by copying these
