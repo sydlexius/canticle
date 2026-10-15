@@ -29,7 +29,7 @@ const dequeueMaxAttempts = 5
 
 // workQueueColumns is the full work_queue row column list, in the order the row scan
 // reads it. Every query that returns a whole WorkItem uses it, so a new column is added once.
-const workQueueColumns = `id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts, miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`
+const workQueueColumns = `id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts, miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete, edition`
 
 const (
 	// StatusPending marks queued work ready to be processed.
@@ -176,6 +176,9 @@ type WorkItem struct {
 	// TimingOutcome is the row's stored timing verdict (#440); empty means NULL.
 	// An upgrade trip over a mis_synced row reads it (#1120).
 	TimingOutcome string
+	// Edition is part of the row identity (#1525): EditionNone or
+	// EditionInstrumental. Set on insert only; never updated in place.
+	Edition string
 }
 
 // DBQueue is a SQLite-backed queue for durable lyrics work.
@@ -202,6 +205,9 @@ type DBQueue struct {
 	// backward compatibility with call sites that do not supply a generation.
 	// Set via SetProvidersVersion from the commands layer after config is loaded.
 	providersVersion int
+	// editionRule computes a new row's edition (SetEditionRule); nil gives
+	// every row EditionNone.
+	editionRule EditionRule
 }
 
 // NewDBQueue returns a durable queue backed by db.
@@ -299,6 +305,15 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		}
 	}
 
+	// The edition is resolved before anything below reads a row by its keys
+	// (#1559): the scan-origin reopens act on this edition's row only, never on
+	// the twin that shares the keys.
+	artistKey, titleKey := IdentityKeys(inputs.Track)
+	edition, err := q.resolveEditionTx(ctx, tx, artistKey, titleKey, inputs.Track, inputs.SourcePath)
+	if err != nil {
+		return WorkItem{}, err
+	}
+
 	// A SCAN collision with a word-recheck row (#982, 'deferred'+'queued')
 	// reopens it for an ordinary fetch first (#1039), so the upsert below treats
 	// it as the fresh 'pending' row it now is. Origin is the explicit
@@ -309,28 +324,29 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 	// caller, says only "this file changed", so it mirrors a 'done' row and keeps
 	// recheck mode and its paths, and the settled .lrc stays safe.
 	if inputs.FromScan {
-		if err := reopenWordRecheckForScan(ctx, tx, inputs, q.now()); err != nil {
+		if err := reopenWordRecheckForScan(ctx, tx, inputs, edition, q.now()); err != nil {
 			return WorkItem{}, err
 		}
 		if inputs.ReopenCategorical {
-			if err := reopenCategoricalForScan(ctx, tx, inputs, q.now()); err != nil {
+			if err := reopenCategoricalForScan(ctx, tx, inputs, edition, q.now()); err != nil {
 				return WorkItem{}, err
 			}
 		}
 		if inputs.ReopenAdopted {
-			if err := reopenAdoptedForScan(ctx, tx, inputs, q.now()); err != nil {
+			if err := reopenAdoptedForScan(ctx, tx, inputs, edition, q.now()); err != nil {
 				return WorkItem{}, err
 			}
 		}
 	}
 
-	artistKey, titleKey := IdentityKeys(inputs.Track)
+	// edition is identity (#1525): the conflict target names it and the update
+	// below never writes it.
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
-             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, detect_instrumental, next_attempt_at
+             artist, title, album, album_artist, artist_key, title_key, edition, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, detect_instrumental, next_attempt_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(artist_key, title_key) DO UPDATE SET
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(artist_key, title_key, edition) DO UPDATE SET
              artist = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.artist
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.artist
@@ -422,6 +438,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		inputs.Track.AlbumArtist,
 		artistKey,
 		titleKey,
+		edition,
 		inputs.Outdir,
 		inputs.Filename,
 		inputs.SourcePath,
@@ -1748,7 +1765,7 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 //
 // Enqueue dedup safety: after revival the work_queue row is status='deferred'.
 // A subsequent scan-priority Enqueue for the same artist/title will hit the
-// ON CONFLICT(artist_key, title_key) path and preserve the 'deferred' status
+// ON CONFLICT(artist_key, title_key, edition) path and preserve the 'deferred' status
 // (the upsert keeps work_queue.status for deferred/done/unavailable/processing
 // rows), so no duplicate work_queue row is created alongside the revived one.
 func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, error) {
@@ -3764,6 +3781,7 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&item.UpgradeQueued,
 		&timingOutcome,
 		&gateComplete,
+		&item.Edition,
 	)
 	if err != nil {
 		return WorkItem{}, err
@@ -4012,12 +4030,12 @@ const ClearWordRecheckQueued = `word_timing_state = CASE WHEN word_timing_state 
 // ReopenDoneRowTx, so it carries no stale settle columns into the
 // fetch (an outcome_type/lane left on a 'deferred' row makes it an
 // instrumental-backfill candidate). No colliding recheck row is a no-op.
-func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
+func reopenWordRecheckForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, edition string, now time.Time) error {
 	var id int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT id FROM work_queue WHERE artist_key = ? AND title_key = ?
+		`SELECT id FROM work_queue WHERE artist_key = ? AND title_key = ? AND edition = ?
            AND status = 'deferred' AND word_timing_state = 'queued'`,
-		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName)).Scan(&id)
+		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName), edition).Scan(&id)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -4072,7 +4090,7 @@ const categoricalFileless = `(outcome_type IS NULL AND sync_tier IS NULL` + notH
 // scan until that scan_result settles. The state arises after a forced
 // --update/--upgrade scan and persists after a later provider-generation
 // change. main does not fetch it in that state either.
-func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
+func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, edition string, now time.Time) error {
 	var (
 		id                   int64
 		status               string
@@ -4087,9 +4105,9 @@ func reopenCategoricalForScan(ctx context.Context, tx *sql.Tx, inputs models.Inp
                           AND sr.file_path <> ? AND sr.status <> 'done'),
                 `+categoricalFileless+`
          FROM work_queue
-         WHERE artist_key = ? AND title_key = ? AND timing_outcome = 'categorical'`,
+         WHERE artist_key = ? AND title_key = ? AND edition = ? AND timing_outcome = 'categorical'`,
 		inputs.SourcePath,
-		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName),
+		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName), edition,
 	).Scan(&id, &status, &held, &live, &fileless)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
