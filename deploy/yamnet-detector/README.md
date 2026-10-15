@@ -64,8 +64,10 @@ each release tag (see `.github/workflows/yamnet.yml`, issue #498):
 ghcr.io/sydlexius/canticle-yamnet:<tag>
 ```
 
+This section is the one place the image name, tags and platform limit are stated; other docs link here.
+
 Tags mirror the app image: `nightly` / `dev` (and a dated `nightly-YYYYMMDD`) on
-`main`, plus the semver tags (`X.Y.Z`, `X.Y`) on a release. The image is
+`main`, plus the semver tags (`X.Y.Z`, `X.Y`, `latest`) on a release. The image is
 **amd64-only** -- the `linux/amd64` TensorFlow wheel requires AVX, so there is no
 arm64 build and the sidecar cannot run on Apple Silicon (even under emulation the
 TF import aborts). Pull a version tag that matches your Canticle version so their
@@ -77,7 +79,7 @@ Point compose at the published image:
 ```yaml
 services:
   yamnet:
-    image: ghcr.io/sydlexius/canticle-yamnet:1.26.0 # match your Canticle version
+    image: ghcr.io/sydlexius/canticle-yamnet:1.49.0 # match your Canticle version
 ```
 
 > **Unsupported: a hand-copied `build.context`.** Do not deploy by copying these

@@ -17,6 +17,36 @@ only so Canticle can run its own cheap content gate
 (`verification.Similarity`, see epic #482's 2026-07-23 design refinement)
 without standing up a second sidecar.
 
+## Published images
+
+This section is the one place the image name, tags and platform limits are
+stated; other docs link here. CI (`.github/workflows/aligner.yml`) publishes
+both variants to GHCR under one name, so pull the image rather than building it:
+
+```
+ghcr.io/sydlexius/canticle-aligner:<tag>
+```
+
+| Variant | Tags | Platforms |
+|---|---|---|
+| CPU | `dev`, `nightly`, `nightly-YYYYMMDD` (a push to `main` that changes the sidecar); `X.Y.Z`, `X.Y`, `latest` (release tags) | amd64 and arm64 |
+| CUDA (NVIDIA GPU) | the same tags with a `-cuda` suffix on every one, `latest` included: `dev-cuda`, `nightly-cuda`, `nightly-YYYYMMDD-cuda`, `X.Y.Z-cuda`, `X.Y-cuda`, `latest-cuda` | amd64 only |
+
+The two tag sets never overlap: every CUDA tag ends in `-cuda` and no CPU tag
+does. Pin the release tag that matches your Canticle version rather than
+`latest`. Sizes: CUDA is ~4.1 GB compressed / ~12.1 GB unpacked against
+~0.65 GB / ~2.8 GB for CPU (+~3.5 GB to pull, +~9.3 GB on disk). The compose
+file `docker-compose.example.yml` pulls these images through its `aligner`
+(CPU) and `aligner-gpu` (CUDA) profiles.
+
+```bash
+docker run --rm -p 8080:8080 -v aligner-data:/data ghcr.io/sydlexius/canticle-aligner:X.Y.Z
+docker run --rm --gpus all -p 8080:8080 -v aligner-data:/data ghcr.io/sydlexius/canticle-aligner:X.Y.Z-cuda
+```
+
+Build from this directory only as a fallback or to work on the sidecar itself
+(see "Build" below).
+
 ## Contract
 
 ### `POST /align`
@@ -177,6 +207,8 @@ the same Dockerfile: torch/torchaudio come from the PyTorch **cu126** index
 `nvidia-*` packages on the same slim base (no CUDA base image). Everything
 else, including the app and every CPU smoke step, is shared.
 
+To build the CUDA image locally instead of pulling it:
+
 ```bash
 docker build --platform linux/amd64 --build-arg VARIANT=cuda -t canticle-aligner:cuda deploy/aligner
 docker run --rm --gpus all -p 8080:8080 -v aligner-data:/data canticle-aligner:cuda
@@ -202,19 +234,9 @@ hand: run the container with `--gpus all` and check `/health` reports
 
 Host: NVIDIA driver 525.60+ and the NVIDIA Container Toolkit (Linux only;
 macOS Docker has no GPU). `docker-compose.example.yml` has the `aligner` and
-`aligner-gpu` profiles (one shared anchor and network alias). CI publishes both
-images under `ghcr.io/sydlexius/canticle-aligner`: CPU as `dev`, `nightly`,
-`nightly-YYYYMMDD`, `X.Y.Z`, `X.Y`, `latest` (amd64 + arm64), and CUDA with a
-`-cuda` suffix on every one of those (`latest-cuda`, `X.Y.Z-cuda`, ...; amd64
-only). The tag sets are disjoint.
+`aligner-gpu` profiles (one shared anchor and network alias). The published
+tags and platforms are listed under "Published images" above.
 
-One-time release step: GHCR creates a new package PRIVATE, so after the first
-release tag publishes `canticle-aligner`, set the package visibility to public
-(GitHub > the repo owner's Packages > canticle-aligner > Package settings >
-Change visibility). Until then anonymous pulls fail (404) and the compose
-profiles must build locally. `docker buildx imagetools inspect
-ghcr.io/sydlexius/canticle-aligner:latest` without logging in confirms it. Sizes: CUDA is ~4.1 GB compressed / ~12.1 GB
-unpacked against ~0.65 GB / ~2.8 GB for CPU (+~3.5 GB to pull, +~9.3 GB on disk).
 
 ### CPU image
 
@@ -269,6 +291,9 @@ Rerun the decode check against a built image with
 `docker run --rm <image> python smoke_decode.py`.
 
 ## Build
+
+Fallback and contributor path; deployments pull the published image (see
+"Published images").
 
 ```bash
 docker build --platform linux/amd64 -t canticle-aligner deploy/aligner
