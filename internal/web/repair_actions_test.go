@@ -446,3 +446,40 @@ func TestRepairFailuresLeakNoPath(t *testing.T) {
 		t.Errorf("log lines do not carry the key and counts:\n%s", logs)
 	}
 }
+
+// TestRepairTokenFailureAnswers500 forces CSRF token generation to fail on a
+// request that carries no CSRF cookie and asserts every route that would embed
+// the token answers a plain 500 with no form (a token-less form would post an
+// empty token and fail with a bare 403). The finished status fragment holds no
+// form, so it still answers 200.
+func TestRepairTokenFailureAnswers500(t *testing.T) {
+	g := newRepairRig(t, true)
+	g.a.gate = make(chan struct{})
+	t.Cleanup(func() { close(g.a.gate) })
+	if rec := g.do(http.MethodPost, "/repairs/fix-a", repairCSRF, nil); rec.Code != http.StatusSeeOther {
+		t.Fatalf("start = %d, want 303", rec.Code)
+	}
+	orig := csrfRandRead
+	csrfRandRead = func([]byte) (int, error) { return 0, fmt.Errorf("entropy: %s", "/secret/path") }
+	t.Cleanup(func() { csrfRandRead = orig })
+	get := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "198.51.100.40:1"
+		req.AddCookie(g.sess) // no CSRF cookie: a token must be minted
+		rec := httptest.NewRecorder()
+		g.mux.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, path := range []string{"/repairs/fix-a", "/repairs/fix-a/status", "/repairs/fix-b"} {
+		rec := get(path)
+		body := rec.Body.String()
+		if rec.Code != http.StatusInternalServerError || strings.Contains(body, "<form") ||
+			strings.Contains(body, "csrf_token") || strings.Contains(body, "/secret/path") {
+			t.Errorf("GET %s = %d, want a plain 500 with no form or error text:\n%s", path, rec.Code, body)
+		}
+	}
+	// The finished state carries no form and so needs no token.
+	if rec := get("/repairs/fix-b/status"); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "<form") {
+		t.Errorf("finished status = %d, want 200 with no form", rec.Code)
+	}
+}
