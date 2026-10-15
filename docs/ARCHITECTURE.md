@@ -67,6 +67,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `tierrepair` -- the decision logic of `scan reconcile-sync-tier` and `scan reconcile-remediated` (sidecar classification, per-row action, guarded apply loop with write-ahead backup records), over an injected queue interface and backup sink; it never opens a database or prints.
 - `upstreamrepair` -- the sidecar upstream planning and guarded apply loop of `scan reconcile-upstream`, over an injected queue interface and backup sink; it never opens a database or prints.
 - `wordsyncrepair` -- the selection and batched write-ahead queuing of `scan reconcile-word-sync`, over an injected queue interface and backup; it never opens a database or prints.
+- `metaindex` -- the recording-ID fill of `scan index-metadata`: copies a tag-cache recording ID onto an empty `scan_results` row, called from the walk in `internal/commands` (the walk itself moves into this package in a later slice); over an open database, it never prints and carries no library path in a log or an error.
 
 ### Tag cache reads
 
