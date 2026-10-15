@@ -13,6 +13,7 @@ import (
 
 	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/tierrepair"
 )
 
 // seedSyncTierCandidate builds a config + DB with one library and one
@@ -136,7 +137,7 @@ func TestRunReconcileSyncTier_ApplyClassifiesEachTier(t *testing.T) {
 	}
 	seen := map[int64]string{}
 	for _, l := range lines {
-		var rec syncTierBackupRecord
+		var rec tierrepair.SyncTierBackupRecord
 		if err := json.Unmarshal([]byte(l), &rec); err != nil {
 			t.Fatalf("decode backup line %q: %v", l, err)
 		}

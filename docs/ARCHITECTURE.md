@@ -64,6 +64,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `instrumentalrecalib` -- re-decides earlier detector rejections from stored detector scores.
 - `schedule` -- the periodic library scan's schedule: frequency, time of day and weekday.
 - `repair` -- the contract an operator fix implements so the CLI and the web UI start the same code (`Repair`: `Info`, a database-only `Pending`, `Run` with `Options`), a `Result` of counts keyed by fixed identifiers, and a `Registry` keyed by slug that its owner injects; imports nothing internal.
+- `tierrepair` -- the sync-tier classification and guarded apply loop of `scan reconcile-sync-tier` (and, stacked, `scan reconcile-remediated`), over an injected queue interface and backup sink; it never opens a database or prints.
 
 ### Tag cache reads
 
