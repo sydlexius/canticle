@@ -3,8 +3,6 @@ package commands
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,21 +198,11 @@ func reconcileInstrumentalTitles(ctx context.Context, out io.Writer, args ScanRe
 		return ferr
 	}
 	split := titlerepair.SplitOptions{LibraryID: opts.LibraryID, Apply: args.Yes, Report: func(rec titlerepair.SplitRecord) error {
-		// One JSON line, fsynced before the row changes, as AppendBackup does.
+		// The cull's own durable append: the line, its file and its directory
+		// are synced before the row changes, or the row is left alone.
 		f, ferr := bk.File()
-		var line []byte
 		if ferr == nil {
-			line, ferr = json.Marshal(rec)
-		}
-		if ferr == nil {
-			_, ferr = f.Write(append(line, '\n'))
-		}
-		if ferr == nil {
-			ferr = f.Sync()
-		}
-		var pe *os.PathError
-		if errors.As(ferr, &pe) {
-			ferr = pe.Err // no path in the error, as AppendBackup
+			ferr = lyricblock.AppendJSONL(f, rec)
 		}
 		if ferr != nil && backupErr == nil {
 			backupErr = fmt.Errorf("write a split record: %w", ferr)

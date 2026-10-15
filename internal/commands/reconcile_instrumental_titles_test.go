@@ -468,6 +468,22 @@ func TestReconcileInstrumentalTitlesSplitsLegacySharedRows(t *testing.T) {
 	ritWant(t, "dry run", out, "legacy rows shared by two editions or on an instrumental release: 2", "rows would be split: 2",
 		"rows would be re-keyed as instrumental: 1", "scan results would be detached: 2")
 
+	// A record whose directory cannot be synced is not durable: the split stops
+	// before any row changes. A write-only directory takes the file but cannot
+	// be opened to sync.
+	if os.Geteuid() != 0 {
+		wo := filepath.Join(t.TempDir(), "wo")
+		if err := os.Mkdir(wo, 0o300); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(wo, 0o700) }) //nolint:gosec // reason: G302 -- restore a test dir so TempDir can remove it
+		out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: filepath.Join(wo, "b.jsonl")})
+		if code != 1 || snap() != before {
+			t.Fatalf("unsyncable backup = %d, changed %s -> %s:\n%s", code, before, snap(), out)
+		}
+		ritWant(t, "unsyncable backup", out, "failed: the --backup file could not be written; the run was stopped")
+	}
+
 	out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup})
 	if code != 0 {
 		t.Fatalf("apply = %d:\n%s", code, out)
