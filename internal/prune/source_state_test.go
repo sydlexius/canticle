@@ -50,6 +50,19 @@ func TestSourceStateOf(t *testing.T) {
 			mk(t, filepath.Join(root, "keep", "x.flac"))
 			return filepath.Join(t.TempDir(), "amb", "01.flac")
 		}, SourceUnproven},
+		{"symlink-then-dotdot-escapes-the-root", func(t *testing.T, root string) string {
+			// root/escape -> an outside dir; root/escape/../01.flac cleans to
+			// root/01.flac (inside, absent) while lstat reads outside/../01.flac.
+			mk(t, filepath.Join(root, "keep", "x.flac"))
+			outside := filepath.Join(t.TempDir(), "deep")
+			if err := os.MkdirAll(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+				t.Fatal(err)
+			}
+			return root + "/escape/../01.flac"
+		}, SourceUnproven},
 		{"empty-path", func(t *testing.T, root string) string {
 			mk(t, filepath.Join(root, "keep", "x.flac"))
 			return ""

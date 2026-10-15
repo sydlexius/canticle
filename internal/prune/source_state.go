@@ -39,7 +39,11 @@ const (
 // branch while the root stays populated, so the caller must confirm over time
 // rather than act on one sighting.
 func (p *Pruner) SourceStateOf(ctx context.Context, sourcePath string) (SourceState, error) {
-	if sourcePath == "" {
+	// Containment below is lexical, but lstat follows the path as written: a
+	// ".." after a symlink can reach a file outside the root that the cleaned
+	// spelling places inside it. Stored paths are clean, so any other spelling
+	// proves nothing.
+	if sourcePath == "" || filepath.Clean(sourcePath) != sourcePath {
 		return SourceUnproven, nil
 	}
 	_, err := os.Lstat(sourcePath)
