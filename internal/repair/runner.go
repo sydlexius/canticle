@@ -37,6 +37,12 @@ type Runner struct {
 	closed bool
 	cancel context.CancelFunc // the live run's; nil when none
 	live   chan struct{}      // closed when the live run's goroutine returns
+	// liveKey and liveID name the live run, for CancelKey.
+	liveKey Key
+	liveID  int64
+	// last is the latest run's live channel, kept after the slot clears so
+	// Close also waits out a run that is ending on its own (its final log).
+	last chan struct{}
 }
 
 // NewRunner returns a Runner over reg's repairs. A nil store is a new MemStore.
@@ -76,7 +82,7 @@ func (r *Runner) Start(key Key, o Options) (int64, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	live := make(chan struct{})
-	r.cancel, r.live = cancel, live
+	r.cancel, r.live, r.liveKey, r.liveID, r.last = cancel, live, info.Key, id, live
 	go r.run(ctx, cancel, live, rep, info, o, id, started)
 	return id, nil
 }
@@ -101,7 +107,7 @@ func (r *Runner) run(ctx context.Context, cancel context.CancelFunc, live chan s
 		r.mu.Lock()
 		r.store.Finish(id, s)
 		if r.live == live {
-			r.cancel, r.live = nil, nil
+			r.cancel, r.live, r.liveKey, r.liveID = nil, nil, "", 0
 		}
 		r.mu.Unlock()
 		level := slog.LevelInfo
@@ -164,13 +170,26 @@ func (r *Runner) Cancel() bool {
 	return true
 }
 
-// Close refuses later starts, cancels the live run and waits for its
-// goroutine, at most closeWait. It returns ErrCloseTimeout when the run has
+// CancelKey cancels the live run only when it is a run of key, and returns
+// its id. The key check and the cancel happen under one lock, so a run of
+// another repair that starts in between is never the one stopped.
+func (r *Runner) CancelKey(key Key) (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cancel == nil || r.liveKey != key {
+		return 0, false
+	}
+	r.cancel()
+	return r.liveID, true
+}
+
+// Close refuses later starts, cancels the live run and waits for the latest
+// run's goroutine (live, or ending on its own), at most closeWait. It returns ErrCloseTimeout when the run has
 // not returned by then. Safe to call more than once.
 func (r *Runner) Close() error {
 	r.mu.Lock()
 	r.closed = true
-	live := r.live
+	live := r.last
 	if r.cancel != nil {
 		r.cancel()
 	}

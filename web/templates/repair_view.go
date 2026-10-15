@@ -76,6 +76,9 @@ type RepairRunView struct {
 	// error text: a repair's error may wrap a library path.
 	Failed   bool
 	Canceled bool
+	// NoRun marks a finished state with no outcome of this repair to show:
+	// the runner's current or last run is another repair's, or there is none.
+	NoRun bool
 	// CSRFToken, StartAction and CancelAction drive the POST forms; PollHref
 	// is the GET the running state polls; BackHref returns to the origin page.
 	CSRFToken    string
