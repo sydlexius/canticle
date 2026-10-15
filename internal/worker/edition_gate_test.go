@@ -48,6 +48,9 @@ type editionRig struct {
 	root  string
 	rule  bool
 	gen   int // the enqueuer's provider generation; 0 never suppresses
+	// durations is the enqueuer's Durations; nil leaves every file's duration
+	// unknown, as the rig's audio files do not exist.
+	durations scan.DurationLookup
 }
 
 func newEditionRig(t *testing.T, rule bool) *editionRig {
@@ -106,8 +109,16 @@ func (r *editionRig) scanCopyAs(t *testing.T, copyName, status string) (int, int
 	}}, scan.UpsertOptions{}); err != nil {
 		t.Fatalf("upsert %s: %v", copyName, err)
 	}
+	return r.enqueue(t)
+}
+
+// enqueue runs the scan enqueuer over the library's pending results,
+// returning its (enqueued, cacheHits).
+func (r *editionRig) enqueue(t *testing.T) (int, int) {
+	t.Helper()
+	ctx := context.Background()
 	e := scan.Enqueuer{Results: r.repo, Cache: r.cache, Queue: r.q, Priority: queue.PriorityScan,
-		Timing: scan.TimingVerdicts{Reader: r.q}, ProvidersVersion: r.gen}
+		Timing: scan.TimingVerdicts{Reader: r.q}, ProvidersVersion: r.gen, Durations: r.durations}
 	if r.rule {
 		e.TitleInstrumental = func(tr models.Track) bool {
 			return instrumentaltitle.Classify(tr.TrackName, tr.AlbumName).Tier == instrumentaltitle.Strong
@@ -115,7 +126,7 @@ func (r *editionRig) scanCopyAs(t *testing.T, copyName, status string) (int, int
 	}
 	n, hits, err := e.EnqueuePending(ctx, r.lib)
 	if err != nil {
-		t.Fatalf("EnqueuePending %s: %v", copyName, err)
+		t.Fatalf("EnqueuePending: %v", err)
 	}
 	return n, hits
 }

@@ -262,6 +262,28 @@ strong by album: N
 The two add up to `strong`. A row with an unrecognized shape below stays in
 `weak`, on the line `weak, album named as instrumental`.
 
+**The release copy gets its own row.** With the mode on, a copy whose tags
+pass the album rule is queued on its own row, the instrumental edition, apart
+from its sung twin's row (#1525). Both copies of `Glass Harbor`, one on `Low
+Tide` and one on `Low Tide (Instrumental)`, therefore get separate rows and
+separate files, whichever is scanned first. A release copy already on a row
+made before the column stays there until the repair's split (below). The
+worker settles the release's row with a `[source:title-rule]` marker and asks
+no provider, but only when the
+audio file's album still names the release at fetch time; otherwise that row is
+looked up like any other. The release's row never reads or writes the lyric
+cache, because the cached words under that artist and title are the sung
+twin's. A row with an empty edition, which is every row queued with the mode
+off and every row made before the column, is never settled by the album name.
+After the repair's split (below), the next scan gives the sung copy a row of its
+own, and when its words are already cached the worker writes them from the
+cache with no provider call (#1604). If the repair's cull clears those words
+first, the sung copy's words are fetched once more from a provider.
+
+Undo works as for the title: set the mode to `off`, restart, and run `scan
+purge-provenance --source title-rule`. The release's rows keep their edition,
+and there is no tool that merges them back into the sung row.
+
 Before the edition column (#1525), the queue row identified a track by
 artist and title, with no album, so a library holding both the sung album and
 its instrumental edition had one row for both, carrying the album of whichever

@@ -318,3 +318,52 @@ func TestScanReopensActOnlyOnTheirOwnEdition(t *testing.T) {
 		}
 	})
 }
+
+// SungRowMissing is true only while a song has an instrumental-edition row and
+// no empty-edition row, and never for the instrumental row's own file (#1604).
+func TestSungRowMissing(t *testing.T) {
+	ctx := context.Background()
+	q, _ := newEditionQueue(t, albumEditionRule)
+	sung := editionInputs("Quiet Shelf")
+	release := editionInputs("Quiet Shelf (Instrumental)")
+
+	probe := func(in models.Inputs) bool {
+		t.Helper()
+		got, err := q.SungRowMissing(ctx, in.Track, in.SourcePath)
+		if err != nil {
+			t.Fatalf("SungRowMissing: %v", err)
+		}
+		return got
+	}
+	if probe(sung) {
+		t.Fatal("no rows: SungRowMissing = true; want false")
+	}
+	mustEnqueue(t, q, release)
+	if !probe(sung) {
+		t.Fatal("instrumental row only: sung copy's SungRowMissing = false; want true")
+	}
+	if probe(release) {
+		t.Fatal("instrumental row only: the release's own file reads as a missing sung row")
+	}
+	mustEnqueue(t, q, sung)
+	if probe(sung) {
+		t.Fatal("both rows: SungRowMissing = true; want false")
+	}
+	other := sung
+	other.Track.ArtistName = "Another Shore"
+	if probe(other) {
+		t.Fatal("another artist's same title reads as a missing sung row")
+	}
+}
+
+// A closed database surfaces as an error, not as "no row missing".
+func TestSungRowMissingReportsAReadError(t *testing.T) {
+	q, dbh := newEditionQueue(t, albumEditionRule)
+	if err := dbh.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	in := editionInputs("Quiet Shelf")
+	if _, err := q.SungRowMissing(context.Background(), in.Track, in.SourcePath); err == nil {
+		t.Fatal("SungRowMissing on a closed database: err = nil; want an error")
+	}
+}
