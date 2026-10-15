@@ -65,6 +65,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `schedule` -- the periodic library scan's schedule: frequency, time of day and weekday.
 - `repair` -- the contract an operator fix implements so the CLI and the web UI start the same code (`Repair`: `Info`, a database-only `Pending`, `Run` with `Options`), a `Result` of counts keyed by fixed identifiers, and a `Registry` keyed by slug that its owner injects; imports nothing internal.
 - `tierrepair` -- the decision logic of `scan reconcile-sync-tier` and `scan reconcile-remediated` (sidecar classification, per-row action, guarded apply loop with write-ahead backup records), over an injected queue interface and backup sink; it never opens a database or prints.
+- `metaindex` -- the recording-ID fill of `scan index-metadata`: copies a tag-cache recording ID onto an empty `scan_results` row (the walk joins it in a later slice); over an open database, it never prints and carries no library path in a log or an error.
 
 ### Tag cache reads
 
