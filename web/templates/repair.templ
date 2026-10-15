@@ -10,12 +10,12 @@ templ RepairPrompt(v RepairPromptView) {
 		<section class="mx-repair-prompt" aria-label={ v.Title }>
 			if v.Running {
 				<p class="mx-repair-line" role="status">{ v.Title }: running, { repairProgressText(v.Done, v.Total) }.</p>
-				<a class="mx-run-link" href={ templ.SafeURL(v.StartHref) }>View progress</a>
+				<a class="mx-run-link" href={ v.StartHref }>View progress</a>
 			} else {
 				<p class="mx-repair-line"><strong>{ itoa64(v.Count) }</strong> pending: { v.Title }.</p>
 				<p class="mx-repair-desc">{ v.Description }</p>
 				@repairCost(v.ReadsFiles, v.CostNote)
-				<a class="mx-run-button" href={ templ.SafeURL(v.StartHref) }>Review and start</a>
+				<a class="mx-run-button" href={ v.StartHref }>Review and start</a>
 			}
 		</section>
 	}
@@ -44,7 +44,7 @@ templ RepairRunPage(version string, view RepairRunView, reports []RailItem, musi
 		<h1 class="mx-page-title">{ view.Title }</h1>
 		<p class="mx-page-subtitle">{ view.Description }</p>
 		@RepairRunBody(view)
-		<p class="mx-repair-back"><a class="mx-run-link" href={ templ.SafeURL(view.BackHref) }>Back</a></p>
+		<p class="mx-repair-back"><a class="mx-run-link" href={ view.BackHref }>Back</a></p>
 	}
 }
 
@@ -59,7 +59,7 @@ templ RepairRunBody(view RepairRunView) {
 				if view.Total > 0 {
 					<progress class="mx-repair-progress" aria-label="Repair progress" max={ itoa64(view.Total) } value={ itoa64(view.Done) }></progress>
 				}
-				<form method="post" action={ templ.SafeURL(view.CancelAction) }>
+				<form method="post" action={ view.CancelAction }>
 					<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
 					<button type="submit" class="mx-run-button">Cancel</button>
 				</form>
@@ -91,7 +91,7 @@ templ RepairRunBody(view RepairRunView) {
 					if view.NeedsBackup {
 						<p class="mx-repair-desc">A backup file is written beside the database before any change.</p>
 					}
-					<form method="post" action={ templ.SafeURL(view.StartAction) }>
+					<form method="post" action={ view.StartAction }>
 						<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
 						<button type="submit" class="mx-run-button">Start</button>
 					</form>

@@ -19,8 +19,10 @@ func renderRepair(t *testing.T, c templ.Component) string {
 }
 
 // externalScript matches the layout's own <script src=...> tags, which the CSP
-// allows (script-src 'self'); any other <script is inline.
-var externalScript = regexp.MustCompile(`<script src="[^"]*"[^>]*></script>`)
+// allows (script-src 'self'). Only src plus an optional defer is excused: a tag
+// with any other attribute (an onload handler, say) stays in the output and is
+// checked.
+var externalScript = regexp.MustCompile(`<script src="[^"]*"( defer)?></script>`)
 
 // inlineForbidden matches CSP-forbidden constructs in lowercased output:
 // script/style elements, style attributes, event-handler attributes and
@@ -55,6 +57,9 @@ func TestNoInlineHelper(t *testing.T) {
 		{"javascript url", `<a href="javascript:x">`, true},
 		{"event handler", `<a onmouseover="x">`, true},
 		{"external script allowed", `<script src="/static/js/htmx.min.js"></script><p class="a">ok</p>`, false},
+		{"deferred external script allowed", `<script src="/static/js/htmx.min.js" defer></script>`, false},
+		{"external script with a handler", `<script src="/static/js/htmx.min.js" onload="alert(1)"></script>`, true},
+		{"deferred external script with a handler", `<script src="/static/js/htmx.min.js" defer onload="alert(1)"></script>`, true},
 		{"clean control", `<div class="a"><p>hello, honest text</p></div>`, false},
 	}
 	for _, c := range cases {
@@ -223,5 +228,26 @@ func TestRepairViewsEscape(t *testing.T) {
 	v.Title = "<b>x</b>"
 	if out := renderRepair(t, RepairPrompt(v)); strings.Contains(out, "<b>x</b>") {
 		t.Errorf("title not escaped: %s", out)
+	}
+}
+
+// Every URL a view carries goes through templ's own sanitizer: a javascript:
+// value never reaches an href or a form action.
+func TestRepairURLsAreSanitized(t *testing.T) {
+	const bad = "javascript:alert(1)"
+	p := promptView()
+	p.StartHref = bad
+	outs := []string{renderRepair(t, RepairPrompt(p))}
+	p.Running, p.Total = true, 9
+	outs = append(outs, renderRepair(t, RepairPrompt(p)))
+	for _, s := range []RepairState{RepairConfirm, RepairRunning} {
+		v := runView(s)
+		v.StartAction, v.CancelAction, v.BackHref = bad, bad, bad
+		outs = append(outs, renderRepair(t, RepairRunPage("v", v, nil, false, false)))
+	}
+	for _, out := range outs {
+		if strings.Contains(strings.ToLower(out), "javascript:") {
+			t.Errorf("a javascript: URL was rendered:\n%s", out)
+		}
 	}
 }
