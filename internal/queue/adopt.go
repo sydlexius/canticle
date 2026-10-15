@@ -298,16 +298,17 @@ func (q *DBQueue) InsertSettledDone(ctx context.Context, c AdoptCandidate, cls A
 // that helper does not touch adopted_at, which this statement already spent),
 // so a row the worker goes on to complete is an ordinary worker row that these
 // flags never reopen again, and the upsert that follows in the same transaction
-// sees a pending row. No matching row is a no-op: an ordinary enqueue.
-func reopenAdoptedForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, now time.Time) error {
+// sees a pending row. No matching row is a no-op: an ordinary enqueue. Only
+// the row of the incoming copy's edition is matched (#1559).
+func reopenAdoptedForScan(ctx context.Context, tx *sql.Tx, inputs models.Inputs, edition string, now time.Time) error {
 	artistKey, titleKey := IdentityKeys(inputs.Track)
 	var id int64
 	err := tx.QueryRowContext(ctx,
 		`UPDATE work_queue SET adopted_at = NULL
-         WHERE artist_key = ? AND title_key = ? AND status = 'done'
+         WHERE artist_key = ? AND title_key = ? AND edition = ? AND status = 'done'
            AND adopted_at IS NOT NULL AND source_path = ?`+notHandProtected+`
          RETURNING id`,
-		artistKey, titleKey, inputs.SourcePath).Scan(&id)
+		artistKey, titleKey, edition, inputs.SourcePath).Scan(&id)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil

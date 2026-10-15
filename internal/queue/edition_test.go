@@ -251,7 +251,7 @@ func seedEditionRow(t *testing.T, dbh *sql.DB, album, edition, set string) int64
 
 // A scan-origin enqueue of the instrumental copy looks only at its own
 // edition's row: the sung twin's categorical verdict neither refuses it nor is
-// reopened by it, and the twin's word recheck stays as it is (#1559).
+// reopened by it, and the twin's word recheck and adoption mark stay as they are (#1559).
 func TestScanReopensActOnlyOnTheirOwnEdition(t *testing.T) {
 	cases := []struct {
 		name string
@@ -296,4 +296,25 @@ func TestScanReopensActOnlyOnTheirOwnEdition(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("adoption mark", func(t *testing.T) {
+		q, dbh := newEditionQueue(t, albumEditionRule)
+		in := editionInputs("Low Tide (Instrumental)")
+		in.FromScan, in.ReopenAdopted = true, true
+		// Both rows name the incoming file (a legacy row and the rule's own):
+		// the rule's edition wins the pin, so the adopted sung row is not this copy's.
+		sungID := seedEditionRow(t, dbh, "Low Tide", EditionNone, `status = 'done', adopted_at = '2026-10-01T12:00:00Z', source_path = '`+in.SourcePath+`'`)
+		instID := seedEditionRow(t, dbh, "Low Tide (Instrumental)", EditionInstrumental, "")
+		before := getRow(t, dbh, sungID)
+		got := mustEnqueue(t, q, in)
+		if got.ID != instID {
+			t.Fatalf("enqueue landed on row %d; want the instrumental row %d", got.ID, instID)
+		}
+		if after := getRow(t, dbh, sungID); !reflect.DeepEqual(after, before) {
+			t.Errorf("adopted sung row changed:\n got %+v\nwant %+v", after, before)
+		}
+		if n := countOf(t, dbh, `SELECT COUNT(*) FROM work_queue WHERE id = ? AND adopted_at IS NOT NULL`, sungID); n != 1 {
+			t.Error("the sung row's adoption mark was spent by the instrumental copy")
+		}
+	})
 }

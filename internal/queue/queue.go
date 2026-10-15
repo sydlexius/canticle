@@ -333,7 +333,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 			}
 		}
 		if inputs.ReopenAdopted {
-			if err := reopenAdoptedForScan(ctx, tx, inputs, q.now()); err != nil {
+			if err := reopenAdoptedForScan(ctx, tx, inputs, edition, q.now()); err != nil {
 				return WorkItem{}, err
 			}
 		}
