@@ -318,3 +318,67 @@ func TestEnqueuer_EditionReadErrorLeavesResultPending(t *testing.T) {
 		t.Fatalf("status calls = %+v, enqueued = %+v; want none (result stays pending)", store.status, work.inputs)
 	}
 }
+
+// sungRowQueue is a queue whose song-row probe answers missing (or fails), as
+// a split's re-keyed song does (#1604).
+type sungRowQueue struct {
+	fakeWorkQueue
+	missing bool
+	err     error
+	paths   []string
+}
+
+func (q *sungRowQueue) SungRowMissing(_ context.Context, _ models.Track, sourcePath string) (bool, error) {
+	q.paths = append(q.paths, sourcePath)
+	return q.missing, q.err
+}
+
+var errSungRowProbe = errors.New("song-row probe failed")
+
+// A cache hit for a copy whose song has only an instrumental-edition row is a
+// miss: the copy is enqueued to make its own row, never marked done (#1604).
+// A plain cache hit with the probe answering false stays a hit.
+func TestEnqueuer_SungTwinCacheHitIsEnqueued(t *testing.T) {
+	results := []models.ScanResult{{ID: 9, FilePath: "/music/sung.flac",
+		Track: models.Track{ArtistName: "Artist", TrackName: "Title", AlbumName: "Album"}}}
+	cache := fakeLyricsCache{hits: map[string]bool{"Artist\x00Title": true}}
+	for _, v := range []struct {
+		name          string
+		missing       bool
+		wantEnqueued  int
+		wantCacheHits int
+	}{
+		{"twin", true, 1, 0},
+		{"plain hit", false, 0, 1},
+	} {
+		t.Run(v.name, func(t *testing.T) {
+			store := &fakePendingStore{results: results}
+			work := &sungRowQueue{missing: v.missing}
+			e := scan.Enqueuer{Results: store, Cache: cache, Queue: work}
+			n, hits, err := e.EnqueuePending(context.Background(), models.Library{ID: 3})
+			if err != nil {
+				t.Fatalf("EnqueuePending: %v", err)
+			}
+			if n != v.wantEnqueued || hits != v.wantCacheHits {
+				t.Fatalf("enqueued %d, cache hits %d; want %d and %d", n, hits, v.wantEnqueued, v.wantCacheHits)
+			}
+			if len(work.paths) != 1 || work.paths[0] != "/music/sung.flac" {
+				t.Fatalf("probe paths = %v; want the copy's own file once", work.paths)
+			}
+		})
+	}
+}
+
+// A failed song-row probe stops the pass with the result still pending.
+func TestEnqueuer_SungRowProbeErrorLeavesResultPending(t *testing.T) {
+	store := &fakePendingStore{results: []models.ScanResult{{ID: 10, FilePath: "/music/sung.flac",
+		Track: models.Track{ArtistName: "Artist", TrackName: "Title", AlbumName: "Album"}}}}
+	work := &sungRowQueue{err: errSungRowProbe}
+	e := scan.Enqueuer{Results: store, Cache: fakeLyricsCache{hits: map[string]bool{"Artist\x00Title": true}}, Queue: work}
+	if _, _, err := e.EnqueuePending(context.Background(), models.Library{ID: 3}); !errors.Is(err, errSungRowProbe) {
+		t.Fatalf("EnqueuePending error = %v; want wrapping %v", err, errSungRowProbe)
+	}
+	if len(store.status) != 0 || len(work.inputs) != 0 {
+		t.Fatalf("status calls = %+v, enqueued = %+v; want none (result stays pending)", store.status, work.inputs)
+	}
+}

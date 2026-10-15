@@ -93,3 +93,28 @@ func (q *DBQueue) resolveEditionTx(ctx context.Context, tx *sql.Tx, artistKey, t
 	}
 	return held, nil
 }
+
+// SungRowMissing reports whether track's keys have an instrumental-edition row
+// and no row with an empty edition, read-only (#1604). That is the state the
+// repair's split leaves when it re-keys a legacy row: its sung twin's words
+// are still cached, but no row of the twin's edition exists to settle onto, so
+// the scan enqueuer's cache door must send the twin to Enqueue instead of
+// marking it done. Without a split or a rule there is never an
+// instrumental-edition row, so the answer is false. It is also false for the
+// copy at sourcePath when an instrumental-edition row names that file: that
+// copy is the release itself (offered with the mode off, after a split), and
+// must not take the empty-edition row its sung twin needs.
+func (q *DBQueue) SungRowMissing(ctx context.Context, track models.Track, sourcePath string) (bool, error) {
+	artistKey, titleKey := IdentityKeys(track)
+	var missing bool
+	err := q.db.QueryRowContext(ctx, `SELECT
+	    EXISTS (SELECT 1 FROM work_queue WHERE artist_key = ? AND title_key = ? AND edition = ?)
+	    AND NOT EXISTS (SELECT 1 FROM work_queue WHERE artist_key = ? AND title_key = ? AND edition = ?)
+	    AND NOT EXISTS (SELECT 1 FROM work_queue WHERE artist_key = ? AND title_key = ? AND edition = ? AND source_path = ?)`,
+		artistKey, titleKey, EditionInstrumental, artistKey, titleKey, EditionNone,
+		artistKey, titleKey, EditionInstrumental, sourcePath).Scan(&missing)
+	if err != nil {
+		return false, fmt.Errorf("queue: probe for a row of the empty edition: %w", err)
+	}
+	return missing, nil
+}

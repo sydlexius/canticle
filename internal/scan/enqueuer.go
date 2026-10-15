@@ -316,6 +316,11 @@ func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, for
 	// Different-length recordings Enqueue would not reopen the row for. Not
 	// counted as suppressed: no verdict quarantines them.
 	refused := 0
+	// Sung copies sent past a cache hit to make their own row (#1604); the
+	// probe's answer and error for the current result, set by accept.
+	twins := 0
+	var twinErr error
+	var twinRow bool
 
 	for _, res := range results {
 		if err := ctx.Err(); err != nil {
@@ -351,6 +356,15 @@ func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, for
 			if e.TitleInstrumental != nil && e.TitleInstrumental(res.Track) {
 				return false
 			}
+			// A sung copy whose song has only an instrumental-edition row (the
+			// split re-keyed the row it shared) has no row to settle onto, so a
+			// hit here would leave it done with no row and no file (#1604). It
+			// goes to Enqueue, which makes its row; the worker then serves it
+			// from this same cache entry.
+			if twin, terr := e.sungRowMissing(ctx, res); terr != nil || twin {
+				twinErr, twinRow = terr, twin
+				return false
+			}
 			if fileDurationKnown {
 				return !lyrics.RefusedByTimingGuard(song, fileDuration)
 			}
@@ -376,8 +390,15 @@ func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, for
 			return enqueued, cacheHits, fmt.Errorf("scan: resolve edition %d: %w", res.ID, err)
 		}
 		err = sql.ErrNoRows
+		twinErr, twinRow = nil, false
 		if !editionCopy {
 			_, err = e.Cache.LookupAccepted(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength), accept)
+		}
+		if twinErr != nil {
+			return enqueued, cacheHits, fmt.Errorf("scan: probe the row of result %d: %w", res.ID, twinErr)
+		}
+		if twinRow {
+			twins++
 		}
 		switch {
 		case err == nil:
@@ -477,6 +498,10 @@ func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, for
 		slog.Info("scan: left different-length recordings pending; the shared categorical row could not be reopened",
 			"library_id", libraryID, "refused", refused)
 	}
+	if twins > 0 {
+		slog.Info("scan: sent sung copies past a cache hit because their song had only an instrumental-edition row",
+			"library_id", libraryID, "twins", twins)
+	}
 	// Never leave the suppression silent: a track skipped here produces no work
 	// item, no sidecar and no queue row, so without this line an operator has no
 	// way to tell "nothing left to fetch" from "N tracks are quarantined".
@@ -503,6 +528,24 @@ func (e *Enqueuer) editionCopy(ctx context.Context, res models.ScanResult) (bool
 	}
 	edition, err := er.EditionOf(ctx, res.Track, res.FilePath)
 	return edition == queue.EditionInstrumental, err
+}
+
+// SungRowProber reports whether a copy's song has an instrumental-edition row
+// and no row of the empty edition (#1604), read-only, and false for the copy
+// at sourcePath when it is the instrumental row's own file. *queue.DBQueue
+// satisfies it.
+type SungRowProber interface {
+	SungRowMissing(ctx context.Context, track models.Track, sourcePath string) (bool, error)
+}
+
+// sungRowMissing asks the queue, when it is a SungRowProber; a queue that is
+// not one has no editions, so the answer is false.
+func (e *Enqueuer) sungRowMissing(ctx context.Context, res models.ScanResult) (bool, error) {
+	p, ok := e.Queue.(SungRowProber)
+	if !ok {
+		return false, nil
+	}
+	return p.SungRowMissing(ctx, res.Track, res.FilePath)
 }
 
 // SourceRepointer moves a settled work_queue row whose audio file was replaced
