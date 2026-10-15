@@ -12,12 +12,15 @@
 //
 // scan_results is keyed on (library_id, file_path), so its identity columns
 // update in place with no conflict risk. work_queue carries a UNIQUE
-// (artist_key, title_key): a scan row's OLD (artist_key, title_key) therefore
-// identifies at most one queue row, which is re-keyed to the corrected identity
-// -- or, when a row already occupies the corrected key, merged into it (the
-// more-advanced status is preserved and junction links are re-pointed). A queue
-// row that is mid-flight ('processing') is left untouched, and the whole change
-// for that file is skipped so scan_results and work_queue never drift apart.
+// (artist_key, title_key, edition) (#1525): a scan row's OLD (artist_key,
+// title_key) identifies one queue row per edition, and the one this scan row
+// is linked to (else the row with an empty edition) is re-keyed to the
+// corrected identity in its own edition -- or, when a row of that edition
+// already occupies the corrected key, merged into it (the more-advanced status
+// is preserved and junction links are re-pointed). A row of the other edition
+// is never touched or merged into (#1561). A queue row that is mid-flight
+// ('processing') is left untouched, and the whole change for that file is
+// skipped so scan_results and work_queue never drift apart.
 package identityrepair
 
 import (
@@ -548,10 +551,16 @@ func (r *Repairer) previewApply(ctx context.Context, ch Change, titleKey string)
 // rejected: a 'pending' survivor still fetches, and the worker does not read
 // the mark. The divergence persists and is reported on every pass until a
 // person reverts the edit.
+//
+// oldTwin is true when the empty-edition (sung) row still holds the old keys
+// after an edition row moves (#1561): the lyric blocks, keyed by the two
+// columns alone, then stay with it. When the empty-edition row itself moves,
+// the blocks follow it as they always have, whatever edition row stays behind,
+// so the sung row is never re-fetched without its blocks.
 type queueLookup struct {
 	oldID, conflictID         int64
 	oldStatus, conflictStatus string
-	oldEdited                 bool
+	oldEdited, oldTwin        bool
 	skip, editSkip            bool
 }
 
@@ -560,9 +569,10 @@ type queueLookup struct {
 // repairOneDivergentRow (RepairDivergence's queue-only path, #963) can share
 // one conflict-detection reading.
 func probeQueueConflict(ctx context.Context, tx *sql.Tx, ch Change, titleKey string) (queueLookup, error) {
-	// Locate the queue row that carried the OLD identity (UNIQUE(artist_key,
-	// title_key) => at most one). A 'processing' match aborts the whole change.
-	oldID, oldStatus, oldEdited, err := queueRowAt(ctx, tx, ch.OldArtistKey, titleKey, 0)
+	// Locate the queue row that carried the OLD identity: one per edition can
+	// hold the keys (#1561), so oldQueueRow picks this change's own. A
+	// 'processing' match aborts the whole change.
+	oldID, oldStatus, oldEdited, edition, err := oldQueueRow(ctx, tx, ch, titleKey)
 	if err != nil {
 		return queueLookup{}, err
 	}
@@ -580,8 +590,11 @@ func probeQueueConflict(ctx context.Context, tx *sql.Tx, ch Change, titleKey str
 	var conflictID int64
 	var conflictStatus string
 	if keyChanged && oldID != 0 {
+		// Only a row of the same edition is a conflict: the re-key keeps the
+		// edition, so the other edition's row at the corrected key is no
+		// collision, and a merge never folds one edition into the other.
 		var conflictEdited bool
-		conflictID, conflictStatus, conflictEdited, err = queueRowAt(ctx, tx, ch.NewArtistKey, titleKey, oldID)
+		conflictID, conflictStatus, conflictEdited, err = queueRowAt(ctx, tx, ch.NewArtistKey, titleKey, edition, oldID)
 		if err != nil {
 			return queueLookup{}, err
 		}
@@ -592,7 +605,46 @@ func probeQueueConflict(ctx context.Context, tx *sql.Tx, ch Change, titleKey str
 			return queueLookup{editSkip: true}, nil
 		}
 	}
-	return queueLookup{oldID: oldID, oldStatus: oldStatus, oldEdited: oldEdited, conflictID: conflictID, conflictStatus: conflictStatus}, nil
+	var oldTwin bool
+	if keyChanged && oldID != 0 {
+		var one int
+		err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM work_queue WHERE artist_key = ? AND title_key = ? AND id != ? AND edition = '' LIMIT 1`,
+			ch.OldArtistKey, titleKey, oldID).Scan(&one)
+		switch {
+		case err == nil:
+			oldTwin = true
+		case !errors.Is(err, sql.ErrNoRows):
+			return queueLookup{}, fmt.Errorf("identityrepair: look for a second edition of work_queue %d: %w", oldID, err)
+		}
+	}
+	return queueLookup{oldID: oldID, oldStatus: oldStatus, oldEdited: oldEdited, oldTwin: oldTwin, conflictID: conflictID, conflictStatus: conflictStatus}, nil
+}
+
+// oldQueueRow returns the work_queue row at ch's OLD identity that ch speaks
+// for, with its edition: the row ch.WorkQueueID names (RepairDivergence knows
+// it), else the one linked to ch.ScanResultID (junction or scalar link), else
+// the row with an empty edition. With every edition empty that is the single
+// row at the keys, as before #1561. An unlinked scan row never picks an
+// edition row: that row is repaired through its own linked members.
+func oldQueueRow(ctx context.Context, tx *sql.Tx, ch Change, titleKey string) (id int64, status string, edited bool, edition string, err error) {
+	const linked = `(COALESCE(scan_result_id, 0) = ? OR EXISTS (SELECT 1 FROM work_queue_scan_results j
+                         WHERE j.work_queue_id = work_queue.id AND j.scan_result_id = ?))`
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, status, `+queue.HandProtectedPredicate+`, edition FROM work_queue
+		 WHERE artist_key = ? AND title_key = ?
+		   AND CASE WHEN ? != 0 THEN id = ? ELSE (edition = '' OR `+linked+`) END
+		 ORDER BY `+linked+` DESC, edition = '' DESC, id
+		 LIMIT 1`,
+		ch.OldArtistKey, titleKey, ch.WorkQueueID, ch.WorkQueueID, ch.ScanResultID, ch.ScanResultID,
+		ch.ScanResultID, ch.ScanResultID).Scan(&id, &status, &edited, &edition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, "", nil
+	}
+	if err != nil {
+		return 0, "", false, "", fmt.Errorf("identityrepair: lookup work_queue at the old identity of scan_result %d: %w", ch.ScanResultID, err)
+	}
+	return id, status, edited, edition, nil
 }
 
 // reconcileQueue applies ch's queue-side reconciliation using an
@@ -651,7 +703,7 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, blocks BlockMover, moveOK b
 			return applyOutcome{}, fmt.Errorf("identityrepair: re-key work_queue %d: %w", oldID, err)
 		}
 		out.queueUpdated = 1
-		if moveOK {
+		if moveOK && !lookup.oldTwin {
 			if err := moveBlocks(ctx, tx, blocks, ch, titleKey); err != nil {
 				return applyOutcome{}, err
 			}
@@ -680,8 +732,9 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, blocks BlockMover, moveOK b
 			return applyOutcome{}, err
 		}
 		out.queueMerged = 1
-		// The dropped row's blocks follow it to the surviving identity.
-		if moveOK {
+		// The dropped row's blocks follow it to the surviving identity, unless
+		// the other edition's row still holds the old keys (#1561).
+		if moveOK && !lookup.oldTwin {
 			if err := moveBlocks(ctx, tx, blocks, ch, titleKey); err != nil {
 				return applyOutcome{}, err
 			}
@@ -691,16 +744,16 @@ func reconcileQueue(ctx context.Context, tx *sql.Tx, blocks BlockMover, moveOK b
 }
 
 // queueRowAt returns the id, status and hand-edit mark (#1226) of the
-// work_queue row at (artistKey, titleKey), excluding excludeID (pass 0 to
-// exclude nothing). It returns (0, "", false, nil) when none exists.
-// UNIQUE(artist_key, title_key) guarantees at most one match.
-func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, excludeID int64) (int64, string, bool, error) {
+// work_queue row at (artistKey, titleKey, edition), excluding excludeID (pass 0
+// to exclude nothing). It returns (0, "", false, nil) when none exists.
+// UNIQUE(artist_key, title_key, edition) guarantees at most one match.
+func queueRowAt(ctx context.Context, tx *sql.Tx, artistKey, titleKey, edition string, excludeID int64) (int64, string, bool, error) {
 	var id int64
 	var status string
 	var edited bool
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, status, `+queue.HandProtectedPredicate+` FROM work_queue WHERE artist_key = ? AND title_key = ? AND id != ?`,
-		artistKey, titleKey, excludeID).Scan(&id, &status, &edited)
+		`SELECT id, status, `+queue.HandProtectedPredicate+` FROM work_queue WHERE artist_key = ? AND title_key = ? AND edition = ? AND id != ?`,
+		artistKey, titleKey, edition, excludeID).Scan(&id, &status, &edited)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", false, nil
 	}
