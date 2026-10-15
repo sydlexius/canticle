@@ -294,3 +294,27 @@ func TestEnqueuer_PropagatesCacheAndQueueErrors(t *testing.T) {
 		})
 	}
 }
+
+// editionErrQueue is a queue whose edition read fails (#1562).
+type editionErrQueue struct{ fakeWorkQueue }
+
+func (*editionErrQueue) EditionOf(context.Context, models.Track, string) (string, error) {
+	return "", errEditionRead
+}
+
+var errEditionRead = errors.New("edition read failed")
+
+// A failed edition read stops the pass with the result still pending: an
+// edition copy taken for a sung one would read the sung twin's cache entry.
+func TestEnqueuer_EditionReadErrorLeavesResultPending(t *testing.T) {
+	store := &fakePendingStore{results: []models.ScanResult{{ID: 6, FilePath: "/music/edition.mp3",
+		Track: models.Track{ArtistName: "Artist", TrackName: "Title", AlbumName: "Album (Instrumental)"}}}}
+	work := &editionErrQueue{}
+	e := scan.Enqueuer{Results: store, Cache: fakeLyricsCache{hits: map[string]bool{"Artist\x00Title": true}}, Queue: work}
+	if _, _, err := e.EnqueuePending(context.Background(), models.Library{ID: 7}); !errors.Is(err, errEditionRead) {
+		t.Fatalf("EnqueuePending error = %v; want wrapping %v", err, errEditionRead)
+	}
+	if len(store.status) != 0 || len(work.inputs) != 0 {
+		t.Fatalf("status calls = %+v, enqueued = %+v; want none (result stays pending)", store.status, work.inputs)
+	}
+}
