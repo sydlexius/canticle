@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
 	"github.com/sydlexius/canticle/internal/pathutil"
+	"github.com/sydlexius/canticle/internal/repair"
 	"github.com/sydlexius/canticle/internal/scanner"
 )
 
@@ -54,28 +55,14 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	}
 	defer sqlDB.Close() //nolint:errcheck // best-effort close on shutdown
 
-	libRepo := library.New(sqlDB)
-	var roots []string
-	if strings.TrimSpace(args.Library) != "" {
-		lib, rerr := resolveLibrary(ctx, libRepo, args.Library)
-		if rerr != nil {
-			if errors.Is(rerr, sql.ErrNoRows) {
-				_, _ = fmt.Fprintf(out, "library %q not found\n", args.Library)
-				return 1
-			}
-			slog.Error("failed to resolve library", "error", rerr)
+	roots, err := resolveIndexMetadataRoots(ctx, sqlDB, args.Library)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			_, _ = fmt.Fprintf(out, "library %q not found\n", args.Library)
 			return 1
 		}
-		roots = []string{lib.Path}
-	} else {
-		libs, lerr := libRepo.List(ctx)
-		if lerr != nil {
-			slog.Error("failed to list libraries", "error", lerr)
-			return 1
-		}
-		for _, l := range libs {
-			roots = append(roots, l.Path)
-		}
+		slog.Error("index-metadata: failed to resolve library roots", "error", err)
+		return 1
 	}
 	if len(roots) == 0 {
 		_, _ = fmt.Fprintln(out, "index-metadata: no library roots configured")
@@ -83,25 +70,6 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	}
 
 	store := audiometa.New(sqlDB, scanner.DurationReaderVersion)
-
-	// Bank the duration from the SAME read that fills audio_metadata (#717).
-	//
-	// This walk already opens every file and already holds facts.TrackLength
-	// alongside the (mtime, size) audiodur keys on -- it simply threw the
-	// duration away, so audio_durations stayed sparse while audio_metadata went
-	// complete. Measured on the reference library: 0 scan_results rows missing a
-	// metadata row, but 12,990 missing a duration row. Every one of those is a
-	// file this sweep had open, read, and could have settled.
-	//
-	// The consequence is a repeat OPEN, which is what makes it worth fixing:
-	// a spin-up event costs the same whether it reads one byte or a gigabyte, so
-	// the count of touches is the metric, not their size. A duration miss sends
-	// a later caller back to the disk for a file this command already read.
-	//
-	// Both stores share scanner.DurationReaderVersion, so a parser change
-	// invalidates the two together and they can never disagree about which
-	// reader produced them.
-	durations := audiodur.New(sqlDB, scanner.DurationReaderVersion)
 
 	// A --library run scopes the printed coverage number to that library's
 	// canonical root, per #646's AC ("how many files in library N have
@@ -113,41 +81,15 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 		coveragePrefix = canonRoot + string(os.PathSeparator)
 	}
 
-	// workDone is hoisted here (not declared per-root inside walkIndexMetadata)
-	// so --limit is a per-RUN budget, not a per-ROOT one: with N roots, a
-	// per-root counter would let up to Limit*N files be read in one invocation
-	// (finding: --limit is per-root, not per-run). Threading it as a *int
-	// alongside the other counters makes the budget carry over correctly from
-	// one root to the next, exactly like walked/indexed/skipped/unreadable.
-	var walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures, mbidFilled int
-	limitReached := false
+	res, err := IndexMetadata(ctx, sqlDB, roots, IndexMetadataOptions{Apply: args.Yes, Limit: args.Limit})
 	interrupted := false
-	for _, root := range roots {
-		if limitReached {
-			break
-		}
-		// A root that cannot even be stat'd (unmounted NAS, permission denied
-		// on the mount point, a typo'd path) must never read as a silently
-		// empty walk: filepath.WalkDir would otherwise invoke walkFn once
-		// with the error and immediately stop, producing "walked 0" that
-		// looks identical to a genuinely empty, healthy library. Stat the
-		// root up front, count it as a hard walk error, and skip walking it
-		// -- the other configured roots still get processed, but the run's
-		// exit code (below) will reflect that this root was unreachable.
-		if _, serr := os.Stat(root); serr != nil {
-			slog.Error("index-metadata: library root is unreachable; skipping", "root", root, "error", serr)
-			walkErrors++
-			continue
-		}
-		if err := walkIndexMetadata(ctx, sqlDB, store, durations, root, args, &walked, &indexed, &skipped, &unreadable, &walkErrors, &workDone, &durationFailures, &mbidFilled, &limitReached); err != nil {
-			if errors.Is(err, context.Canceled) {
-				slog.Info("index-metadata: interrupted", "walked", walked, "indexed", indexed)
-				interrupted = true
-				break
-			}
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
 			slog.Error("index-metadata failed", "error", err)
 			return 1
 		}
+		slog.Info("index-metadata: interrupted", "walked", res.Walked, "indexed", res.Indexed)
+		interrupted = true
 	}
 
 	// On interrupt, the incoming ctx is already canceled, so a Coverage query
@@ -173,20 +115,20 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	// case reads exactly as before and a non-zero count is conspicuous rather
 	// than a column of noise an operator learns to skip (#651).
 	durationNote := ""
-	if durationFailures > 0 {
-		durationNote = fmt.Sprintf("; %d duration parse failure(s)", durationFailures)
+	if res.DurationFailures > 0 {
+		durationNote = fmt.Sprintf("; %d duration parse failure(s)", res.DurationFailures)
 	}
 	// The recording-ID fill (#1520) is appended only when non-zero, like the
 	// duration note: the healthy steady state reads exactly as before.
-	if mbidFilled > 0 {
+	if res.MBIDFilled > 0 {
 		fillVerb := "would fill"
 		if args.Yes {
 			fillVerb = "filled"
 		}
-		durationNote += fmt.Sprintf("; %s the recording ID on %d empty scan row(s)", fillVerb, mbidFilled)
+		durationNote += fmt.Sprintf("; %s the recording ID on %d empty scan row(s)", fillVerb, res.MBIDFilled)
 	}
 	_, _ = fmt.Fprintf(out, "index-metadata: walked %d file(s); %s %d (%d skipped unchanged, %d unreadable, %d walk error(s))%s; coverage now %d row(s)%s\n",
-		walked, verb, indexed, skipped, unreadable, walkErrors, durationNote, coverage, suffixDryRun(args.Yes))
+		res.Walked, verb, res.Indexed, res.Skipped, res.Unreadable, res.WalkErrors, durationNote, coverage, suffixDryRun(args.Yes))
 	// An operator-initiated Ctrl-C after partial, already-committed work is
 	// not a failure: the work done so far is real and the summary above
 	// reports it accurately, so exit 0 rather than 1. A genuine error path
@@ -201,10 +143,132 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 	// vanished NAS mount producing "walked 0", which must not report success.
 	// This is distinct from per-FILE unreadable counts, which are expected
 	// noise on a large library and intentionally keep exit 0.
-	if walkErrors > 0 {
+	if res.WalkErrors > 0 {
 		return 1
 	}
 	return 0
+}
+
+// IndexMetadataResult is the running tally of one index-metadata run. It holds
+// counts only, never a path or a tag value, so any caller may print or log it.
+type IndexMetadataResult struct {
+	// Walked counts every audio file the walk reaches, independent of --limit.
+	Walked int
+	// Indexed counts files whose tags were read and recorded (or would be, on a dry run).
+	Indexed int
+	// Skipped counts files an already-current row covered, so none was opened.
+	Skipped int
+	// Unreadable counts files that could not be stat'd or whose tags could not be read.
+	Unreadable int
+	// WalkErrors counts unreachable roots and untraversable subtrees; the other
+	// counts are then a floor, not a full accounting.
+	WalkErrors int
+	// WorkDone counts files actually read, the quantity --limit is charged against.
+	WorkDone int
+	// DurationFailures counts files whose tags read but whose duration did not parse.
+	DurationFailures int
+	// MBIDFilled counts scan rows whose empty recording ID was (or would be) filled.
+	MBIDFilled int
+	// LimitReached reports that the --limit budget stopped the walk early.
+	LimitReached bool
+}
+
+// IndexMetadataOptions control one run.
+type IndexMetadataOptions struct {
+	// Apply writes the rows; without it the run only counts.
+	Apply bool
+	// Limit is a per-RUN budget of files read across ALL roots (0 = no limit).
+	Limit int
+	// Progress, when non-nil, is called once for each audio file the walk reaches
+	// with the number reached so far and a total of 0: the total is unknown
+	// because counting it would need a second walk of the library, which is
+	// exactly the disk I/O this command avoids. It must not block.
+	Progress repair.Progress
+}
+
+func (o IndexMetadataOptions) report(done int) {
+	if o.Progress != nil {
+		o.Progress(int64(done), 0)
+	}
+}
+
+// resolveIndexMetadataRoots returns the library roots to walk: the one named by
+// libraryArg (a name or numeric id) or, when it is blank, every configured
+// root. A library that does not exist yields an error wrapping sql.ErrNoRows.
+func resolveIndexMetadataRoots(ctx context.Context, sqlDB *sql.DB, libraryArg string) ([]string, error) {
+	libRepo := library.New(sqlDB)
+	if strings.TrimSpace(libraryArg) != "" {
+		lib, err := resolveLibrary(ctx, libRepo, libraryArg)
+		if err != nil {
+			return nil, fmt.Errorf("resolve library: %w", err)
+		}
+		return []string{lib.Path}, nil
+	}
+	libs, err := libRepo.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list libraries: %w", err)
+	}
+	roots := make([]string, 0, len(libs))
+	for _, l := range libs {
+		roots = append(roots, l.Path)
+	}
+	return roots, nil
+}
+
+// IndexMetadata walks roots against an already-open database and returns the
+// tally. The result is returned even alongside an error (a canceled context
+// returns context.Canceled with the work already committed counted), so the
+// caller can still print an accurate summary. The returned error may contain a
+// library path and is not display text; callers must not show or log it verbatim.
+func IndexMetadata(ctx context.Context, sqlDB *sql.DB, roots []string, opts IndexMetadataOptions) (IndexMetadataResult, error) {
+	store := audiometa.New(sqlDB, scanner.DurationReaderVersion)
+
+	// Bank the duration from the SAME read that fills audio_metadata (#717).
+	//
+	// This walk already opens every file and already holds facts.TrackLength
+	// alongside the (mtime, size) audiodur keys on -- it simply threw the
+	// duration away, so audio_durations stayed sparse while audio_metadata went
+	// complete. Measured on the reference library: 0 scan_results rows missing a
+	// metadata row, but 12,990 missing a duration row. Every one of those is a
+	// file this sweep had open, read, and could have settled.
+	//
+	// The consequence is a repeat OPEN, which is what makes it worth fixing:
+	// a spin-up event costs the same whether it reads one byte or a gigabyte, so
+	// the count of touches is the metric, not their size. A duration miss sends
+	// a later caller back to the disk for a file this command already read.
+	//
+	// Both stores share scanner.DurationReaderVersion, so a parser change
+	// invalidates the two together and they can never disagree about which
+	// reader produced them.
+	durations := audiodur.New(sqlDB, scanner.DurationReaderVersion)
+
+	// res is one value for the whole run so --limit (res.WorkDone) is a per-RUN
+	// budget, not a per-ROOT one: with N roots, a per-root counter would let up
+	// to Limit*N files be read in one invocation (finding: --limit is per-root,
+	// not per-run).
+	var res IndexMetadataResult
+	for _, root := range roots {
+		if res.LimitReached {
+			break
+		}
+		// A root that cannot even be stat'd (unmounted NAS, permission denied
+		// on the mount point, a typo'd path) must never read as a silently
+		// empty walk: filepath.WalkDir would otherwise invoke walkFn once
+		// with the error and immediately stop, producing "walked 0" that
+		// looks identical to a genuinely empty, healthy library. Stat the
+		// root up front, count it as a hard walk error, and skip walking it
+		// -- the other configured roots still get processed, but the run's
+		// exit code will reflect that this root was unreachable.
+		if _, serr := os.Stat(root); serr != nil {
+			slog.Error("index-metadata: library root is unreachable; skipping", "root", root, "error", serr)
+			res.WalkErrors++
+			continue
+		}
+		if err := walkIndexMetadata(ctx, sqlDB, store, durations, root, opts, &res); err != nil {
+			return res, err
+		}
+	}
+	return res, nil
 }
 
 // walkIndexMetadata walks one library root's audio files, updating the running
@@ -225,14 +289,12 @@ func runIndexMetadata(ctx context.Context, out io.Writer, args ScanIndexMetadata
 // limit on work-done instead makes resumability fall out for free: each run
 // picks up wherever the previous one's budget ran out, with no stored cursor.
 //
-// workDone is a *int owned by the caller (runIndexMetadata), not a local
+// res.WorkDone lives in the caller's result (IndexMetadata), not in a local
 // declared fresh per call, because --limit is a per-RUN budget across ALL
 // configured roots, not a per-root allowance: a local counter here would
 // reset to zero at the start of every root, letting a run over N roots read
 // up to Limit*N files (finding: --limit is per-root, not per-run).
-func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Store, durations *audiodur.Store, root string, args ScanIndexMetadataCmd,
-	walked, indexed, skipped, unreadable, walkErrors, workDone, durationFailures, mbidFilled *int, limitReached *bool,
-) error {
+func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Store, durations *audiodur.Store, root string, opts IndexMetadataOptions, res *IndexMetadataResult) error {
 	absRoot, canonRoot := pathutil.CanonicalRoot(root)
 	// Walk the resolved root: WalkDir does not descend through a symlinked
 	// root, so walking absRoot would visit nothing under /music -> /mnt/array/music.
@@ -248,7 +310,7 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 			// file library (see the per-file unreadable path below for the
 			// same reasoning), but the aggregate is no longer silent.
 			slog.Debug("index-metadata: error walking path; skipping", "path", p, "error", walkErr)
-			*walkErrors++
+			res.WalkErrors++
 			return nil //nolint:nilerr // reason: a single unreadable directory entry must not abort the whole walk
 		}
 		if err := ctx.Err(); err != nil {
@@ -261,9 +323,10 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 			return nil
 		}
 
-		// walked reports every audio file the walk reaches, independent of the
+		// Walked reports every audio file the walk reaches, independent of the
 		// limit; only the limit gate below cares about work done.
-		*walked++
+		res.Walked++
+		opts.report(res.Walked)
 		canonPath := p
 		walkPath := pathutil.RebaseUnderCanonicalRoot(canonRoot, absRoot, p) // the scanner's spelling
 
@@ -300,7 +363,7 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 		}
 		if ierr != nil {
 			slog.Debug("index-metadata: could not stat file; counting unreadable", "file", p, "error", ierr)
-			*unreadable++
+			res.Unreadable++
 			return nil
 		}
 		mtimeNano, size := info.ModTime().UnixNano(), info.Size()
@@ -310,7 +373,7 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 			return fmt.Errorf("index-metadata: lookup %q: %w", canonPath, lerr)
 		}
 		if hit {
-			*skipped++
+			res.Skipped++
 			// Bank the duration from the METADATA ROW, not from a re-read (#724).
 			//
 			// #720 attached the duration write to the read path below, but this
@@ -336,13 +399,13 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 			switch {
 			case ferr != nil:
 				slog.Warn("index-metadata: could not read cached facts to bank duration", "file", canonPath, "error", ferr)
-			// GATED ON args.Yes, like every other write in this command. Without
+			// GATED ON opts.Apply, like every other write in this command. Without
 			// it a DRY RUN mutated audio_durations on any already-indexed
-			// library: the skip path returns before the args.Yes check that
+			// library: the skip path returns before the opts.Apply check that
 			// guards the read-path write, so "preview" silently wrote rows. A
 			// preview that mutates is worse than no preview, because the operator
 			// has been told it is safe.
-			case ok && args.Yes:
+			case ok && opts.Apply:
 				if derr := durations.Record(ctx, canonPath, mtimeNano, size, facts.TrackLength); derr != nil {
 					slog.Warn("index-metadata: could not bank duration from the metadata row", "file", canonPath, "error", derr)
 				}
@@ -351,23 +414,23 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 			// no file open, which covers a run that was interrupted between the
 			// cache write and the fill (#1520).
 			if ok {
-				fillScanRecordingMBID(ctx, sqlDB, walkPath, canonPath, facts.MBID, args.Yes, mbidFilled)
+				fillScanRecordingMBID(ctx, sqlDB, walkPath, canonPath, facts.MBID, opts.Apply, &res.MBIDFilled)
 			}
 			return nil
 		}
 
 		// This file needs real work (a tag read). Only now does it count
 		// against --limit: an already-indexed file above never reaches here.
-		if args.Limit > 0 && *workDone >= args.Limit {
-			*limitReached = true
+		if opts.Limit > 0 && res.WorkDone >= opts.Limit {
+			res.LimitReached = true
 			return filepath.SkipAll
 		}
 
 		facts, ferr := scanner.ReadAudioFacts(p)
 		if ferr != nil {
 			slog.Debug("index-metadata: failed to read audio tags; counting unreadable", "file", p, "error", ferr)
-			*unreadable++
-			*workDone++
+			res.Unreadable++
+			res.WorkDone++
 			return nil
 		}
 
@@ -379,10 +442,10 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 		// index run by hand. The row is still recorded; the count only makes the
 		// gap visible.
 		if facts.DurationErr != nil {
-			*durationFailures++
+			res.DurationFailures++
 		}
 
-		if args.Yes {
+		if opts.Apply {
 			if rerr := store.Record(ctx, canonPath, facts); rerr != nil {
 				return fmt.Errorf("index-metadata: record %q: %w", canonPath, rerr)
 			}
@@ -405,9 +468,9 @@ func walkIndexMetadata(ctx context.Context, sqlDB *sql.DB, store *audiometa.Stor
 				indexMetadataRowCommitted()
 			}
 		}
-		fillScanRecordingMBID(ctx, sqlDB, walkPath, canonPath, facts.MBID, args.Yes, mbidFilled)
-		*indexed++
-		*workDone++
+		fillScanRecordingMBID(ctx, sqlDB, walkPath, canonPath, facts.MBID, opts.Apply, &res.MBIDFilled)
+		res.Indexed++
+		res.WorkDone++
 		return nil
 	})
 }
