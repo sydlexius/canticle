@@ -346,12 +346,15 @@ func ReadAudioFacts(path string) (AudioFacts, error) {
 		if errors.Is(derr, ErrNoDurationParser) {
 			// Expected: this scanner has no parser for the extension. Not a
 			// defect, so it stays at Debug and is not reported upward.
-			slog.Debug("no duration parser for extension; using 0", "file", path, "error", derr)
+			slog.Debug("no duration parser for extension; using 0", "ext", filepath.Ext(path))
 		} else {
 			// The parser RAN and FAILED on a file it should handle. Warn rather
 			// than Debug: this is the class of failure that hid a third-party
 			// parser defect for months (#651), and Debug is off in production.
-			slog.Warn("duration parse failed; recording unknown duration", "file", path, "error", derr)
+			// Fixed reason only: the parser error can carry the file name or path,
+			// which is private library metadata (#1619). The error itself still
+			// travels upward in AudioFacts.DurationErr.
+			slog.Warn("duration parse failed; recording unknown duration", "reason", "duration parser failed", "ext", filepath.Ext(path))
 			durationErr = derr
 		}
 	}
@@ -1608,11 +1611,12 @@ func (sc *Scanner) scanDir(ctx context.Context, dir, absRoot, canonRoot string, 
 			if durErr != nil {
 				dur = 0
 				if errors.Is(durErr, ErrNoDurationParser) {
-					slog.Debug("no duration parser for extension; using 0", "file", file.Name(), "error", durErr)
+					slog.Debug("no duration parser for extension; using 0", "ext", ext)
 				} else {
 					// See ReadAudioFacts: a parser that RAN and FAILED is a defect
 					// worth surfacing, and Debug is off in production (#651).
-					slog.Warn("duration parse failed; using unknown duration", "file", file.Name(), "error", durErr)
+					// Fixed reason only: no file name or parser error text (#1619).
+					slog.Warn("duration parse failed; using unknown duration", "reason", "duration parser failed", "ext", ext)
 					durationErr = durErr
 				}
 			}
