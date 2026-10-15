@@ -63,6 +63,7 @@ Every package with a one-line purpose. `cmd/mxlrcgo-svc/main.go` is the entry po
 - `instrumentalbackfill` -- runs the audio detector over rows it never scored.
 - `instrumentalrecalib` -- re-decides earlier detector rejections from stored detector scores.
 - `schedule` -- the periodic library scan's schedule: frequency, time of day and weekday.
+- `repair` -- the contract an operator fix implements so the CLI and the web UI start the same code (`Repair`: `Info`, a database-only `Pending`, `Run` with `Options`), a `Result` of counts keyed by fixed identifiers, and a `Registry` keyed by slug that its owner injects; imports nothing internal.
 
 ### Tag cache reads
 
