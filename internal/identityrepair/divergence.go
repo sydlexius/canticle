@@ -34,7 +34,7 @@ type DivergenceResult struct {
 	// row also links a scan_results member OUTSIDE the requested LibraryID/
 	// PathPrefix scope whose artist_key disagrees with the queue row's own
 	// (#967 finding 1). A work_queue row is global (UNIQUE on artist_key,
-	// title_key) and can be linked to scan_results across several libraries or
+	// title_key, edition) and can be linked to scan_results across several libraries or
 	// subtrees, so a scoped run (a `--library X` CLI invocation, or a
 	// watcher-triggered rescan of one subtree) must never re-key, merge,
 	// unlink, or delete a shared row on behalf of an out-of-scope member it
@@ -220,7 +220,7 @@ func memberInScope(libraryID *int64, pathPrefix string, m scanMember) bool {
 // read and its turn) is simply a safe no-op there.
 //
 // KEY ONLY, NOT DISPLAY COLUMNS (#967): a work_queue row is unique on
-// (artist_key, title_key), so ONE row is shared by every scan_results member
+// (artist_key, title_key, edition), so ONE row per edition is shared by every scan_results member
 // with that key and title -- e.g. the same song on a studio album and a live
 // album. Those members can legitimately carry different artist display
 // strings (case/punctuation that normalizes to the same key) or different
@@ -353,8 +353,8 @@ func (r *Repairer) repairOneDivergentRowOnce(ctx context.Context, wqID int64, li
 
 	// Scope guard (#967 finding 1). wqID's candidacy was decided by the SQL
 	// join in loadDivergentWorkQueueIDs, which is scoped to libraryID/
-	// pathPrefix -- but work_queue carries a UNIQUE (artist_key, title_key),
-	// so ONE queue row can be linked to scan_results members across several
+	// pathPrefix -- but work_queue carries a UNIQUE (artist_key, title_key,
+	// edition), so ONE queue row can be linked to scan_results members across several
 	// libraries or subtrees, and loadDivergenceGroupMembers above loaded
 	// EVERY linked member regardless of scope. If any member OUTSIDE the
 	// requested scope has an artist_key that disagrees with wq.artistKey, the
