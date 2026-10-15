@@ -18,6 +18,7 @@ import (
 	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
+	"github.com/sydlexius/canticle/internal/tierrepair"
 )
 
 // remediatedBackupRecord is one JSONL line: the row's prior description and the
@@ -153,7 +154,7 @@ func planRemediated(c queue.RemediatedCandidate) (action, tier, outcome string) 
 	case c.UpgradeArmed:
 		return "", "", "upgrade_armed"
 	}
-	t, o := classifySyncTierCandidate(queue.SyncTierCandidate{ID: c.ID, AudioPath: c.AudioPath})
+	t, o := tierrepair.ClassifySyncTier(queue.SyncTierCandidate{ID: c.ID, AudioPath: c.AudioPath})
 	switch {
 	case t == queue.SyncTierWord || t == queue.SyncTierLine:
 		switch {
