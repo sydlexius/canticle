@@ -55,6 +55,7 @@ func TestWordRecheckCandidatePredicates(t *testing.T) {
 		{name: "timing mis_synced", mutate: `UPDATE work_queue SET timing_outcome = 'mis_synced'`},
 		{name: "timing degenerate", mutate: `UPDATE work_queue SET timing_outcome = 'degenerate'`},
 		{name: "timing null still admitted", mutate: `UPDATE work_queue SET timing_outcome = NULL`, want: true},
+		{name: "retired with the gone sentinel (#1597)", mutate: `UPDATE work_queue SET last_error = '` + UnresolvableGoneError + `'`},
 		{name: "blank source_path", mutate: `UPDATE work_queue SET source_path = '  '`},
 		{name: "state queued", mutate: `UPDATE work_queue SET word_timing_state = 'queued'`},
 		{name: "state served", mutate: `UPDATE work_queue SET word_timing_state = 'served', word_timing_generation = 1`},

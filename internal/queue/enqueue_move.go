@@ -158,8 +158,9 @@ func (q *DBQueue) planLibraryRelink(ctx context.Context, m *goneSourceMove, inpu
 // moveResurrectSQL moves a row prune RETIRED as unresolvable (its file was
 // gone and nothing could relink it) and reopens it, exactly as prune's own
 // relink does (prune.relinkResurrectSQL): that 'done' never described a fetch,
-// so the row is re-fetched at its new path. A hand-edited row is excluded and
-// falls through to movePathSQL, as it does there (#1228).
+// so the row is re-fetched at its new path. A row the worker retires (#1597) is a
+// settled row that DID complete a fetch and carries source_gone_at;
+// source_gone_at IS NULL keeps it out of here and it takes moveUnretireSQL. A hand-edited row is excluded and falls through to movePathSQL (#1228).
 //
 // movePathSQL moves every other row and touches nothing else: status, outcome,
 // provenance, timing, tier, attempts and timestamps all describe the track and
@@ -172,7 +173,16 @@ const (
              completed_at = NULL, last_error = '',
              outcome_type = NULL, outcome_detail = NULL, timing_outcome = NULL,
              ` + ClearWordRecheckQueued + `
-         WHERE id = ? AND source_path = ? AND status = 'done' AND last_error = ?` + notHandProtected
+         WHERE id = ? AND source_path = ? AND status = 'done' AND last_error = ?
+           AND source_gone_at IS NULL` + notHandProtected
+	// moveUnretireSQL moves a row the worker retired (#1597) whose source turned
+	// up at a new path: the retirement's premise (the file is gone) is false, so
+	// the sentinel and the mark are dropped, but status and outcome stay (that
+	// fetch landed), so the row is eligible for the upgrade sweep again.
+	moveUnretireSQL = `UPDATE work_queue SET source_path = ?, scan_result_id = COALESCE(?, scan_result_id),
+             last_error = '', source_gone_at = NULL
+         WHERE id = ? AND source_path = ? AND status = 'done' AND last_error = ?
+           AND source_gone_at IS NOT NULL` + notHandProtected
 	movePathSQL = `UPDATE work_queue SET source_path = ?, scan_result_id = COALESCE(?, scan_result_id)
          WHERE id = ? AND source_path = ? AND status != 'processing'`
 )
@@ -218,6 +228,14 @@ func moveGoneSourceTx(ctx context.Context, tx *sql.Tx, m *goneSourceMove, inputs
 			inputs.SourcePath, scanResultID, now, m.id, m.oldPath, UnresolvableGoneError)
 		if err != nil {
 			return false, fmt.Errorf("queue: reopen retired row %d at its new source: %w", m.id, err)
+		}
+		n, _ = res.RowsAffected()
+	}
+	if n == 0 && !relink {
+		res, err := tx.ExecContext(ctx, moveUnretireSQL,
+			inputs.SourcePath, scanResultID, m.id, m.oldPath, UnresolvableGoneError)
+		if err != nil {
+			return false, fmt.Errorf("queue: unretire row %d at its new source: %w", m.id, err)
 		}
 		n, _ = res.RowsAffected()
 	}
