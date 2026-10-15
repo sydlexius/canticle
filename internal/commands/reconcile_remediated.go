@@ -58,12 +58,12 @@ func runReconcileRemediated(ctx context.Context, out io.Writer, args ScanReconci
 	}
 
 	res, err := tierrepair.RunRemediated(ctx, q, candidates, opts)
-	if err != nil {
-		// A canceled run stays silent on stderr (as before the move); the
-		// exit code is still 1.
-		if !errors.Is(err, context.Canceled) {
-			slog.Error("reconcile-remediated: run stopped", "error", err)
-		}
+	// A canceled run stops at a row boundary with every changed row backed
+	// up, so it still prints the partial counts and the backup path (the
+	// operator needs them to restore) and then exits 1, silent on stderr.
+	canceled := err != nil && errors.Is(err, context.Canceled)
+	if err != nil && !canceled {
+		slog.Error("reconcile-remediated: run stopped", "error", err)
 		return 1
 	}
 	counts, writeFailed, applied := res.Counts, res.WriteFailed, res.Applied
@@ -82,7 +82,7 @@ func runReconcileRemediated(ctx context.Context, out io.Writer, args ScanReconci
 	if applied > 0 {
 		_, _ = fmt.Fprintf(out, "backup of %d changed row(s) written to %s\n", applied, backupPath)
 	}
-	if writeFailed > 0 {
+	if canceled || writeFailed > 0 {
 		return 1
 	}
 	return 0
