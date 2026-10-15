@@ -290,7 +290,7 @@ func TestRun_UnlinkedSidecarCountedNotSilentlyAssumed(t *testing.T) {
 //
 // On re-enqueue, scanInputs derives title_key='title' from scan_results, which
 // does not match the seeded work_queue row's title_key='song.lrc', so
-// Enqueue's ON CONFLICT(artist_key, title_key) target finds nothing to update
+// Enqueue's ON CONFLICT(artist_key, title_key, edition) target finds nothing to update
 // and performs an INSERT instead. Duplicate = 1 -> 2.
 //
 // Kept ONLY as the control for the faithful-seed test below, so a future reader
@@ -337,7 +337,7 @@ func TestRun_DualResetDoubleEnqueue_MisseededControl(t *testing.T) {
 //
 // Same scenario, but seeded as a real scan produces it: work_queue and
 // scan_results agree on the track identity. The re-enqueue then hits Enqueue's
-// ON CONFLICT(artist_key, title_key) target, updates in place, and creates NO
+// ON CONFLICT(artist_key, title_key, edition) target, updates in place, and creates NO
 // duplicate. It also PRESERVES purge's deliberate priority=-100.
 //
 // This is the honest answer to "does purge-provenance's reset double-enqueue?"

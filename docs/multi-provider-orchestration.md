@@ -137,7 +137,7 @@ guarantee that even a logic bug cannot produce two finalizations.
 
 ### Reconciliation with the busy-retry upserts
 
-`Enqueue` uses `ON CONFLICT(artist_key, title_key) DO UPDATE` to coalesce
+`Enqueue` uses `ON CONFLICT(artist_key, title_key, edition) DO UPDATE` to coalesce
 duplicate inputs, and its `CASE` arms already refuse to disturb a row whose
 status is `processing` or `done` (artist, title, album, paths, status, and
 `next_attempt_at` are all preserved for those two states). Orchestration changes
