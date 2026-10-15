@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -71,5 +72,37 @@ func TestDurationParseWarningLogsNoLibraryPath(t *testing.T) {
 	}
 	if strings.Contains(out, sentinel) {
 		t.Errorf("log leaked the library path: %q", out)
+	}
+}
+
+// The scan loop has its own duration-parse warning (scanDir), separate from
+// ReadAudioFacts. Drive a real ScanLibrary with EnrichRecording (the gate on
+// the duration probe) so a regression restoring the file name or parser error
+// there is caught (#1619).
+func TestScanLibraryDurationParseWarningLogsNoLibraryPath(t *testing.T) {
+	const sentinel = "SENTINEL-private-scan-1619"
+	dir := filepath.Join(t.TempDir(), sentinel)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sentinel+"-track.mp3"), id3TaggedGarbageMP3(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf lockedBuf
+	prev := slog.Default()
+	// Warn level: scanDir logs the directory path at Debug by design.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if _, err := NewScanner().ScanLibrary(context.Background(), dir, ScanOptions{MaxDepth: 1, EnrichRecording: true}); err != nil {
+		t.Fatalf("ScanLibrary: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "duration parse failed; using unknown duration") {
+		t.Fatalf("scan-loop duration-parse warning did not fire; log: %q", out)
+	}
+	if strings.Contains(out, sentinel) {
+		t.Errorf("scan-loop log leaked the library path: %q", out)
 	}
 }
