@@ -196,3 +196,44 @@ func TestUnblockDryRunEmptyArtistKeyDoesNotCountOtherArtists(t *testing.T) {
 		t.Fatalf("dry run = %+v, %v; want 0 removed", res, err)
 	}
 }
+
+// The keys can hold one row per edition (#1561) while the block keeps its two
+// columns: an unblock reopens every row the block settled, and only those.
+func TestUnblockReopensEveryBlockedEditionRow(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		ownOutcome   string
+		wantReopened int
+	}{
+		{"both rows blocked", "blocked", 2},
+		{"only the twin blocked", "synced", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFx(t)
+			f.addBlock(t, "vexa dunn", "fp")
+			var twin int64
+			if err := f.db.QueryRow(`INSERT INTO work_queue (artist, title, artist_key, title_key, edition, outdir, filename, status, outcome_type)
+                VALUES ('Vexa Dunn', 'Quill Moor', 'vexa dunn', 'quill moor', 'instrumental', ?, 'song.flac', 'done', 'blocked') RETURNING id`, f.dir).Scan(&twin); err != nil {
+				t.Fatal(err)
+			}
+			// The fixture's own row is blocked or settled with a real result.
+			if _, err := f.db.Exec(`UPDATE work_queue SET outcome_type = ? WHERE id = ?`, tc.ownOutcome, f.id); err != nil {
+				t.Fatal(err)
+			}
+			res, err := f.svc.Unblock(f.ctx, UnblockRequest{WorkItemID: f.id})
+			if err != nil || res.Removed != 1 || res.Reopened != tc.wantReopened {
+				t.Fatalf("Unblock = %+v, %v; want 1 removed, %d reopened", res, err, tc.wantReopened)
+			}
+			if f.count(t, `SELECT COUNT(*) FROM work_queue WHERE id = ? AND status = 'pending'`, twin) != 1 {
+				t.Error("the blocked instrumental row was not reopened")
+			}
+			wantOwn := "done"
+			if tc.ownOutcome == "blocked" {
+				wantOwn = "pending"
+			}
+			if got := f.status(t); got != wantOwn {
+				t.Errorf("fixture row status = %q; want %q", got, wantOwn)
+			}
+		})
+	}
+}

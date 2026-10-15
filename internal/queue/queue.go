@@ -1289,7 +1289,9 @@ func (q *DBQueue) ReleaseUntil(ctx context.Context, id int64, retryAfter time.Du
 	return requireAffected(res, "queue: release until")
 }
 
-// Cleanup removes retryable queued work for the same normalized artist/title.
+// Cleanup removes retryable queued work for the same normalized artist/title,
+// in the edition the incoming track resolves to (#1561), so a delete of one
+// copy never removes the queued work of its twin on the other edition.
 // Processing and completed rows are preserved to avoid racing active workers or
 // losing history for work that has already finished.
 func (q *DBQueue) Cleanup(ctx context.Context, inputs models.Inputs) (int64, error) {
@@ -1299,13 +1301,18 @@ func (q *DBQueue) Cleanup(ctx context.Context, inputs models.Inputs) (int64, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	artistKey, titleKey := IdentityKeys(inputs.Track)
+	edition, err := q.resolveEditionTx(ctx, tx, artistKey, titleKey, inputs.Track, inputs.SourcePath)
+	if err != nil {
+		return 0, err
+	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id FROM work_queue
          WHERE artist_key = ?
            AND title_key = ?
+           AND edition = ?
            AND status IN ('pending', 'failed', 'deferred')`+notWordRecheckQueued,
-		normalize.NormalizeKey(inputs.Track.ArtistName),
-		normalize.NormalizeKey(inputs.Track.TrackName),
+		artistKey, titleKey, edition,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("queue: cleanup: %w", err)
@@ -2404,8 +2411,8 @@ func (q *DBQueue) SetOutcomeType(ctx context.Context, id int64, outcomeType stri
 // file-to-row seam for a caller that walks the filesystem (the revalidate CLI)
 // yet must leave the coupled row describing what is on disk (#1082). The caller
 // passes every same-stem audio sibling because work_queue is unique on
-// (artist_key, title_key), not on source_path: a directory holding Track.flac
-// and Track.mp3 has ONE row that may name either copy. A path with no row
+// (artist_key, title_key, edition), not on source_path: a directory holding
+// Track.flac and Track.mp3 has ONE row that may name either copy. A path with no row
 // contributes nothing, which is not an error. 'processing' rows are excluded for
 // the same reason ListTimingBacklog excludes them: the worker may be mid-write
 // on that very sidecar and will stamp its own verdict. The IN list is bounded by
@@ -2641,8 +2648,11 @@ func (q *DBQueue) SetTimingOutcomeIfIdle(ctx context.Context, id int64, rec Timi
 }
 
 // LookupTiming returns the timing verdict recorded for a track, keyed the same
-// way work_queue itself is keyed -- normalized (artist_key, title_key), which is
-// uniquely indexed, so this reads at most one row.
+// way work_queue itself is keyed -- normalized (artist_key, title_key) -- on
+// the row with an empty edition only (#1561), which the unique
+// (artist_key, title_key, edition) index makes at most one row. A sung copy
+// therefore never reads the verdict of its instrumental twin's row; an
+// instrumental copy is not served by this lookup at all (the scan door, #1562).
 //
 // This is the READ side migration 034's columns never had. The worker has
 // stamped timing_outcome since #440, but nothing consumed it, so the pipeline
@@ -2673,9 +2683,10 @@ func (q *DBQueue) LookupTiming(ctx context.Context, artist, title string) (outco
 	row := q.db.QueryRowContext(ctx,
 		`SELECT timing_outcome, providers_version, overrun_magnitude, overrun_ratio, `+categoricalFileless+`
          FROM work_queue
-         WHERE artist_key = ? AND title_key = ?`,
+         WHERE artist_key = ? AND title_key = ? AND edition = ?`,
 		normalize.NormalizeKey(artist),
 		normalize.NormalizeKey(title),
+		EditionNone,
 	)
 	switch err := row.Scan(&storedOutcome, &storedVersion, &storedMagnitude, &storedRatio, &fileless); {
 	case errors.Is(err, sql.ErrNoRows):

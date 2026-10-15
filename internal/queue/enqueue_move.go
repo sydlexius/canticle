@@ -12,7 +12,6 @@ import (
 
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/models"
-	"github.com/sydlexius/canticle/internal/normalize"
 )
 
 // goneSourceMove is a planned repair of one work_queue row whose recorded audio
@@ -57,24 +56,18 @@ func SameStemSibling(a, b string) bool {
 // caller moved it before a scan indexed the replacement). A row whose link is
 // already right is handed to planLibraryRelink, for the overlapping library
 // that scans the replacement second; else no stat is made.
+//
+// Only the row of the incoming file's edition (resolveEditionTx) is read, so a
+// file is never moved onto the other edition's row (#1561): with a rule set,
+// the sung twin and the instrumental copy share the keys, and a format swap of
+// one says nothing about the other.
 func (q *DBQueue) planGoneSourceMove(ctx context.Context, inputs models.Inputs) (*goneSourceMove, error) {
 	if inputs.SourcePath == "" {
 		return nil, nil
 	}
-	var m goneSourceMove
-	var linked string
-	err := q.db.QueryRowContext(ctx,
-		`SELECT id, source_path,
-                COALESCE((SELECT file_path FROM scan_results WHERE id = work_queue.scan_result_id), '')
-         FROM work_queue
-         WHERE artist_key = ? AND title_key = ? AND status != 'processing'`,
-		normalize.NormalizeKey(inputs.Track.ArtistName), normalize.NormalizeKey(inputs.Track.TrackName),
-	).Scan(&m.id, &m.oldPath, &linked)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("queue: read row for gone-source check: %w", err)
+	m, linked, found, err := q.readGoneSourceRow(ctx, inputs)
+	if err != nil || !found {
+		return nil, err
 	}
 	if m.oldPath == inputs.SourcePath {
 		switch {
@@ -100,6 +93,37 @@ func (q *DBQueue) planGoneSourceMove(ctx context.Context, inputs models.Inputs) 
 		return nil, nil
 	}
 	return &m, nil
+}
+
+// readGoneSourceRow reads the row planGoneSourceMove judges: the one of the
+// incoming file's edition, with its recorded source and the file its
+// scan_result link names. The edition and the row are read in one read-only
+// transaction, closed before the caller stats anything.
+func (q *DBQueue) readGoneSourceRow(ctx context.Context, inputs models.Inputs) (m goneSourceMove, linked string, found bool, err error) {
+	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return m, "", false, fmt.Errorf("queue: begin gone-source read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	artistKey, titleKey := IdentityKeys(inputs.Track)
+	edition, err := q.resolveEditionTx(ctx, tx, artistKey, titleKey, inputs.Track, inputs.SourcePath)
+	if err != nil {
+		return m, "", false, err
+	}
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, source_path,
+                COALESCE((SELECT file_path FROM scan_results WHERE id = work_queue.scan_result_id), '')
+         FROM work_queue
+         WHERE artist_key = ? AND title_key = ? AND edition = ? AND status != 'processing'`,
+		artistKey, titleKey, edition,
+	).Scan(&m.id, &m.oldPath, &linked)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return m, "", false, nil
+	case err != nil:
+		return m, "", false, fmt.Errorf("queue: read row for gone-source check: %w", err)
+	}
+	return m, linked, true, nil
 }
 
 // planLibraryRelink covers overlapping libraries: scan_results is unique per
