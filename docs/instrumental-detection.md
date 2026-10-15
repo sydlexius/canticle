@@ -697,9 +697,22 @@ key is configurable, it can still be changed without a code change.
 
 ## Sidecar setup
 
-The classifier is a small YAMNet HTTP service. Canticle does not publish an image
-for it; you build it on the host from the vendored source.
+The classifier is a small YAMNet HTTP service. Canticle publishes an image for
+it, so pull that rather than building it:
 
+```sh
+docker pull ghcr.io/sydlexius/canticle-yamnet:X.Y.Z
+```
+
+- **Image tag:** pin the release tag that matches your Canticle version (replace
+  `X.Y.Z` above with it), not `latest`. That keeps the
+  upgrade order below followable: you move the app first, then bump the sidecar
+  tag to match. The image is amd64-only because the TensorFlow wheel needs AVX.
+  The image name, the full tag list and the platform limits are in the
+  "Deployment contract" section of `deploy/yamnet-detector/README.md`.
+- **Fallback:** if you cannot pull from GHCR, build it on the host with
+  `docker build -t canticle-yamnet:local deploy/yamnet-detector`. This needs an
+  amd64 builder.
 - **Source:** `deploy/yamnet-detector/` in this repo (Dockerfile + FastAPI app).
 - **Response contract:** `POST /classify` returns
   `{"mean": {<class>: <prob>, ...}, "max": {<class>: <prob>, ...}}` - both the

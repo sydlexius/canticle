@@ -77,12 +77,15 @@ services:
   # write an instrumental marker. Omit this service to run without detection --
   # the detector is strictly opt-in and Canticle degrades cleanly without it.
   #
-  # There is no published image yet (see issue #498), so this builds from the
-  # vendored source under deploy/yamnet-detector/.
+  # Pulls the published image (amd64 only). Keep its tag the same as the
+  # canticle service above (pin both to the same X.Y.Z to control upgrades). Tags and platform
+  # limits: deploy/yamnet-detector/README.md. To build from the vendored source
+  # instead, replace `image:` with:
+  #   build:
+  #     context: ./deploy/yamnet-detector
+  #   image: canticle-yamnet:local
   yamnet:
-    build:
-      context: ./deploy/yamnet-detector
-    image: canticle-yamnet:local
+    image: ghcr.io/sydlexius/canticle-yamnet:latest  # keep the same tag as the canticle service
     container_name: canticle-yamnet
     restart: unless-stopped
     # No published port: Canticle reaches it by service name on the shared
@@ -138,25 +141,20 @@ services:
   #   docker compose --profile aligner up -d       # CPU (amd64 or arm64)
   #   docker compose --profile aligner-gpu up -d   # NVIDIA GPU (amd64 only)
   # Profiled services never start under a plain `docker compose up`.
-  # Like the yamnet service, both build from the vendored source under
-  # deploy/aligner and tag the result locally (canticle-aligner:local and
-  # :local-cuda), so a local build never overwrites a ghcr tag. Sizes: CPU is
-  # ~0.65 GB compressed / ~2.8 GB unpacked; the CUDA image adds ~3.5 GB to pull
-  # and ~9.3 GB on disk.
-  # Published images (ghcr.io/sydlexius/canticle-aligner:latest and :latest-cuda)
-  # exist only once a release tag has been pushed AND the GHCR package has been
-  # made public (see deploy/aligner/README.md); until then, build locally. Once
-  # available, swap the `image:` line for the ghcr tag and run
-  # `docker compose pull` instead of `build`.
+  # Both pull the published image; keep the tag the same as the canticle
+  # service (pin both to one X.Y.Z to control upgrades). Image names, tags (CPU vs -cuda) and platforms:
+  # deploy/aligner/README.md. To build from the vendored source instead,
+  # replace `image:` with a `build:` block (context ./deploy/aligner, plus
+  # `args: {VARIANT: cuda}` for the GPU service) and a local `image:` tag.
+  # Sizes: CPU is ~0.65 GB compressed / ~2.8 GB unpacked; the CUDA image adds
+  # ~3.5 GB to pull and ~9.3 GB on disk.
   aligner:
     <<: *aligner-common
     profiles: ["aligner"]
-    build:
-      context: ./deploy/aligner
-    image: canticle-aligner:local
+    image: ghcr.io/sydlexius/canticle-aligner:latest  # keep the same tag as the canticle service
     container_name: canticle-aligner
 
-  # GPU variant: same sidecar built with VARIANT=cuda (see the sizes above). Needs an
+  # GPU variant: the -cuda image of the same sidecar (see the sizes above). Needs an
   # NVIDIA driver and the NVIDIA Container Toolkit on the Docker host (Linux
   # only; Docker Desktop on macOS has no GPU passthrough). ALIGNER_DEVICE stays
   # "auto", so a host without a usable GPU falls back to CPU instead of failing;
@@ -164,11 +162,7 @@ services:
   aligner-gpu:
     <<: *aligner-common
     profiles: ["aligner-gpu"]
-    build:
-      context: ./deploy/aligner
-      args:
-        VARIANT: cuda
-    image: canticle-aligner:local-cuda
+    image: ghcr.io/sydlexius/canticle-aligner:latest-cuda  # same tag as the canticle service, plus -cuda
     container_name: canticle-aligner-gpu
     deploy:
       resources:

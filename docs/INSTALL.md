@@ -127,8 +127,10 @@ setup.
 ### GPU host requirements (optional word-sync aligner sidecar)
 
 Only the experimental forced-alignment sidecar (`deploy/aligner`) can use a
-GPU; Canticle itself never does. The `aligner-gpu` compose profile (the
-`VARIANT=cuda` image) needs:
+GPU; Canticle itself never does. CI publishes it to GHCR (CPU and `-cuda`
+images); the image name, tags and platforms are in "Published images" in
+`deploy/aligner/README.md`. Pull the tag that matches your Canticle version.
+The `aligner-gpu` compose profile (the `-cuda` image) needs:
 
 - A Linux Docker host with an NVIDIA GPU of roughly compute capability 6.0
   (Pascal) through 9.0 (Hopper); a Quadro T600 (7.5) is supported. The CUDA
@@ -147,7 +149,8 @@ GPU; Canticle itself never does. The `aligner-gpu` compose profile (the
 
 Docker Desktop on macOS has no GPU passthrough: use the CPU `aligner` profile
 there. A host without a usable GPU running the CUDA image falls back to CPU
-(`/health` reports `"device": "cpu"`). See `deploy/aligner/README.md`.
+(`/health` reports `"device": "cpu"`). To build the images yourself instead
+of pulling them, see `deploy/aligner/README.md`.
 
 ---
 
