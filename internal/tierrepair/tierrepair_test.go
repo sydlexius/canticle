@@ -90,6 +90,34 @@ func TestRunSyncTier_CancelBetweenRowsKeepsBackupAndRowsConsistent(t *testing.T)
 	}
 }
 
+func TestRunRemediated_CancelBetweenRowsKeepsBackupAndRowsConsistent(t *testing.T) {
+	q, backup := seedRows(t, 3)
+	cands, err := ListRemediated(context.Background(), q)
+	if err != nil || len(cands) != 3 {
+		t.Fatalf("list: %v, %d rows", err, len(cands))
+	}
+	ctx, progress := cancelAfterFirst()
+	res, err := RunRemediated(ctx, q, cands, Options{Apply: true, Backup: openSink(t, backup), Progress: progress})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if res.Applied != 1 || res.Scanned != 3 {
+		t.Fatalf("applied %d scanned %d, want 1 and 3", res.Applied, res.Scanned)
+	}
+	if lines := backupLines(t, backup); len(lines) != 1 {
+		t.Errorf("backup has %d records, want 1: %v", len(lines), lines)
+	}
+	left, err := ListRemediated(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The recorded row left the candidate set; the two never reached stay.
+	again, err := RunRemediated(context.Background(), q, left, Options{})
+	if err != nil || len(left) != 2 || again.Counts[queue.RemediatedTier] != 2 {
+		t.Errorf("after cancel: %d candidates, counts %v, err %v, want 2 candidates both tier", len(left), again.Counts, err)
+	}
+}
+
 // countingQ counts guarded writes so a refused run can prove it made none.
 type countingQ struct{ writes int }
 
@@ -98,9 +126,23 @@ func (f *countingQ) SetSyncTierIfPending(context.Context, int64, string, func() 
 	return true, nil
 }
 
+func (f *countingQ) ListRemediatedCandidates(context.Context, string) ([]queue.RemediatedCandidate, error) {
+	return nil, nil
+}
+
+func (f *countingQ) ApplyRemediated(context.Context, queue.RemediatedCandidate, string, string, func() error) (bool, error) {
+	f.writes++
+	return true, nil
+}
+
 func TestApplyWithoutBackupIsRefusedAndChangesNothing(t *testing.T) {
 	q, _ := seedRows(t, 2)
 	ctx := context.Background()
+	rc, _ := ListRemediated(ctx, q)
+	fr := &countingQ{}
+	if _, err := RunRemediated(ctx, fr, rc, Options{Apply: true}); !errors.Is(err, ErrNoBackup) || fr.writes != 0 {
+		t.Errorf("remediated: err=%v writes=%d, want ErrNoBackup and 0 writes", err, fr.writes)
+	}
 	sc, _ := ListSyncTier(ctx, q)
 	f := &countingQ{}
 	if _, err := RunSyncTier(ctx, f, sc, Options{Apply: true}); !errors.Is(err, ErrNoBackup) || f.writes != 0 {
@@ -123,6 +165,23 @@ func (f *scriptedQ) SetSyncTierIfPending(_ context.Context, id int64, _ string, 
 	case f.failed[id]:
 		return false, errors.New("write failed")
 	case f.raced[id]:
+		return false, nil
+	}
+	if err := backup(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (f *scriptedQ) ListRemediatedCandidates(context.Context, string) ([]queue.RemediatedCandidate, error) {
+	return nil, nil
+}
+
+func (f *scriptedQ) ApplyRemediated(_ context.Context, c queue.RemediatedCandidate, _, _ string, backup func() error) (bool, error) {
+	switch {
+	case f.failed[c.ID]:
+		return false, errors.New("write failed")
+	case f.raced[c.ID]:
 		return false, nil
 	}
 	if err := backup(); err != nil {
@@ -203,5 +262,89 @@ func TestDryRunWritesNothingAndReportsProgress(t *testing.T) {
 func TestOpenBackupBadPathFailsBeforeAnyWrite(t *testing.T) {
 	if _, err := OpenBackup(filepath.Join(t.TempDir(), "missing-dir", "b.jsonl")); err == nil {
 		t.Error("want an error for an unopenable backup path")
+	}
+}
+
+func TestRunRemediated_RacedAndWriteFailedAreCountedAndNeverBackedUp(t *testing.T) {
+	q, _ := seedRows(t, 4)
+	ctx := context.Background()
+	cands, _ := ListRemediated(ctx, q)
+	f := &scriptedQ{raced: map[int64]bool{cands[1].ID: true}, failed: map[int64]bool{cands[2].ID: true}}
+	sink := &recSink{}
+	res, err := RunRemediated(ctx, f, cands, Options{Apply: true, Backup: sink})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Applied != 2 || res.WriteFailed != 1 || res.Counts["raced"] != 1 || res.Counts[queue.RemediatedTier] != 2 {
+		t.Errorf("result = %+v, want applied=2 write_failed=1 raced=1 tier=2", res)
+	}
+	lines := strings.Split(strings.TrimSuffix(sink.buf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("backup = %q, want exactly the 2 applied rows", lines)
+	}
+	for _, l := range lines {
+		for _, id := range []int64{cands[1].ID, cands[2].ID} {
+			if strings.Contains(l, fmt.Sprintf(`"id":%d,`, id)) {
+				t.Errorf("backup record %q for a row that did not change", l)
+			}
+		}
+	}
+}
+
+func TestRunRemediated_SyncsEveryBackupRecord(t *testing.T) {
+	q, _ := seedRows(t, 3)
+	ctx := context.Background()
+	cands, _ := ListRemediated(ctx, q)
+	sink := &recSink{}
+	res, err := RunRemediated(ctx, &scriptedQ{}, cands, Options{Apply: true, Backup: sink})
+	if err != nil || res.Applied != 3 {
+		t.Fatalf("res %+v err %v", res, err)
+	}
+	if sink.syncs != 3 {
+		t.Errorf("Sync called %d times for 3 records, want 3", sink.syncs)
+	}
+}
+
+// TestRunRemediated_BackupRecordIsExactForEachAction pins the record bytes for
+// the tier, unsynced and reset actions. Every prior_* field holds a distinct
+// value, so a field wired to the wrong source cannot pass.
+func TestRunRemediated_BackupRecordIsExactForEachAction(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name, sidecar string) string {
+		audio := filepath.Join(dir, name+".flac")
+		if err := os.WriteFile(audio, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if sidecar != "" {
+			if err := os.WriteFile(filepath.Join(dir, name+sidecar), []byte(lrcLines), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return audio
+	}
+	prior := func(id int64, audio string) queue.RemediatedCandidate {
+		return queue.RemediatedCandidate{ID: id, AudioPath: audio, Status: "done",
+			PriorOutcome: "synced", PriorSyncTier: "word", PriorTiming: "categorical"}
+	}
+	cands := []queue.RemediatedCandidate{
+		prior(1, mk("t", ".lrc")),
+		prior(2, mk("u", ".txt")),
+		prior(3, mk("r", "")),
+	}
+	// Row 1 keeps its remediation verdict beside a present .lrc and its
+	// recorded tier differs (line vs word), so the tier action applies.
+	cands[0].PriorSyncTier = "unsynced"
+	sink := &recSink{}
+	if _, err := RunRemediated(context.Background(), &scriptedQ{}, cands, Options{Apply: true, Backup: sink}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"id":1,"action":"tier","tier":"line","prior_outcome_type":"synced","prior_sync_tier":"unsynced","prior_timing_outcome":"categorical","prior_status":"done"}`,
+		`{"id":2,"action":"unsynced","prior_outcome_type":"synced","prior_sync_tier":"word","prior_timing_outcome":"categorical","prior_status":"done"}`,
+		`{"id":3,"action":"reset","prior_outcome_type":"synced","prior_sync_tier":"word","prior_timing_outcome":"categorical","prior_status":"done"}`,
+	}
+	got := strings.Split(strings.TrimSuffix(sink.buf.String(), "\n"), "\n")
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("backup records:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
