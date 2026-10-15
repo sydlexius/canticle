@@ -1631,3 +1631,42 @@ body {
   font-size: 0.875rem;
   color: var(--mx-content-text-secondary);
 }
+
+/* Operator repair prompt and run page (#1543). */
+.mx-repair-prompt {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--mx-surface-border);
+  border-radius: var(--mx-radius-sm);
+  font-size: 0.875rem;
+}
+.mx-repair-line,
+.mx-repair-desc,
+.mx-repair-cost {
+  margin: 0 0 0.5rem;
+}
+.mx-repair-desc {
+  color: var(--mx-content-text-secondary);
+}
+.mx-repair-cost {
+  font-weight: 600;
+}
+.mx-repair-progress {
+  display: block;
+  width: 100%;
+  max-width: 24rem;
+  margin: 0 0 0.75rem;
+}
+.mx-repair-counts {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  gap: 0.25rem 1.5rem;
+  margin: 0 0 1rem;
+}
+.mx-repair-counts dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.mx-repair-back {
+  margin: 1rem 0 0;
+}
