@@ -23,6 +23,7 @@ import (
 	"github.com/sydlexius/canticle/internal/orchestrator"
 	"github.com/sydlexius/canticle/internal/pathutil"
 	"github.com/sydlexius/canticle/internal/providers"
+	"github.com/sydlexius/canticle/internal/prune"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/respdrift"
 	"github.com/sydlexius/canticle/internal/scanner"
@@ -52,6 +53,12 @@ type Queue interface {
 	// 'done', marking the track as terminal. The scan layer will show the track
 	// as done (not pending) so it is not mistaken for an in-flight item.
 	RetireMiss(ctx context.Context, id int64) (queue.WorkItem, error)
+	// SettleGoneUpgradeTrip settles an upgrade trip whose source file is proven
+	// gone: the first sighting marks it and settles the trip as an answered miss,
+	// a later one (mark older than confirmAfter) retires the row (#1597).
+	SettleGoneUpgradeTrip(ctx context.Context, id int64, confirmAfter time.Duration) (queue.GoneOutcome, error)
+	// ClearSourceGone drops a pending source-gone sighting (the file is back).
+	ClearSourceGone(ctx context.Context, id int64) error
 	// SetInstrumentalResult stamps the audio-detection outcome and telemetry onto
 	// a work_queue row. result=1 means instrumental confirmed; result=0 means not
 	// instrumental. tel carries the five score fields written atomically with
@@ -1549,9 +1556,22 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// into the ordinary backoff, a cheap hourly check rather than an hourly fetch.
 	var preOK bool
 	if item, preOK = w.preflightOutputs(ctx, item); !preOK {
+		// An upgrade trip whose source is also provably gone is not failed into
+		// the same-row retry loop: it settles with a sighting mark and a later
+		// trip retires it (#1597). Ordinary claims keep the fail below (#1430).
+		if item.UpgradeQueued && w.healer != nil {
+			if handled, err := w.settleGoneTrip(ctx, item); handled {
+				return err
+			}
+		}
 		err := fmt.Errorf("worker: item %d output: %w", item.ID, lyrics.ErrOutputDirMissing)
 		slog.Warn("worker: no output directory exists; failing without a fetch", "id", item.ID, "entries", len(outputPaths(item.Inputs)))
 		return w.fail(ctx, item, err)
+	}
+	if preOK && item.UpgradeQueued && w.healer != nil {
+		// The output directory is back, so the source is not gone: drop any
+		// pending sighting so the two-sighting count starts over (#1597).
+		w.clearGoneMark(ctx, item)
 	}
 
 	// A configured providers generation that no longer matches the stamp the item
@@ -3017,6 +3037,9 @@ type OutputHealer interface {
 	// EntryProvablyStale reports whether a missing-directory entry is provably a
 	// stale path rather than a real second copy; rootOnline answers per root.
 	EntryProvablyStale(ctx context.Context, id int64, sourcePath string, e models.OutputPath, rootOnline func(root string) bool) (bool, error)
+	// SourceStateOf says whether a source file is present, provably gone (fresh
+	// root probe, resolved root, intact subtree), or unproven (#1597).
+	SourceStateOf(ctx context.Context, sourcePath string) (prune.SourceState, error)
 }
 
 // SetOutputHealer installs the healer; nil disables the offline-library guard,
@@ -3204,6 +3227,56 @@ func (w *Worker) preflightOutputs(ctx context.Context, item queue.WorkItem) (_ q
 	slog.Info("worker: output_paths healed", "id", item.ID, "entries", len(healed))
 	item.Inputs.OutputPaths = healed
 	return item, true
+}
+
+// goneConfirmAfter is how old an upgrade trip's source-gone mark must be before
+// a later trip that finds the source gone again retires the row (#1597). Trips
+// are at least a week apart under the sweep hold, so this is a floor against a
+// tight rescan loop, not the real spacing.
+const goneConfirmAfter = 24 * time.Hour
+
+// settleGoneTrip handles an upgrade trip whose output directories are all
+// missing. It asks prune's authority (OutputHealer.SourceStateOf: a fresh root
+// probe, resolved symlink roots, an intact subtree) whether the source is gone.
+// handled=false means the caller fails the row as before; a source found
+// present also drops any pending mark. Gone settles the trip through
+// SettleGoneUpgradeTrip: the first sighting marks it, a later one retires it.
+func (w *Worker) settleGoneTrip(ctx context.Context, item queue.WorkItem) (handled bool, _ error) {
+	state, err := w.healer.SourceStateOf(context.WithoutCancel(ctx), item.Inputs.SourcePath)
+	if err != nil {
+		slog.Warn("worker: could not check whether the source file is gone", "id", item.ID, "error", err)
+		return false, nil
+	}
+	switch state {
+	case prune.SourcePresent:
+		w.clearGoneMark(ctx, item)
+		return false, nil
+	case prune.SourceGone:
+	default:
+		return false, nil
+	}
+	out, err := w.queue.SettleGoneUpgradeTrip(context.WithoutCancel(ctx), item.ID, goneConfirmAfter)
+	if err != nil {
+		return true, w.fail(ctx, item, fmt.Errorf("worker: settle item %d with source gone: %w", item.ID, err))
+	}
+	switch out {
+	case queue.GoneRetired:
+		slog.Warn("worker: source file stayed gone across upgrade trips; retired the row without a fetch", "id", item.ID)
+	case queue.GoneMarked:
+		slog.Warn("worker: source file and output directory are gone; settled the upgrade trip and marked the row", "id", item.ID)
+	case queue.GoneNotTrip:
+		slog.Debug("worker: row was no longer a processing upgrade trip when its gone source was settled; nothing changed", "id", item.ID)
+	}
+	w.lastItemContactedProvider = false // no provider request: no pacing wait
+	return true, nil
+}
+
+// clearGoneMark drops a pending source-gone sighting. A failure only delays a
+// retire-on-recovery decision, so it is logged, never fatal.
+func (w *Worker) clearGoneMark(ctx context.Context, item queue.WorkItem) {
+	if err := w.queue.ClearSourceGone(context.WithoutCancel(ctx), item.ID); err != nil {
+		slog.Warn("worker: could not clear the source-gone mark", "id", item.ID, "error", err)
+	}
 }
 
 // upgradeMaxAttempts caps an upgrade trip's failed attempts (#553): the third
