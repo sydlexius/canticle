@@ -286,9 +286,11 @@ var ritStrongLines = regexp.MustCompile(`(?m)^strong: (\d+)\nstrong by title: (\
 
 // A plain title on an instrumental release is strong by album, counted apart
 // from strong by title, and the two sum to strong; the #1526 weak line is gone.
-// It is not repaired yet (#1564): with --yes its lyric file, its cache entry
-// and its row are as they were, with no block added. The row Strong by its own
-// title is the control: the same run repairs it.
+// The dry run predicts the split and the cull; with --yes the split re-keys the
+// legacy release rows to the instrumental edition and the cull removes their
+// lyric files, drops their cache entries and reopens them, adding no block
+// (#1564). The row strong by its own title is repaired as before, its block
+// included.
 func TestReconcileInstrumentalTitlesCountsStrongByTitleAndByAlbum(t *testing.T) {
 	const release = "Low Tide (Instrumental)"
 	f := newRITFixture(t, "strong", "", false)
@@ -315,7 +317,8 @@ func TestReconcileInstrumentalTitlesCountsStrongByTitleAndByAlbum(t *testing.T) 
 		t.Fatalf("dry run = %d:\n%s", code, out)
 	}
 	ritWant(t, "dry run", out, "rows examined: 5", "weak: 2", "weak, album named as instrumental: 1", "strong: 3", "strong by title: 1",
-		"strong by album: 2", "strong, skipped, by album (not repaired yet): 2", "candidates: 1", "rows that would be repaired: 1")
+		"strong by album: 2", "strong, skipped, by album, not the release's own row: 0", "candidates: 3", "rows that would be repaired: 3",
+		"rows would be split: 2", "rows would be re-keyed as instrumental: 2")
 	if strings.Contains(out, "plain title on an instrumental release") {
 		t.Errorf("dry run still prints the #1526 line:\n%s", out)
 	}
@@ -333,37 +336,290 @@ func TestReconcileInstrumentalTitlesCountsStrongByTitleAndByAlbum(t *testing.T) 
 	if strings.Contains(out, "Low Tide") {
 		t.Errorf("dry run stdout leaks an album:\n%s", out)
 	}
+	f.db(t, func(q func(string, ...any) string) {
+		if n := q("SELECT COUNT(*) FROM work_queue WHERE edition != ''"); n != "0" {
+			t.Errorf("the dry run re-keyed %s rows", n)
+		}
+	})
 
 	out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup})
 	if code != 0 {
 		t.Fatalf("apply = %d:\n%s", code, out)
 	}
-	ritWant(t, "apply", out, "weak: 2", "strong: 3", "strong by title: 1", "strong by album: 2", "candidates: 1", "rows repaired: 1",
-		"lyric files removed: 1", "new blocks: 1", "cache entries invalidated: 1", "rows reopened: 1")
+	ritWant(t, "apply", out, "weak: 2", "strong: 3", "strong by title: 1", "strong by album: 2", "candidates: 3", "rows repaired: 3",
+		"lyric files removed: 3", "new blocks: 1", "cache entries invalidated: 3", "rows reopened: 3", "rows split: 2", "rows re-keyed as instrumental: 2")
 	ritNoLeak(t, "apply stdout", out, f)
+	f.db(t, func(q func(string, ...any) string) {
+		if n := q("SELECT COUNT(*) FROM lyric_blocks b JOIN work_queue w ON w.artist_key = b.artist_key AND w.title_key = b.title_key WHERE w.id = ?", byTitle); n != "1" {
+			t.Errorf("the by-title row has %s blocks, want 1", n)
+		}
+	})
 	if _, err := os.Stat(byTitleLRC); err == nil || f.state(t, byTitle) != "pending|null|1" {
 		t.Errorf("the by-title row was not repaired: %s", f.state(t, byTitle))
 	}
 	for _, r := range []struct{ id, lrc string }{{a1, a1LRC}, {a2, a2LRC}} {
-		if _, err := os.Stat(r.lrc); err != nil {
-			t.Errorf("row %s: the lyric file of a release row was removed: %v", r.id, err)
-			continue
+		if _, err := os.Stat(r.lrc); err == nil {
+			t.Errorf("row %s: the lyric file of a release row was not removed", r.id)
 		}
-		if got := f.state(t, r.id); ritRead(t, r.lrc) != ritLRC || got != "done|musixmatch|1" {
-			t.Errorf("row %s = %s, want it still settled with its lyric file as written and only the by-title row's block", r.id, got)
+		// 1 is the by-title row's block: none is under a release row's keys.
+		if got := f.state(t, r.id); got != "pending|null|1" {
+			t.Errorf("row %s = %s, want it reopened with the by-title row's block only", r.id, got)
 		}
+		f.db(t, func(q func(string, ...any) string) {
+			if e := q("SELECT edition || '|' || (SELECT COUNT(*) FROM lyric_blocks b WHERE b.artist_key = w.artist_key AND b.title_key = w.title_key) FROM work_queue w WHERE id = ?", r.id); e != "instrumental|0" {
+				t.Errorf("row %s: edition|blocks %q, want instrumental|0", r.id, e)
+			}
+		})
 	}
-	if got := cache(); got != cached || strings.Count(cached, ";") != 1 {
-		t.Errorf("cache entries of the two release rows changed:\n got %s\nwant %s", got, cached)
+	if got := cache(); got != "" || strings.Count(cached, ";") != 1 {
+		t.Errorf("cache entries of the two release rows = %q, want both invalidated (before: %s)", got, cached)
 	}
-	if tail := ritRead(t, f.tailApply); tail != byTitle+"\trepaired\n"+a1+"\tby-album\n"+a2+"\tby-album\n" {
-		t.Errorf("apply tail = %q, want the by-title row repaired and the release rows by album", tail)
+	if tail := ritRead(t, f.tailApply); tail != byTitle+"\trepaired\n"+a1+"\trepaired\n"+a2+"\trepaired\n" {
+		t.Errorf("apply tail = %q, want all three rows repaired", tail)
+	}
+}
+
+// A legacy release row with an output in the sung copy's folder too: the split
+// skips and counts it, so the cull leaves it shared and counts it by album, and
+// both lyric files stay as they were (#1564).
+func TestReconcileInstrumentalTitlesLeavesARowInBothFoldersAlone(t *testing.T) {
+	f := newRITFixture(t, "strong", "", false)
+	rel, relLRC := f.titled(t, "", "", 0)
+	sungDir := filepath.Join(f.root, "sung")
+	if err := os.MkdirAll(sungDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sungLRC := filepath.Join(sungDir, "1.lrc")
+	if err := os.WriteFile(sungLRC, []byte(ritLRC), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sungLRC, ritSettled, ritSettled); err != nil {
+		t.Fatal(err)
+	}
+	f.db(t, func(q func(string, ...any) string) {
+		q(`UPDATE work_queue SET album = 'Low Tide (Instrumental)', output_paths = json_array(json_object('outdir', outdir, 'filename', filename),
+		    json_object('outdir', ?, 'filename', '1.flac')) WHERE id = ? RETURNING id`, sungDir, rel)
+		sr := q(`INSERT INTO scan_results (library_id, file_path, artist, title, album, artist_key, title_key, outdir, filename, status)
+		    SELECT (SELECT id FROM libraries), ? || '/1.flac', artist, title, 'Low Tide', artist_key, title_key, ?, '1.flac', 'processing'
+		    FROM work_queue WHERE id = ? RETURNING id`, sungDir, sungDir, rel)
+		q("INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?) RETURNING work_queue_id", rel, sr)
+	})
+	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{})
+	if code != 0 {
+		t.Fatalf("dry run = %d:\n%s", code, out)
+	}
+	ritWant(t, "dry run", out, "split skipped, an output in the other edition's folder: 1",
+		"strong, skipped, by album, not the release's own row: 1", "rows that would be repaired: 0")
+	out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup})
+	if code != 0 {
+		t.Fatalf("apply = %d:\n%s", code, out)
+	}
+	ritWant(t, "apply", out, "split skipped, an output in the other edition's folder: 1", "rows split: 0",
+		"strong, skipped, by album, not the release's own row: 1", "candidates: 0", "lyric files removed: 0")
+	ritNoLeak(t, "apply stdout", out, f)
+	if ritRead(t, relLRC) != ritLRC || ritRead(t, sungLRC) != ritLRC || f.state(t, rel) != "done|musixmatch|0" {
+		t.Errorf("the shared row or a lyric file changed: %s", f.state(t, rel))
+	}
+}
+
+// Two legacy rows each shared by an instrumental release and its sung twin.
+// --yes re-keys the row naming the instrumental copy and returns its sung
+// twin's scan result to pending; from the row naming the sung copy it detaches
+// the instrumental copy's scan result, and the sung lyric file and cache entry
+// are byte-identical afterwards. A split record precedes each change in the
+// backup, and stdout names nothing private.
+func TestReconcileInstrumentalTitlesSplitsLegacySharedRows(t *testing.T) {
+	f := newRITFixture(t, "strong", "", false)
+	sungRow, sungLRC := f.titled(t, "", "", 0)
+	relRow, _ := f.titled(t, "", "", 0)
+	var instCopy, sungTwin string
+	f.db(t, func(q func(string, ...any) string) {
+		q("UPDATE work_queue SET album = 'Low Tide (Instrumental)' WHERE id = ? RETURNING id", relRow)
+		copyOf := func(row, album, dir string) string {
+			sr := q(`INSERT INTO scan_results (library_id, file_path, artist, title, album, artist_key, title_key, outdir, filename, status)
+			    SELECT (SELECT id FROM libraries), ? || '/' || id || '.flac', artist, title, ?, artist_key, title_key, ?, 'x.flac', 'processing'
+			    FROM work_queue WHERE id = ? RETURNING id`, dir, album, dir, row)
+			q("INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?) RETURNING work_queue_id", row, sr)
+			return sr
+		}
+		instCopy = copyOf(sungRow, "Low Tide (Instrumental)", filepath.Join(f.root, "inst"))
+		sungTwin = copyOf(relRow, "Low Tide", filepath.Join(f.root, "sung"))
+		q("INSERT INTO lyrics_cache (artist, title, duration_bucket, lyrics) SELECT artist_key, title_key, 0, 'cached words' FROM work_queue WHERE id = ? RETURNING artist", sungRow)
+	})
+	snap := func() (s string) {
+		f.db(t, func(q func(string, ...any) string) {
+			s = q(`SELECT (SELECT group_concat(id || ':' || edition || ':' || status, ',') FROM work_queue) || '|' ||
+			    (SELECT group_concat(id || '=' || status, ',') FROM scan_results) || '|' ||
+			    (SELECT COUNT(*) FROM work_queue_scan_results)`)
+		})
+		return s
+	}
+	cache := func() (s string) {
+		f.db(t, func(q func(string, ...any) string) {
+			s = q(`SELECT COALESCE(group_concat(artist || '|' || title || '|' || lyrics || '|' || updated_at, ','), '') FROM lyrics_cache`)
+		})
+		return s
+	}
+	before, cached := snap(), cache()
+	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{Tail: f.tail})
+	if code != 0 || snap() != before {
+		t.Fatalf("dry run = %d, changed %s -> %s:\n%s", code, before, snap(), out)
+	}
+	ritWant(t, "dry run", out, "legacy rows shared by two editions or on an instrumental release: 2", "rows would be split: 2",
+		"rows would be re-keyed as instrumental: 1", "scan results would be detached: 2")
+
+	// A record whose directory cannot be synced is not durable: the split stops
+	// before any row changes. A write-only directory takes the file but cannot
+	// be opened to sync.
+	if os.Geteuid() != 0 {
+		wo := filepath.Join(t.TempDir(), "wo")
+		if err := os.Mkdir(wo, 0o300); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(wo, 0o700) }) //nolint:gosec // reason: G302 -- restore a test dir so TempDir can remove it
+		out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: filepath.Join(wo, "b.jsonl")})
+		if code != 1 || snap() != before {
+			t.Fatalf("unsyncable backup = %d, changed %s -> %s:\n%s", code, before, snap(), out)
+		}
+		ritWant(t, "unsyncable backup", out, "failed: the --backup file could not be written; the run was stopped")
+	}
+
+	out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup})
+	if code != 0 {
+		t.Fatalf("apply = %d:\n%s", code, out)
+	}
+	ritWant(t, "apply", out, "rows split: 2", "rows re-keyed as instrumental: 1", "scan results detached: 2",
+		"scan results returned to pending: 2", "split errors: 0")
+	ritNoLeak(t, "apply stdout", out, f)
+	f.db(t, func(q func(string, ...any) string) {
+		if got := q("SELECT group_concat(edition, ',') FROM (SELECT edition FROM work_queue ORDER BY id)"); got != ",instrumental" {
+			t.Errorf("editions = %q, want the sung row empty and the release row instrumental", got)
+		}
+		if got := q("SELECT group_concat(status, ',') FROM (SELECT status FROM scan_results WHERE id IN (?, ?) ORDER BY id)", instCopy, sungTwin); got != "pending,pending" {
+			t.Errorf("detached scan results = %q, want both pending", got)
+		}
+		if n := q("SELECT COUNT(*) FROM work_queue_scan_results"); n != "0" {
+			t.Errorf("%s links left, want none", n)
+		}
+	})
+	if got := cache(); got != cached || !strings.Contains(cached, "cached words") {
+		t.Errorf("the sung copy's cache entry changed: %q -> %q", cached, got)
+	}
+	if ritRead(t, sungLRC) != ritLRC {
+		t.Error("the sung copy's lyric file changed")
+	}
+	if b := ritRead(t, f.backup); !strings.Contains(b, `"op":"reconcile-instrumental-titles-split","work_item_id":`+sungRow+`,`) ||
+		!strings.Contains(b, `"op":"reconcile-instrumental-titles-split","work_item_id":`+relRow+`,"edition":"instrumental"`) {
+		t.Errorf("backup lacks a split record per row:\n%s", b)
+	}
+}
+
+// A split row that fails without stopping the walk (its outputs do not parse)
+// is counted, the walk goes on to split the next row, and the command exits 1.
+func TestReconcileInstrumentalTitlesSplitErrorIsAnErrorExit(t *testing.T) {
+	f := newRITFixture(t, "strong", "", false)
+	bad, _ := f.titled(t, "", "", 0)
+	good, _ := f.titled(t, "", "", 0)
+	f.db(t, func(q func(string, ...any) string) {
+		q("UPDATE work_queue SET album = 'Low Tide (Instrumental)' WHERE id IN (?, ?) RETURNING id", bad, good)
+		q("UPDATE work_queue SET output_paths = '{bad' WHERE id = ? RETURNING id", bad)
+	})
+	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup})
+	if code != 1 {
+		t.Errorf("exit = %d, want 1:\n%s", code, out)
+	}
+	ritWant(t, "apply", out, "split errors: 1", "rows split: 1", "rows re-keyed as instrumental: 1")
+	if strings.Contains(out, "not finished") {
+		t.Errorf("a row error stopped the run:\n%s", out)
+	}
+	ritNoLeak(t, "apply stdout", out, f)
+	f.db(t, func(q func(string, ...any) string) {
+		if got := q("SELECT group_concat(id || ':' || edition, ',') FROM (SELECT id, edition FROM work_queue ORDER BY id)"); got != bad+":,"+good+":instrumental" {
+			t.Errorf("editions = %q, want the bad row untouched and the good row re-keyed", got)
+		}
+	})
+}
+
+// --library scopes the split as well as the cull. Each of two libraries holds a
+// legacy row shared by an instrumental release and its sung twin, and a row
+// strong by its title. --yes --library on the first splits and repairs only
+// its rows: the other library's rows keep their edition, links, status and
+// lyric files, its sung twin stays linked, and every count is the first's.
+func TestReconcileInstrumentalTitlesLibraryScopesTheSplit(t *testing.T) {
+	f := newRITFixture(t, "strong", "", false)
+	type shelf struct{ lib, rel, title, relLRC, titleLRC, twin string }
+	seed := func(name, root string) (s shelf) {
+		dir := filepath.Join(root, ritAlbum)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f.dir = dir
+		s.rel, s.relLRC = f.titled(t, "", "", 0)
+		s.title, s.titleLRC = f.row(t, "", 0)
+		f.db(t, func(q func(string, ...any) string) {
+			if s.lib = q("SELECT id FROM libraries WHERE name = ?", name); s.lib == "" {
+				s.lib = q("INSERT INTO libraries (path, name) VALUES (?, ?) RETURNING id", root, name)
+			}
+			q("UPDATE work_queue SET album = 'Low Tide (Instrumental)' WHERE id = ? RETURNING id", s.rel)
+			link := func(row, album, dir string) string {
+				sr := q(`INSERT INTO scan_results (library_id, file_path, artist, title, album, artist_key, title_key, outdir, filename, status)
+				    SELECT ?, ? || '/' || id || '.flac', artist, title, ?, artist_key, title_key, ?, 'x.flac', 'processing'
+				    FROM work_queue WHERE id = ? RETURNING id`, s.lib, dir, album, dir, row)
+				q("INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?) RETURNING work_queue_id", row, sr)
+				return sr
+			}
+			link(s.rel, "Low Tide (Instrumental)", dir)
+			s.twin = link(s.rel, "Low Tide", filepath.Join(root, "sung"))
+			link(s.title, "Plain Shelf", dir)
+		})
+		return s
+	}
+	a := seed("lib", f.root)
+	b := seed("other", filepath.Join(filepath.Dir(f.root), "other"))
+	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{Library: "lib"})
+	if code != 0 {
+		t.Fatalf("dry run = %d:\n%s", code, out)
+	}
+	ritWant(t, "dry run", out, "legacy rows shared by two editions or on an instrumental release: 1", "rows would be split: 1", "rows examined: 2")
+	out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup, Library: "lib"})
+	if code != 0 {
+		t.Fatalf("apply = %d:\n%s", code, out)
+	}
+	ritWant(t, "apply", out, "legacy rows shared by two editions or on an instrumental release: 1", "rows split: 1",
+		"rows re-keyed as instrumental: 1", "scan results detached: 1", "scan results returned to pending: 1",
+		"rows examined: 2", "rows repaired: 2", "new blocks: 1", "rows reopened: 2")
+	ritNoLeak(t, "apply stdout", out, f)
+	if strings.Index(out, "rows split:") > strings.Index(out, "rows examined:") {
+		t.Errorf("the split counts print after the repair's, though the split runs first:\n%s", out)
+	}
+	state := func(s shelf) (v string) {
+		f.db(t, func(q func(string, ...any) string) {
+			v = q(`SELECT (SELECT group_concat(edition || ':' || status, ',') FROM (SELECT * FROM work_queue WHERE id IN (?, ?) ORDER BY id)) || '|' ||
+			    (SELECT status FROM scan_results WHERE id = ?) || '|' ||
+			    (SELECT COUNT(*) FROM work_queue_scan_results WHERE work_queue_id IN (?, ?))`, s.rel, s.title, s.twin, s.rel, s.title)
+		})
+		return v
+	}
+	if got := state(a); got != "instrumental:pending,:pending|pending|2" {
+		t.Errorf("library lib = %s, want its release row re-keyed, both rows reopened and its sung twin detached", got)
+	}
+	if got := state(b); got != ":done,:done|processing|3" {
+		t.Errorf("library other = %s, want it untouched", got)
+	}
+	for _, lrc := range []string{b.relLRC, b.titleLRC} {
+		if ritRead(t, lrc) != ritLRC {
+			t.Error("a lyric file in the other library changed")
+		}
 	}
 }
 
 func TestReconcileInstrumentalTitlesRefusals(t *testing.T) {
 	f := newRITFixture(t, "off", "", false)
 	id, lrc := f.row(t, "", 0)
+	rel, relLRC := f.titled(t, "", "", 0) // strong by album, the release's own row
+	f.db(t, func(q func(string, ...any) string) {
+		q("UPDATE work_queue SET album = 'Low Tide (Instrumental)', edition = 'instrumental' WHERE id = ? RETURNING id", rel)
+	})
 	untouched := func(label string, f *ritFixture, id, lrc string) {
 		t.Helper()
 		if ritRead(t, lrc) != ritLRC || f.state(t, id) != "done|musixmatch|0" {
@@ -378,11 +634,12 @@ func TestReconcileInstrumentalTitlesRefusals(t *testing.T) {
 		t.Errorf("--yes with the mode off = %d:\n%s", code, out)
 	}
 	untouched("--yes with the mode off", f, id, lrc)
+	untouched("--yes with the mode off", f, rel, relLRC)
 	out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{})
 	if code != 0 {
 		t.Errorf("dry run with the mode off = %d:\n%s", code, out)
 	}
-	ritWant(t, "dry run with the mode off", out, "instrumental_title.mode: off", "the mode is off: --yes is refused until it is on", "rows that would be repaired: 1")
+	ritWant(t, "dry run with the mode off", out, "instrumental_title.mode: off", "the mode is off: --yes is refused until it is on", "rows that would be repaired: 2")
 
 	on := newRITFixture(t, "strong", "", false)
 	id, lrc = on.row(t, "", 0)

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/sydlexius/canticle/internal/instrumentaltitle"
@@ -32,8 +33,9 @@ const (
 	DispositionInFlight       = "in-flight"
 	DispositionHandMarked     = "hand-marked"
 	DispositionArtistPrefixed = "artist-prefixed"
-	// ByAlbum: Strong by the album alone (PositionRelease). Its row may be shared
-	// with a sung twin, so this version counts it and does not repair it (#1525).
+	// ByAlbum: Strong by the album alone (PositionRelease) on a row that is not
+	// provably the release's own: its edition is empty (the split left it shared
+	// with a sung twin), or the audio file's album no longer names the release.
 	DispositionByAlbum = "by-album"
 	// A candidate's outcome. WouldRepair is the dry run's Repaired.
 	DispositionSymlink         = "symlink"
@@ -114,7 +116,9 @@ type Result struct {
 	// Unreadable: the file's album could not be read. InFlight: held by a worker.
 	// HandMarked: a hand edit or mark. ArtistPrefixed: the rule declines the title.
 	// InFlight and HandMarked include a row found so only when the cull reached it.
-	// ByAlbum: Strong by album and none of those, so not repaired yet (#1564).
+	// ByAlbum: Strong by album and none of those, on a row not the release's own
+	// (see DispositionByAlbum). The rest Strong by album are candidates, culled
+	// with no block (#1564): a block would refuse the sung twin's words too.
 	Unreadable, InFlight, HandMarked, ArtistPrefixed, ByAlbum int
 	// Candidates are the rows handed to the cull that it did not find in flight or
 	// hand-marked. Each lands in exactly one of the counters below.
@@ -157,8 +161,8 @@ func New(db *sql.DB, log *slog.Logger) *Repairer {
 
 // candidate is one selected row. The text fields never leave this package.
 type candidate struct {
-	id                                                int64
-	artist, title, album, albumArtist, source, status string
+	id                                                         int64
+	artist, title, album, albumArtist, source, status, edition string
 	// What the vet reads: the lane that settled the row and when.
 	lane, completedAt string
 	hand              bool
@@ -209,7 +213,7 @@ func selector(libraryID *int64, after int64) (string, []any) {
 		args = append(args, l)
 	}
 	query := `SELECT id, artist, title, album, album_artist, source_path, status,
-                 provider_lane, COALESCE(completed_at, ''), ` +
+                 provider_lane, COALESCE(completed_at, ''), edition, ` +
 		queue.HandProtectedPredicate + `, instrumental_result
           FROM work_queue
          WHERE id > ? AND +status IN ('done', 'processing') AND outcome_type IN ('synced', 'unsynced')
@@ -234,7 +238,7 @@ func (r *Repairer) page(ctx context.Context, libraryID *int64, after int64) ([]c
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.id, &c.artist, &c.title, &c.album, &c.albumArtist, &c.source, &c.status,
-			&c.lane, &c.completedAt, &c.hand, &c.detector); err != nil {
+			&c.lane, &c.completedAt, &c.edition, &c.hand, &c.detector); err != nil {
 			return nil, fmt.Errorf("titlerepair: scan row after id %d: %w", after, err)
 		}
 		out = append(out, c)
@@ -253,7 +257,8 @@ func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Re
 	v, ok := instrumentaltitle.Settles(c.title, c.album, c.artist, c.albumArtist)
 	// The worker replaces the row's album with the audio file's where the file
 	// has one. An album only withdraws a Strong verdict (a karaoke album), so
-	// only a title that is Strong alone costs a read. The path test is the worker's.
+	// only a title that is Strong alone costs a read here (releaseOwn reads it
+	// for a row Strong by album). The path test is the worker's.
 	unreadable := false
 	if alone := instrumentaltitle.Classify(c.title, ""); alone.Tier == instrumentaltitle.Strong &&
 		o.FileAlbum != nil && strings.TrimSpace(c.source) != "" {
@@ -316,13 +321,63 @@ func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Re
 		res.ArtistPrefixed++
 		row.Disposition = DispositionArtistPrefixed
 	case byAlbum:
-		res.ByAlbum++
-		row.Disposition = DispositionByAlbum
+		switch own, unread := r.releaseOwn(ctx, c, o); {
+		case unread:
+			res.Unreadable++
+			row.Disposition = DispositionUnreadable
+		case !own:
+			res.ByAlbum++
+			row.Disposition = DispositionByAlbum
+		default:
+			res.Candidates++
+			row.Disposition, row.Files = r.cull(ctx, c, o, res, true)
+		}
 	default:
 		res.Candidates++
-		row.Disposition, row.Files = r.cull(ctx, c, o, res)
+		row.Disposition, row.Files = r.cull(ctx, c, o, res, false)
 	}
 	if o.OnRow != nil {
 		o.OnRow(row)
 	}
+}
+
+// releaseOwn reports whether a row Strong by album is the release's own, so the
+// cull may act on it (the safety rule of #1525): its edition is instrumental or,
+// in a dry run, the split would re-key it (Split runs first under Apply, so an
+// empty edition then is a row it left shared). And the audio file's album, where
+// it has one, still names the release, as the worker re-reads it; a failed read
+// is unread. A row Strong by album is Strong by its stored tags, which is the
+// split's re-key test, so a dry run needs only the split's skips.
+//
+// The audio file must exist even with no reader (FileAlbum is nil with
+// enrichment off; a read of a missing file fails). With no block to prove an
+// interrupted cull, Mark reopens a settled row whose lyric file is gone on the
+// row's own record (MarkRequest.NoBlock), so a track deleted with its lyric
+// file would be reopened and get a marker. A missing audio file is unread.
+func (r *Repairer) releaseOwn(ctx context.Context, c candidate, o Options) (own, unread bool) {
+	if c.edition != queue.EditionInstrumental {
+		if o.Apply {
+			return false, false
+		}
+		p, err := plan(ctx, r.db, c.id, &SplitResult{})
+		if err != nil || p.skip != nil {
+			return false, false
+		}
+	}
+	if strings.TrimSpace(c.source) == "" {
+		return true, false
+	}
+	if o.FileAlbum == nil {
+		if _, err := os.Stat(c.source); err != nil { // the error names the path, so it is not logged
+			r.log.Warn("titlerepair: audio file missing, row skipped", "id", c.id)
+			return false, true
+		}
+		return true, false
+	}
+	album, err := o.FileAlbum(c.source)
+	if err != nil { // the error may name the path, so it is not logged
+		r.log.Warn("titlerepair: audio file album unreadable, row skipped", "id", c.id)
+		return false, true
+	}
+	return album == "" || instrumentaltitle.InstrumentalRelease(c.title, album, c.artist, c.albumArtist), false
 }

@@ -177,7 +177,9 @@ type WorkItem struct {
 	// An upgrade trip over a mis_synced row reads it (#1120).
 	TimingOutcome string
 	// Edition is part of the row identity (#1525): EditionNone or
-	// EditionInstrumental. Set on insert only; never updated in place.
+	// EditionInstrumental. Set on insert; never updated in place, except by the
+	// split of legacy shared rows (titlerepair.Split), which re-keys '' to
+	// EditionInstrumental.
 	Edition string
 }
 

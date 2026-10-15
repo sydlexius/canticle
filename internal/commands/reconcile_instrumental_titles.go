@@ -26,10 +26,12 @@ import (
 // ScanReconcileInstrumentalTitlesCmd repairs rows a provider settled with
 // lyrics before the instrumental title rule existed (#1470): the lyric file is
 // backed up and removed, its words are blocked, and the row is reopened so the
-// worker's title rule settles it with a marker. Dry-run unless --yes. Stdout
-// is counts only; row ids go to the --tail file and paths to the backup file.
+// worker's title rule settles it with a marker. It first splits legacy rows an
+// instrumental release shares with its sung twin (titlerepair.Split, #1525),
+// database-only. Dry-run unless --yes. Stdout is counts only; row ids go to the
+// --tail file and paths to the backup file.
 type ScanReconcileInstrumentalTitlesCmd struct {
-	Yes        bool   `arg:"--yes" help:"actually repair (without it, prints what would change); needs --backup and instrumental_title.mode on"`
+	Yes        bool   `arg:"--yes" help:"actually repair, after first splitting legacy rows shared by two editions (database-only); without it, prints what would change; needs --backup and instrumental_title.mode on"`
 	Backup     string `arg:"--backup" help:"JSONL file each lyric file is appended to before it is removed (required with --yes; appended to if it exists)" default:""`
 	Tail       string `arg:"--tail" help:"append one line per strong-titled row (work item id, TAB, disposition) to this LOCAL file, never stdout (default with --yes: <backup>.rows.tsv)" default:""`
 	Library    string `arg:"--library" help:"limit the rows examined to one library (name or numeric id)" default:""`
@@ -195,6 +197,19 @@ func reconcileInstrumentalTitles(ctx context.Context, out io.Writer, args ScanRe
 		}
 		return ferr
 	}
+	split := titlerepair.SplitOptions{LibraryID: opts.LibraryID, Apply: args.Yes, Report: func(rec titlerepair.SplitRecord) error {
+		// The cull's own durable append: the line, its file and its directory
+		// are synced before the row changes, or the row is left alone.
+		f, ferr := bk.File()
+		if ferr == nil {
+			ferr = lyricblock.AppendJSONL(f, rec)
+		}
+		if ferr != nil && backupErr == nil {
+			backupErr = fmt.Errorf("write a split record: %w", ferr)
+			stop()
+		}
+		return ferr
+	}}
 	var tail tailFile
 	var tailErr error
 	// lost names the row whose tail line failed: OnRow runs after the row was
@@ -232,10 +247,17 @@ func reconcileInstrumentalTitles(ctx context.Context, out io.Writer, args ScanRe
 	if mode == config.InstrumentalTitleOff {
 		_, _ = fmt.Fprintln(out, "the mode is off: --yes is refused until it is on")
 	}
-	res, runErr := titlerepair.New(sqlDB, slog.Default()).Run(ctx, opts)
+	repairer := titlerepair.New(sqlDB, slog.Default())
+	// The split comes first, so every row the cull reaches has its own edition.
+	sres, runErr := repairer.Split(ctx, split)
+	var res titlerepair.Result
+	if runErr == nil {
+		res, runErr = repairer.Run(ctx, opts)
+	}
 	if tail != nil && tailErr == nil {
 		tailErr = tail.Sync()
 	}
+	printSplit(out, sres, args.Yes)
 	printTitleRepair(out, res, args.Yes)
 	if args.Yes && bk.Opened() {
 		_, _ = fmt.Fprintf(out, "backup: %s\n", args.Backup)
@@ -244,6 +266,9 @@ func reconcileInstrumentalTitles(ctx context.Context, out io.Writer, args ScanRe
 		_, _ = fmt.Fprintf(out, "row dispositions: %s\n", tailPath)
 	}
 	code := titleRepairExit(out, res)
+	if sres.Errors > 0 {
+		code = 1
+	}
 	if backupErr != nil {
 		// LazyBackupFile and AppendBackup strip the path from their errors.
 		slog.Error("failed to write the --backup file", "error", backupErr)
@@ -315,7 +340,7 @@ func printTitleRepair(out io.Writer, res titlerepair.Result, applied bool) {
 	line("strong, skipped, in flight", res.InFlight)
 	line("strong, skipped, hand-marked", res.HandMarked)
 	line("strong, skipped, artist before the dash or no artist known", res.ArtistPrefixed)
-	line("strong, skipped, by album (not repaired yet)", res.ByAlbum)
+	line("strong, skipped, by album, not the release's own row", res.ByAlbum)
 	line("candidates", res.Candidates)
 	line("skipped, symlinked lyric file", res.Symlink)
 	line("skipped, outside library roots", res.OutsideRoots)
@@ -336,4 +361,25 @@ func printTitleRepair(out io.Writer, res titlerepair.Result, applied bool) {
 	line("new blocks", res.NewBlocks)
 	line("cache entries invalidated", res.CacheInvalidated)
 	line("rows reopened", res.Reopened)
+}
+
+// printSplit prints the counts of the split, aggregate only. The rows line is
+// the sum of the split line and the four after it.
+func printSplit(out io.Writer, res titlerepair.SplitResult, applied bool) {
+	line := func(label string, n int) { _, _ = fmt.Fprintf(out, "%s: %d\n", label, n) }
+	line("legacy rows shared by two editions or on an instrumental release", res.Rows)
+	verb := "would be "
+	if applied {
+		verb = ""
+	}
+	line("rows "+verb+"split", res.Split)
+	line("split skipped, in flight", res.InFlight)
+	line("split skipped, an output in the other edition's folder", res.BothFolders)
+	line("split skipped, an instrumental row with the same keys exists", res.Collision)
+	line("split errors", res.Errors)
+	line("rows "+verb+"re-keyed as instrumental", res.ReKeyed)
+	line("scan results "+verb+"detached", res.Detached)
+	if applied {
+		line("scan results returned to pending", res.Pending)
+	}
 }

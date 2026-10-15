@@ -8,15 +8,24 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sydlexius/canticle/internal/cache"
 	"github.com/sydlexius/canticle/internal/dbtest"
 	it "github.com/sydlexius/canticle/internal/instrumentaltitle"
+	"github.com/sydlexius/canticle/internal/lyricblock"
 	"github.com/sydlexius/canticle/internal/lyrics"
+	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/normalize"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/scan"
+	"github.com/sydlexius/canticle/internal/worker"
 )
 
 // strongTitle is a bracketed Strong title: actionable with any artist.
@@ -178,8 +187,11 @@ func TestClassificationCounts(t *testing.T) {
 // A plain title on an instrumental release is Strong by album, counted from the
 // row's stored album and artists: no audio file is read for it. It is counted
 // apart from the Strong rows by title, the two sum to Strong, and it leaves the
-// Weak rows. This version hands it to no cull: its row may be shared with a
-// sung twin (#1525). A held row is still counted in flight first.
+// Weak rows. It reaches the cull only as the release's own row: edition
+// instrumental (0), or in a dry run a row the split would re-key (1), and with
+// the audio file's album still naming the release (9 withdraws it, 10 is
+// unreadable). Under Apply an empty edition is a row the split left shared. A
+// held row is still counted in flight first.
 func TestStrongByAlbumIsCountedApart(t *testing.T) {
 	const release = "Low Tide (Instrumental)"
 	d := dbtest.Open(t)
@@ -192,27 +204,47 @@ func TestStrongByAlbumIsCountedApart(t *testing.T) {
 		wq{title: "Quiet Shelf", album: release, artist: "Copper Finch feat. Wren"},   // a guest credit
 		wq{title: "Quiet Shelf", album: "Low Tide - Instrumental", artist: "Various"}, // dash form, no real artist
 		wq{title: "Quiet Shelf (Piano Version)", album: "Low Tide"},                   // weak by its title alone
-		wq{}, // strong by its title
+		wq{},                                     // strong by its title
+		wq{title: "Quiet Shelf", album: release}, // its file names the sung album
+		wq{title: "Quiet Shelf", album: release}, // its file cannot be read
 	)
-	reads := 0
-	res, seen := run(t, d, Options{FileAlbum: func(string) (string, error) {
-		reads++ // the by-title row reads its file; a by-album row must not
+	for _, i := range []int{0, 9, 10} {
+		if _, err := d.Exec(`UPDATE work_queue SET edition = 'instrumental' WHERE id = ?`, ids[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var read []string
+	fileAlbum := func(path string) (string, error) {
+		read = append(read, path)
+		switch path {
+		case "/shelf/9.flac":
+			return "Low Tide", nil
+		case "/shelf/10.flac":
+			return "", errors.New("read failed")
+		}
 		return "", nil
-	}})
-	if reads != 1 {
-		t.Errorf("%d audio files read, want the by-title row's alone", reads)
 	}
-	if res.Strong != 4 || res.StrongByTitle != 1 || res.StrongByAlbum != 3 || res.ByAlbum != 2 || res.InFlight != 1 ||
-		res.Candidates != 1 || res.Weak != 5 || res.WeakAlbumInstrumental != 4 {
-		t.Errorf("strong %d (by title %d, by album %d), by-album skips %d, in flight %d, candidates %d, weak %d, weak album %d; want 4 (1, 3), 2, 1, 1, 5, 4",
-			res.Strong, res.StrongByTitle, res.StrongByAlbum, res.ByAlbum, res.InFlight, res.Candidates, res.Weak, res.WeakAlbumInstrumental)
+	res, seen := run(t, d, Options{FileAlbum: fileAlbum})
+	if got := strings.Join(read, " "); got != "/shelf/0.flac /shelf/1.flac /shelf/8.flac /shelf/9.flac /shelf/10.flac" {
+		t.Errorf("audio files read: %s; want the by-title row's and the release rows' the cull may reach", got)
 	}
-	if got := res.StrongBy[StrongKey{it.FamilyInstrumental, it.PositionRelease}]; got != 3 {
-		t.Errorf("StrongBy release = %d, want 3", got)
+	if res.Strong != 6 || res.StrongByTitle != 1 || res.StrongByAlbum != 5 || res.ByAlbum != 1 || res.InFlight != 1 || res.Unreadable != 1 ||
+		res.Candidates != 3 || res.Weak != 5 || res.WeakAlbumInstrumental != 4 {
+		t.Errorf("strong %d (by title %d, by album %d), by-album skips %d, in flight %d, unreadable %d, candidates %d, weak %d, weak album %d; want 6 (1, 5), 1, 1, 1, 3, 5, 4",
+			res.Strong, res.StrongByTitle, res.StrongByAlbum, res.ByAlbum, res.InFlight, res.Unreadable, res.Candidates, res.Weak, res.WeakAlbumInstrumental)
 	}
-	want := map[int64]string{ids[0]: DispositionByAlbum, ids[1]: DispositionByAlbum, ids[2]: DispositionInFlight, ids[8]: DispositionOutsideRoots}
+	if got := res.StrongBy[StrongKey{it.FamilyInstrumental, it.PositionRelease}]; got != 5 {
+		t.Errorf("StrongBy release = %d, want 5", got)
+	}
+	// No root is named, so the cull refuses each candidate.
+	want := map[int64]string{ids[0]: DispositionOutsideRoots, ids[1]: DispositionOutsideRoots, ids[2]: DispositionInFlight,
+		ids[8]: DispositionOutsideRoots, ids[9]: DispositionByAlbum, ids[10]: DispositionUnreadable}
 	if !maps.Equal(seen, want) {
-		t.Errorf("dispositions = %v, want %v", seen, want)
+		t.Errorf("dry run dispositions = %v, want %v", seen, want)
+	}
+	_, seen = run(t, d, Options{FileAlbum: fileAlbum, Apply: true, Report: func(lyricblock.Backup) error { return nil }})
+	if want[ids[1]] = DispositionByAlbum; !maps.Equal(seen, want) {
+		t.Errorf("apply dispositions = %v, want %v", seen, want)
 	}
 }
 
@@ -392,5 +424,124 @@ func TestSelectorWalksRowid(t *testing.T) {
 		if got := strings.Join(plan, " | "); !strings.Contains(got, "SEARCH work_queue USING INTEGER PRIMARY KEY (rowid>?)") || strings.Contains(got, "TEMP B-TREE") {
 			t.Errorf("%s: plan %q, want a rowid walk of work_queue and no temp b-tree", name, got)
 		}
+	}
+}
+
+// sungLane answers every track with the shelf's words, as a provider would for
+// the sung copy.
+type sungLane struct{}
+
+func (sungLane) FindLyrics(_ context.Context, tr models.Track) (models.Song, error) {
+	return models.Song{Track: tr, Lyrics: models.Lyrics{LyricsBody: plainWords}}, nil
+}
+
+// The album cull end to end (#1564). A legacy row settled with the sung words
+// for the release copy, linked to both copies, its words cached. The split
+// re-keys it; the cull backs the file up, removes it, drops the cache entry and
+// reopens the row, adding no block, for a file that appears mid-cull too.
+// Then a scan and one worker pass give the sung copy its own row and write its
+// words: nothing blocks them. A second pass hands the reopened row to the
+// worker's title gate (#1562), which settles it on the album verdict and
+// writes the title-rule marker beside the release copy.
+func TestAlbumCullAddsNoBlockAndFreesTheSungTwin(t *testing.T) {
+	const title, release = "Quiet Shelf", "Low Tide (Instrumental)"
+	ctx := context.Background()
+	s := newShelf(t)
+	music, sungDir := filepath.Join(s.base, "music"), filepath.Join(s.base, "music", "sung")
+	if err := os.MkdirAll(sungDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.exec(t, `INSERT INTO libraries (id, path, name) VALUES (1, ?, 'shelf')`, music)
+	keys := []any{normalize.NormalizeKey(shelfArtist), normalize.NormalizeKey(title)}
+	row := s.get(t, `INSERT INTO work_queue (artist, title, album, artist_key, title_key, outdir, filename, source_path, status, outcome_type, provider_lane, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'a.flac', ?, 'done', 'synced', ?, ?) RETURNING id`, shelfArtist, title, release, keys[0], keys[1], s.dir,
+		filepath.Join(s.dir, "a.flac"), providers.Musixmatch, settled.Format(time.RFC3339))
+	for _, c := range []struct{ album, dir string }{{release, s.dir}, {"Low Tide", sungDir}} {
+		sr := s.get(t, `INSERT INTO scan_results (library_id, file_path, artist, title, album, artist_key, title_key, outdir, filename, status)
+			VALUES (1, ?, ?, ?, ?, ?, ?, ?, 'a.flac', 'processing') RETURNING id`, filepath.Join(c.dir, "a.flac"), shelfArtist, title, c.album, keys[0], keys[1], c.dir)
+		s.exec(t, `INSERT INTO work_queue_scan_results (work_queue_id, scan_result_id) VALUES (?, ?)`, row, sr)
+	}
+	lrc := filepath.Join(s.dir, "a.lrc")
+	put(t, lrc, lrcBody, 0)
+	put(t, filepath.Join(s.dir, "a.flac"), "", 0) // the audio file: a release row is culled only while it exists
+	s.cacheWords(t, shelfArtist, title)
+
+	if sres, err := New(s.d, nil).Split(ctx, SplitOptions{Apply: true, Report: func(SplitRecord) error { return nil }}); err != nil || sres.ReKeyed != 1 || sres.Pending != 1 {
+		t.Fatalf("split: %+v, %v; want the row re-keyed and the sung copy pending", sres, err)
+	}
+	var backed []lyricblock.Backup
+	late := filepath.Join(s.dir, "a.txt") // other words, in the window
+	res, _ := run(t, s.d, s.opts(true, func(b lyricblock.Backup) error {
+		if backed = append(backed, b); !exists(late) {
+			put(t, late, "Quorble zint\n", 0)
+		}
+		return nil
+	}))
+	if res.Repaired != 1 || res.Removed != 2 || res.NewBlocks != 0 || res.CacheInvalidated != 1 || res.Reopened != 1 {
+		t.Errorf("cull: %+v; want one row repaired, two files removed and no block", res)
+	}
+	if len(backed) != 2 || backed[0].Path != lrc || string(backed[0].Content) != lrcBody || backed[1].Path != late {
+		t.Errorf("backup = %+v; want the removed files' bytes", backed)
+	}
+	if got := s.get(t, `SELECT status || '|' || edition || '|' || (SELECT COUNT(*) FROM lyric_blocks) || '|' || (SELECT COUNT(*) FROM lyrics_cache)
+		FROM work_queue WHERE id = ?`, row); exists(lrc) || exists(late) || got != "pending|instrumental|0|0" {
+		t.Errorf("after the cull: file exists %v, row %s; want it gone and pending|instrumental|0|0", exists(lrc), got)
+	}
+
+	q := queue.NewDBQueue(s.d)
+	q.SetEditionRule(queue.ReleaseEdition) // as serve and the scheduler set it under a title mode other than off
+	e := scan.Enqueuer{Results: scan.New(s.d), Cache: cache.New(s.d), Queue: q, Priority: 5, Blocks: lyricblock.NewStore(s.d, nil)}
+	if enq, hits, err := e.EnqueuePending(ctx, models.Library{ID: 1}); err != nil || enq != 1 || hits != 0 {
+		t.Fatalf("scan: enqueued %d, cache hits %d, %v; want the sung copy enqueued", enq, hits, err)
+	}
+	// The sung copy's row outranks the reopened one.
+	w := worker.New(q, cache.New(s.d), sungLane{}, lyrics.NewLRCWriter(music))
+	w.SetTitleRule(true)
+	w.SetBlockChecker(lyricblock.NewStore(s.d, nil))
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(sungDir, "a.txt")); err != nil || !strings.Contains(string(b), "Zorp the blent") {
+		t.Errorf("the sung copy's lyric = %q, %v; want its words written", b, err)
+	}
+	if got := s.get(t, `SELECT group_concat(edition || ':' || status || ':' || COALESCE(outcome_type, 'null'), ',') FROM (SELECT * FROM work_queue ORDER BY id)`); got != "instrumental:pending:null,:done:unsynced" {
+		t.Errorf("rows = %s; want the release row waiting and the sung row settled with its words", got)
+	}
+
+	s.exec(t, `UPDATE work_queue SET next_attempt_at = '2000-01-01T00:00:00Z' WHERE id = ?`, row)
+	if err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce (release row): %v", err)
+	}
+	if b, err := os.ReadFile(late); err != nil || exists(lrc) || !strings.Contains(string(b), "[source:title-rule]") || !strings.Contains(string(b), lyrics.InstrumentalMarker) {
+		t.Errorf("the release copy's sidecar = %q, %v; want the title-rule marker", b, err)
+	}
+	if got := s.get(t, `SELECT status || '|' || (SELECT COUNT(*) FROM lyric_blocks) FROM work_queue WHERE id = ?`, row); got != "done|0" {
+		t.Errorf("release row = %s; want it settled by the gate with no block", got)
+	}
+}
+
+// A cull of a row strong by album interrupted between the unlink and the
+// reopen leaves it settled, recording a lyric file with none on disk and no
+// block to prove it: a rerun finishes it (#1564). The control, strong by its
+// own title in the same state with no block, is still no file. So is a release
+// row whose audio file is gone too (a deleted track), with no reader to fail:
+// it is skipped as unreadable, never reopened for a marker.
+func TestInterruptedAlbumCullFinishesOnARerun(t *testing.T) {
+	s := newShelf(t)
+	const release = `album = 'Low Tide (Instrumental)', edition = 'instrumental'`
+	album := s.row(t, `title = 'Quiet Shelf', title_key = 'quiet shelf', `+release)
+	control := s.row(t, "")
+	gone := s.row(t, `title = 'Still Shelf', title_key = 'still shelf', `+release)
+	s.exec(t, `UPDATE work_queue SET source_path = ? WHERE id = ?`, filepath.Join(s.dir, "gone.flac"), gone.id)
+	res, seen := run(t, s.d, s.opts(true, func(lyricblock.Backup) error { return nil }))
+	if seen[album.id] != DispositionRepaired || seen[control.id] != DispositionNoFile || seen[gone.id] != DispositionUnreadable ||
+		res.Reopened != 1 || res.Removed != 0 || res.NewBlocks != 0 || res.Unreadable != 1 {
+		t.Errorf("rerun: %+v, %v; want the album row finished, the control no file and the deleted track unreadable", res, seen)
+	}
+	if got := s.rowState(t, album.id); got != "pending|null|null|0" {
+		t.Errorf("album row = %s, want pending|null|null|0", got)
+	}
+	if got := s.rowState(t, gone.id); got != "done|musixmatch|synced|0" {
+		t.Errorf("deleted track's row = %s, want it left settled", got)
 	}
 }

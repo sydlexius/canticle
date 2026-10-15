@@ -107,6 +107,13 @@ type MarkRequest struct {
 	// A rerun with the same deterministic Vet refuses again, so the caller must
 	// report it as needing a manual mark-wrong, not as retryable.
 	Vet func([]Backup) error
+	// NoBlock removes and reopens without adding a block: the backup, the cache
+	// invalidation and the order are unchanged. For a row whose keys a sung
+	// twin shares (#1564), where a block would refuse the twin's lyrics too.
+	// With no block to prove an interrupted mark, the no-file branch reopens on
+	// the row's own record alone (settled, still recording a file, none on
+	// disk), so the caller must use it only for a row it would cull anyway.
+	NoBlock bool
 }
 
 // MarkResult holds counts only. Files is the number of lyric files found (and,
@@ -202,7 +209,10 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 		// (Mark clears outcome_type only in the reopen), and the identity is blocked.
 		// A block alone is not proof: blocks outlive rows, and a row that settled
 		// with no file (a miss, blocked, instrumental) is ErrNoSidecar.
-		blocked, berr := s.anyBlocked(ctx, t)
+		blocked, berr := req.NoBlock, error(nil)
+		if !blocked {
+			blocked, berr = s.anyBlocked(ctx, t)
+		}
 		if berr != nil {
 			return MarkResult{}, berr
 		}
@@ -238,9 +248,13 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 		return MarkResult{}, fmt.Errorf("lyricblock: backup for work item %d failed, nothing changed: %w", id, rerr)
 	}
 	var res MarkResult
+	toBlock := fps
+	if req.NoBlock {
+		toBlock = nil // the transaction still clears the edit marks and the cache
+	}
 	err = dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
 		var terr error
-		res, terr = s.block(ctx, id, t, fps, true, req.RefuseHandEdited)
+		res, terr = s.block(ctx, id, t, toBlock, true, req.RefuseHandEdited)
 		return terr
 	})
 	if err != nil {
@@ -263,7 +277,7 @@ func (s *Service) Mark(ctx context.Context, req MarkRequest) (MarkResult, error)
 	if rerr != nil {
 		return res, fmt.Errorf("lyricblock: work item %d is blocked but a file could not be backed up and nothing was removed; retry the mark: %w", id, rerr)
 	}
-	if extra := newFingerprints(lateRecs, fps); len(extra) > 0 {
+	if extra := newFingerprints(lateRecs, fps); len(extra) > 0 && !req.NoBlock {
 		var more MarkResult
 		err = dbpkg.RetryOnBusy(ctx, busyAttempts, func() error {
 			var terr error

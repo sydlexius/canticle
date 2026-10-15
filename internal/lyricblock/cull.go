@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -67,19 +68,31 @@ type Backup struct {
 
 // AppendBackup writes b to f as one JSON line and fsyncs it, so the record is
 // durable before the removal it protects. It is the body of a caller's Report.
-func AppendBackup(f *os.File, b Backup) error {
-	line, err := json.Marshal(b)
+func AppendBackup(f *os.File, b Backup) error { return AppendJSONL(f, b) }
+
+// AppendJSONL writes v to f as one JSON line, fsyncs f, then fsyncs f's
+// directory so a newly created file's name survives a crash too. Any failure,
+// a short write included, is returned so the caller's change can fail closed;
+// no error carries a path (private library metadata).
+func AppendJSONL(f *os.File, v any) error {
+	line, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("lyricblock: marshal backup record: %w", err)
 	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	line = append(line, '\n')
+	if n, err := f.Write(line); err != nil {
 		return fmt.Errorf("lyricblock: write backup record: %w", stripPath(err))
+	} else if n != len(line) {
+		return fmt.Errorf("lyricblock: write backup record: %w", io.ErrShortWrite)
 	}
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("lyricblock: sync backup record: %w", stripPath(err))
 	}
-	// A file fsync does not persist a newly created directory entry; sync the
-	// containing directory so the backup's name survives a crash too.
+	return syncDir(f)
+}
+
+// syncDir fsyncs the directory holding f, so f's entry in it is durable.
+func syncDir(f *os.File) error {
 	d, err := os.Open(filepath.Dir(f.Name()))
 	if err != nil {
 		return fmt.Errorf("lyricblock: open backup directory: %w", stripPath(err))

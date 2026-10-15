@@ -33,11 +33,12 @@ var (
 
 // cull hands one candidate to Mark (a dry run unless o.Apply), counts the
 // outcome and returns the row's disposition and the files Mark read for it.
-func (r *Repairer) cull(ctx context.Context, c candidate, o Options, res *Result) (string, []string) {
+// noBlock culls a row Strong by album with no block (MarkRequest.NoBlock).
+func (r *Repairer) cull(ctx context.Context, c candidate, o Options, res *Result, noBlock bool) (string, []string) {
 	var files []string
 	mr, err := r.svc.Mark(ctx, lyricblock.MarkRequest{
 		WorkItemID: c.id, Roots: o.Roots, DryRun: !o.Apply, Report: o.Report, Op: opName,
-		RefuseHandEdited: true, RequireEmptyStem: true,
+		RefuseHandEdited: true, RequireEmptyStem: true, NoBlock: noBlock,
 		Vet: func(recs []lyricblock.Backup) error {
 			for _, b := range recs {
 				if !slices.Contains(files, b.Path) {
