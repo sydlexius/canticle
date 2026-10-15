@@ -419,7 +419,7 @@ func (r *Revalidator) judgeCandidate(ctx context.Context, c Candidate, plan *Pla
 	//
 	// DISOWNING THE ROW INSTEAD WOULD BE WORSE THAN THE BUG IT FIXED, and that is
 	// not hypothetical: it shipped in the previous revision. work_queue is unique
-	// on (artist_key, title_key), NOT on source_path, so two copies of one track
+	// on (artist_key, title_key, edition), NOT on source_path, so two copies of one track
 	// collapse to ONE row -- and if that row names the copy the resolver did not
 	// pick, disowning it means the sidecar is judged by NOBODY. The row retires,
 	// the owner has no row of its own, and a lyric belonging to a different song
