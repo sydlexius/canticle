@@ -105,7 +105,8 @@ func runLog(t *testing.T, d *sql.DB, o Options, log *slog.Logger) (Result, map[i
 		t.Fatalf("Run: %v", err)
 	}
 	if res.Examined != res.NoSignal+res.Weak+res.Strong || len(seen) != res.Strong ||
-		res.Strong != res.Unreadable+res.InFlight+res.HandMarked+res.ArtistPrefixed+res.Candidates ||
+		res.Strong != res.Unreadable+res.InFlight+res.HandMarked+res.ArtistPrefixed+res.ByAlbum+res.Candidates ||
+		res.Strong != res.StrongByTitle+res.StrongByAlbum ||
 		res.Candidates != res.Symlink+res.OutsideRoots+res.StemOccupied+res.NoFile+res.SourceDisagrees+
 			res.NotProvable+res.NeedsManualMark+res.Errors+res.WouldRepair+res.Repaired {
 		t.Errorf("the counts do not add up: %+v, %d rows reported", res, len(seen))
@@ -150,14 +151,14 @@ func TestClassificationCounts(t *testing.T) {
 	)
 	res, seen := run(t, d, Options{})
 	want := Result{
-		Examined: 11, NoSignal: 4, Weak: 3, Strong: 4, Candidates: 4, OutsideRoots: 4, // no root is named
+		Examined: 11, NoSignal: 4, Weak: 3, Strong: 4, StrongByTitle: 4, Candidates: 4, OutsideRoots: 4, // no root is named
 		StrongBy: map[StrongKey]int{
 			{it.FamilyInstrumental, it.PositionBracket}: 3,
 			{it.FamilyOffVocal, it.PositionSuffix}:      1,
 		},
 		DetectorInstrumental: 2, DetectorNotInstrumental: 1, DetectorUnscored: 1,
 		WeakDetectorInstrumental: 1, WeakDetectorNotInstrumental: 1, WeakDetectorUnscored: 1,
-		WeakAlbumInstrumental: 1, // the bare album word: the upper bound counts it, the lower does not
+		WeakAlbumInstrumental: 1, // the bare album word: the release rule declines it
 	}
 	if sum := res.WeakDetectorInstrumental + res.WeakDetectorNotInstrumental + res.WeakDetectorUnscored; sum != res.Weak {
 		t.Errorf("weak detector split sums to %d, want Weak %d", sum, res.Weak)
@@ -174,14 +175,15 @@ func TestClassificationCounts(t *testing.T) {
 	}
 }
 
-// A plain title on an instrumental release is counted from the row's stored
-// album and artists, and that is all: the row keeps the Weak album verdict it
-// always had, is no candidate, and no audio file is read for the count. It is
-// a lower bound; the Weak rows whose album carries the word are the upper one.
-func TestInstrumentalReleaseIsCountedOnly(t *testing.T) {
+// A plain title on an instrumental release is Strong by album, counted from the
+// row's stored album and artists: no audio file is read for it. It is counted
+// apart from the Strong rows by title, the two sum to Strong, and it leaves the
+// Weak rows. This version hands it to no cull: its row may be shared with a
+// sung twin (#1525). A held row is still counted in flight first.
+func TestStrongByAlbumIsCountedApart(t *testing.T) {
 	const release = "Low Tide (Instrumental)"
 	d := dbtest.Open(t)
-	seed(t, d,
+	ids := seed(t, d,
 		wq{title: "Quiet Shelf", album: release},
 		wq{title: "Quiet Shelf", album: "Low Tide - Instrumentals", artist: "Copper Finch Trio"},
 		wq{title: "Quiet Shelf", album: release, status: "processing"},
@@ -190,19 +192,27 @@ func TestInstrumentalReleaseIsCountedOnly(t *testing.T) {
 		wq{title: "Quiet Shelf", album: release, artist: "Copper Finch feat. Wren"},   // a guest credit
 		wq{title: "Quiet Shelf", album: "Low Tide - Instrumental", artist: "Various"}, // dash form, no real artist
 		wq{title: "Quiet Shelf (Piano Version)", album: "Low Tide"},                   // weak by its title alone
+		wq{}, // strong by its title
 	)
+	reads := 0
 	res, seen := run(t, d, Options{FileAlbum: func(string) (string, error) {
-		t.Error("an audio file was read: the release count must use the stored album only")
+		reads++ // the by-title row reads its file; a by-album row must not
 		return "", nil
 	}})
-	if res.InstrumentalRelease != 3 || res.WeakAlbumInstrumental != 7 || res.Examined != 8 || res.Weak != 8 ||
-		res.Strong != 0 || res.Candidates != 0 || len(seen) != 0 {
-		t.Errorf("instrumental release %d, weak album instrumental %d, examined %d, weak %d, strong %d, candidates %d, rows reported %d; want 3, 7, 8, 8, 0, 0, 0",
-			res.InstrumentalRelease, res.WeakAlbumInstrumental, res.Examined, res.Weak, res.Strong, res.Candidates, len(seen))
+	if reads != 1 {
+		t.Errorf("%d audio files read, want the by-title row's alone", reads)
 	}
-	if res.InstrumentalRelease > res.WeakAlbumInstrumental || res.WeakAlbumInstrumental > res.Weak {
-		t.Errorf("lower bound %d, upper bound %d, weak %d; want lower <= upper <= weak",
-			res.InstrumentalRelease, res.WeakAlbumInstrumental, res.Weak)
+	if res.Strong != 4 || res.StrongByTitle != 1 || res.StrongByAlbum != 3 || res.ByAlbum != 2 || res.InFlight != 1 ||
+		res.Candidates != 1 || res.Weak != 5 || res.WeakAlbumInstrumental != 4 {
+		t.Errorf("strong %d (by title %d, by album %d), by-album skips %d, in flight %d, candidates %d, weak %d, weak album %d; want 4 (1, 3), 2, 1, 1, 5, 4",
+			res.Strong, res.StrongByTitle, res.StrongByAlbum, res.ByAlbum, res.InFlight, res.Candidates, res.Weak, res.WeakAlbumInstrumental)
+	}
+	if got := res.StrongBy[StrongKey{it.FamilyInstrumental, it.PositionRelease}]; got != 3 {
+		t.Errorf("StrongBy release = %d, want 3", got)
+	}
+	want := map[int64]string{ids[0]: DispositionByAlbum, ids[1]: DispositionByAlbum, ids[2]: DispositionInFlight, ids[8]: DispositionOutsideRoots}
+	if !maps.Equal(seen, want) {
+		t.Errorf("dispositions = %v, want %v", seen, want)
 	}
 }
 

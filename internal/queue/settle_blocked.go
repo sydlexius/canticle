@@ -111,27 +111,50 @@ func (q *DBQueue) settleBlockedOnce(ctx context.Context, id int64) (SettleOutcom
 	return Settled, nil
 }
 
-// ReopenBlockedTx reopens the settled row stored under (artistKey, titleKey) to
-// 'pending' inside the caller's transaction, but only while it is still
+// ReopenBlockedTx reopens every settled row stored under (artistKey, titleKey)
+// to 'pending' inside the caller's transaction, but only while it is still
 // outcome_type='blocked': a row since settled by a real result is left alone.
 // It is the reopen for clearing a block (#1397); the clear and the reopen
-// should share one transaction. Reports whether a row was reopened. It reuses
+// should share one transaction. Reports how many rows were reopened. It reuses
 // ReopenDoneRowTx, so every settle column is cleared with the label. A manually
 // marked row carries outcome_type='instrumental', so it never matches the
 // blocked lookup here; the manual-mark protection that matters is
 // ReopenDoneRowTx's own manual_instrumental_at guard.
-func ReopenBlockedTx(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, now time.Time) (bool, error) {
-	var id int64
-	err := tx.QueryRowContext(ctx,
+//
+// The keys can hold one row per edition (#1561), and a lyric block keeps its
+// two-column key, so a block settled every edition's row it applied to: the
+// unblock that clears it reopens each of them.
+func ReopenBlockedTx(ctx context.Context, tx *sql.Tx, artistKey, titleKey string, now time.Time) (int, error) {
+	rows, err := tx.QueryContext(ctx,
 		`SELECT id FROM work_queue
-         WHERE artist_key = ? AND title_key = ? AND status = 'done' AND outcome_type = ?`,
+         WHERE artist_key = ? AND title_key = ? AND status = 'done' AND outcome_type = ?
+         ORDER BY id`,
 		artistKey, titleKey, OutcomeBlocked,
-	).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	)
 	if err != nil {
-		return false, fmt.Errorf("queue: find blocked row: %w", err)
+		return 0, fmt.Errorf("queue: find blocked rows: %w", err)
 	}
-	return ReopenDoneRowTx(ctx, tx, id, now)
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("queue: scan blocked row: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return 0, fmt.Errorf("queue: read blocked rows: %w", err)
+	}
+	reopened := 0
+	for _, id := range ids { // write only after the cursor is closed
+		ok, err := ReopenDoneRowTx(ctx, tx, id, now)
+		if err != nil {
+			return reopened, err
+		}
+		if ok {
+			reopened++
+		}
+	}
+	return reopened, nil
 }

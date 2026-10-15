@@ -32,6 +32,9 @@ const (
 	DispositionInFlight       = "in-flight"
 	DispositionHandMarked     = "hand-marked"
 	DispositionArtistPrefixed = "artist-prefixed"
+	// ByAlbum: Strong by the album alone (PositionRelease). Its row may be shared
+	// with a sung twin, so this version counts it and does not repair it (#1525).
+	DispositionByAlbum = "by-album"
 	// A candidate's outcome. WouldRepair is the dry run's Repaired.
 	DispositionSymlink         = "symlink"
 	DispositionOutsideRoots    = "outside-roots"
@@ -84,9 +87,10 @@ type StrongKey struct {
 }
 
 // Result is the count of one Run. Examined = NoSignal + Weak + Strong,
-// Strong = Unreadable + InFlight + HandMarked + ArtistPrefixed + Candidates, and
-// Candidates = Symlink + OutsideRoots + StemOccupied + NoFile + SourceDisagrees +
-// NotProvable + NeedsManualMark + Errors + WouldRepair + Repaired.
+// Strong = StrongByTitle + StrongByAlbum = Unreadable + InFlight + HandMarked +
+// ArtistPrefixed + ByAlbum + Candidates, and Candidates = Symlink +
+// OutsideRoots + StemOccupied + NoFile + SourceDisagrees + NotProvable +
+// NeedsManualMark + Errors + WouldRepair + Repaired.
 type Result struct {
 	Examined int
 	// NoSignal includes the excluded a cappella, karaoke and sing-along titles.
@@ -94,22 +98,24 @@ type Result struct {
 	Weak     int
 	Strong   int
 	StrongBy map[StrongKey]int
+	// StrongByAlbum: the Strong rows the album alone decides, a plain title on an
+	// instrumental release (instrumentaltitle.Settles, PositionRelease), from the
+	// stored album and artists. StrongByTitle: the rest.
+	StrongByTitle, StrongByAlbum int
 	// The detector's verdict on the Strong rows, from instrumental_result.
 	DetectorInstrumental, DetectorNotInstrumental, DetectorUnscored int
 	// The same split for the Weak rows, read from instrumental_result and never
 	// scored again. They sum to Weak, and inform whether a weak tier is worth building.
 	WeakDetectorInstrumental, WeakDetectorNotInstrumental, WeakDetectorUnscored int
 	// WeakAlbumInstrumental: the Weak rows whose verdict is the instrumental
-	// family in the album position, an upper bound on the instrumental releases.
-	// InstrumentalRelease: those of them that are a plain title on an
-	// instrumental release (instrumentaltitle.InstrumentalRelease) by their
-	// stored album and artists, a lower bound. So InstrumentalRelease <=
-	// WeakAlbumInstrumental <= Weak. Counts only: they change what happens to no row.
-	WeakAlbumInstrumental, InstrumentalRelease int
+	// family in the album position: an album naming the word that the release
+	// rule declined. Counts only.
+	WeakAlbumInstrumental int
 	// Unreadable: the file's album could not be read. InFlight: held by a worker.
 	// HandMarked: a hand edit or mark. ArtistPrefixed: the rule declines the title.
 	// InFlight and HandMarked include a row found so only when the cull reached it.
-	Unreadable, InFlight, HandMarked, ArtistPrefixed int
+	// ByAlbum: Strong by album and none of those, so not repaired yet (#1564).
+	Unreadable, InFlight, HandMarked, ArtistPrefixed, ByAlbum int
 	// Candidates are the rows handed to the cull that it did not find in flight or
 	// hand-marked. Each lands in exactly one of the counters below.
 	Candidates int
@@ -240,10 +246,11 @@ func (r *Repairer) page(ctx context.Context, libraryID *int64, after int64) ([]c
 }
 
 // classify counts one row and hands a candidate to the cull. It decides on
-// Actionable's ok alone; the verdict is for the breakdown.
+// Settles' ok alone, which for a verdict from the title is Actionable's; the
+// verdict is for the breakdown.
 func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Result) {
 	res.Examined++
-	v, ok := instrumentaltitle.Actionable(c.title, c.album, c.artist, c.albumArtist)
+	v, ok := instrumentaltitle.Settles(c.title, c.album, c.artist, c.albumArtist)
 	// The worker replaces the row's album with the audio file's where the file
 	// has one. An album only withdraws a Strong verdict (a karaoke album), so
 	// only a title that is Strong alone costs a read. The path test is the worker's.
@@ -255,7 +262,7 @@ func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Re
 			r.log.Warn("titlerepair: audio file album unreadable, row skipped", "id", c.id)
 			v, ok, unreadable = alone, false, true
 		case album != "":
-			v, ok = instrumentaltitle.Actionable(c.title, album, c.artist, c.albumArtist)
+			v, ok = instrumentaltitle.Settles(c.title, album, c.artist, c.albumArtist)
 		}
 	}
 	switch v.Tier {
@@ -272,19 +279,20 @@ func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Re
 		default:
 			res.WeakDetectorNotInstrumental++
 		}
-		// Both counts use what the row stores: no audio file is read for them,
-		// and nothing acts on a release yet (#1525).
 		if v.Family == instrumentaltitle.FamilyInstrumental && v.Position == instrumentaltitle.PositionAlbum {
 			res.WeakAlbumInstrumental++
-			if instrumentaltitle.InstrumentalRelease(c.title, c.album, c.artist, c.albumArtist) {
-				res.InstrumentalRelease++
-			}
 		}
 		return
 	case instrumentaltitle.Strong:
 	}
 	res.Strong++
 	res.StrongBy[StrongKey{v.Family, v.Position}]++
+	byAlbum := v.Position == instrumentaltitle.PositionRelease
+	if byAlbum {
+		res.StrongByAlbum++
+	} else {
+		res.StrongByTitle++
+	}
 	switch {
 	case !c.detector.Valid:
 		res.DetectorUnscored++
@@ -307,6 +315,9 @@ func (r *Repairer) classify(ctx context.Context, c candidate, o Options, res *Re
 	case !ok:
 		res.ArtistPrefixed++
 		row.Disposition = DispositionArtistPrefixed
+	case byAlbum:
+		res.ByAlbum++
+		row.Disposition = DispositionByAlbum
 	default:
 		res.Candidates++
 		row.Disposition, row.Files = r.cull(ctx, c, o, res)
