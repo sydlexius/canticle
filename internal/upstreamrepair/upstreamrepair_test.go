@@ -21,7 +21,7 @@ const tagged = "[source:innertube]\n[upstream:lyricfind]\n[re:canticle]\n[00:01.
 
 // seed inserts n done innertube rows with a tagged sidecar each (when files)
 // and returns the queue and the backup path.
-func seed(t *testing.T, n int, files bool) (*queue.DBQueue, string) { //nolint:unparam // reason: files=false is exercised by the adapter tests that follow separately
+func seed(t *testing.T, n int, files bool) (*queue.DBQueue, string) { //nolint:unparam // reason: every call here passes files=true; the parameter is kept for the deferred adapter PR (#1550 adapter, blocked by #1614), whose test seeds rows with no sidecar
 	t.Helper()
 	ctx := context.Background()
 	sqlDB := dbtest.Open(t)
