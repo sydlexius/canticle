@@ -1,11 +1,12 @@
-// Package tierrepair holds the decision logic of the two sync-tier backfills,
-// `scan reconcile-sync-tier` (#1075) and `scan reconcile-remediated` (#1143):
-// which action a candidate row gets from the files on disk, the guarded apply
-// loop, and the write-ahead JSONL backup records. It takes a queue (an
-// interface) and a backup Sink instead of a config path, never opens a
-// database and never prints; the command keeps config loading, the database
-// open and the aggregate stdout, and a repair.Repair adapter wraps this
-// package for the web UI.
+// Package tierrepair holds the decision logic of `scan reconcile-sync-tier`
+// (#1075): which action a candidate row gets from the files on disk, the
+// guarded apply loop, and the write-ahead JSONL backup records. `scan
+// reconcile-remediated` (#1143) reuses ClassifySyncTier but keeps its own
+// planning and apply loop for now. The package takes a queue (an interface)
+// and a backup Sink instead of a config path, never opens a database and never
+// prints; the command keeps config loading, the database open and the
+// aggregate stdout. A repair.Repair adapter for the web UI is to wrap it
+// (#1546).
 //
 // Library paths, artists, titles and lyric lines never reach a count, a log
 // field, a backup record or an error. The one path an error may name is the
