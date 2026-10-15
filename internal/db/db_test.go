@@ -277,7 +277,7 @@ func TestOpen_WorkQueueBackoffMigration(t *testing.T) {
 
 	var unique int
 	row := sqlDB.QueryRowContext(ctx,
-		"SELECT [unique] FROM pragma_index_list('work_queue') WHERE name = 'idx_work_queue_artist_title_key'")
+		"SELECT [unique] FROM pragma_index_list('work_queue') WHERE name = 'idx_work_queue_identity'")
 	if err := row.Scan(&unique); err != nil {
 		t.Fatalf("query work queue dedupe index: %v", err)
 	}
