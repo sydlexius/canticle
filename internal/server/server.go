@@ -107,6 +107,7 @@ type Handler struct {
 	autoMaxConcurrent  int
 	autoBlocks         web.AutoBlocks
 	markDeps           *web.MarkDeps
+	repairDeps         *web.RepairDeps
 	settingsConfigPath string
 	settingsStore      secrets.Store
 	keyManager         web.KeyManager
@@ -355,6 +356,16 @@ func WithMarkActions(d web.MarkDeps) Option {
 	return func(h *Handler) { h.markDeps = &d }
 }
 
+// WithRepairs wires the operator repair routes (#1545). Meaningful only
+// alongside a mounted web UI; without it, or with a nil Registry or a nil
+// Runner interface, the routes answer 404. A typed-nil *repair.Runner stored
+// in Runner is NOT treated as absent (the interface is non-nil) and panics on
+// first use: to disable the routes, omit this option or pass a RepairDeps whose
+// Runner is the nil interface.
+func WithRepairs(d web.RepairDeps) Option {
+	return func(h *Handler) { h.repairDeps = &d }
+}
+
 // WithMusixmatchInactive marks the Musixmatch provider as token-less (#385) so
 // the mounted web UI renders the lyrics-disabled notice banner on every shell
 // page. Threaded from runServe. Meaningful only alongside a mounted web UI; with
@@ -420,6 +431,9 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 		}
 		if h.markDeps != nil {
 			h.webui.AttachMarkActions(*h.markDeps)
+		}
+		if h.repairDeps != nil {
+			h.webui.AttachRepairs(*h.repairDeps)
 		}
 		if h.previewFlacFFmpeg != "" {
 			h.webui.AttachPreviewFlacFallback(h.previewFlacFFmpeg)

@@ -1357,6 +1357,11 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// Closed once the one-time startup pass that rewrites lyric files has
 	// finished (#1138); handlers that would start a lyric writer wait on it.
 	backfillDone := make(chan struct{})
+	// Operator repairs (#1545): an empty registry and a runner, so the routes
+	// exist but nothing can run until a repair is registered. Serve shutdown
+	// cancels a live run.
+	repairs := newServeRepairs(serveRepairRegistry())
+	repairs.closeOnDone(runCtx, &wg)
 
 	handlerOpts := []server.Option{
 		server.WithReadiness(sqlDB),
@@ -1410,6 +1415,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			// writer that records its writes in the watcher's registry; backups go
 			// beside the database.
 			server.WithMarkActions(webMarkDeps(sqlDB, cfg.DB.Path, allowedRoots, selfWrites)),
+			repairs.option(cfg.DB.Path),
 			// Enable the settings write path (#288 Phase 2): writes go to the
 			// RESOLVED config file (never ""), and secret-field saves route to the
 			// encrypted store rather than the TOML.

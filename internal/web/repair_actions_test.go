@@ -66,6 +66,16 @@ func (f *fakeRepair) Run(ctx context.Context, o repair.Options) (repair.Result, 
 	return res, f.runErr
 }
 
+// waitCalls waits up to 5s for a call counter that the runner's goroutine
+// bumps to reach want.
+func waitCalls(t *testing.T, n *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for n.Load() < want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+}
+
 const repairTok = "7777777777777777777777777777777777777777777777777777777777777777"
 
 type repairRig struct {
@@ -229,6 +239,9 @@ func TestRepairStartWhileBusyIsRefused(t *testing.T) {
 		!strings.Contains(rec.Body.String(), "Another repair is already running") {
 		t.Errorf("busy start = %d %q %q, want a plain 409", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
 	}
+	// Run is called on the runner's goroutine, so the start's 303 can land
+	// before fix-a's call is counted: wait for it rather than read it once.
+	waitCalls(t, &g.a.calls, 1)
 	if g.b.calls.Load() != 0 || g.a.calls.Load() != 1 {
 		t.Errorf("runs: fix-a %d, fix-b %d, want 1 and 0", g.a.calls.Load(), g.b.calls.Load())
 	}
