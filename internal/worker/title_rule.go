@@ -28,20 +28,38 @@ type absentOnlyWriter interface {
 }
 
 // titleRuleSettles reports whether the rule settles this row as instrumental:
-// the rule is on and instrumentaltitle.Actionable says the title may be acted
-// on (Strong, and for a dash-suffix the text before the separator is known not
-// to be the track's artist). The artists handed over are the row's own tags,
-// which between them hold the resolved name RunOnce put in track.ArtistName.
-// The album is the refreshed one, so a caller outside the worker (the bulk
-// repair, #1470) agrees with this gate only if it passes the same album.
+// the rule is on and instrumentaltitle.Settles says the track may be acted on.
+// The artists handed over are the row's own tags, which between them hold the
+// resolved name RunOnce put in track.ArtistName. The album is the refreshed
+// one, so a caller outside the worker (the bulk repair, #1470) agrees with this
+// gate only if it passes the same album.
+//
+// A verdict from the title (Actionable's) settles any row. The album-level
+// verdict (PositionRelease) settles only an instrumental-edition row (#1562):
+// the row's edition says the copy was an instrumental release's when it was
+// enqueued, and the refreshed album says it still is one now. A row with an
+// empty edition shares its keys, cache entry and block with the sung twin, so
+// the album never settles it, whatever it says.
+// The album is refreshed only under enrichment.enabled (the default); with it
+// off it is the enqueue-time tag. The read is not forced for an edition row:
+// the switch is the operator's "no audio reads at fetch time".
 func (w *Worker) titleRuleSettles(item queue.WorkItem, track models.Track) bool {
 	if !w.titleRule {
 		return false
 	}
 	tagged := item.Inputs.Track
-	_, ok := instrumentaltitle.Actionable(track.TrackName, track.AlbumName, tagged.ArtistName, tagged.AlbumArtist)
+	v, ok := instrumentaltitle.Settles(track.TrackName, track.AlbumName, tagged.ArtistName, tagged.AlbumArtist)
+	if ok && v.Position == instrumentaltitle.PositionRelease {
+		return item.Edition == queue.EditionInstrumental
+	}
 	return ok
 }
+
+// usesCache reports whether a row may read or write the lyric cache. An
+// instrumental-edition row may not (#1525): the cache is keyed by artist and
+// title, so its entry is the sung twin's, and a marker or lyric stored from
+// the edition row would be served to that twin.
+func usesCache(item queue.WorkItem) bool { return item.Edition != queue.EditionInstrumental }
 
 // titleRuleGate settles a Strong instrumental-titled row without asking any
 // lane or the cache (#1145 D2). It runs before the word-recheck branch, so it

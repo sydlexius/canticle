@@ -1200,6 +1200,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		return 1
 	}
 	workQ := queue.NewDBQueue(sqlDB)
+	// The API handler's webhook enqueues and deletes go through this queue, so it
+	// carries the edition rule too (#1562); nil under mode off.
+	workQ.SetEditionRule(editionRuleFor(cfg))
 	workQ.SetRandomized(cfg.Queue.Randomize)
 	workQ.SetBatchSize(cfg.Queue.BatchSize)
 	// Snapshot the configured library roots once at startup. They confine both
@@ -2467,7 +2470,7 @@ func runScheduler(ctx context.Context, sqlDB *sql.DB, cfg config.Config, args Se
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion, strongTitlePredicate(cfg))
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion, titleRulesFor(cfg))
 	// serve has no per-run enrichment override; resolve per library against the
 	// global default (and the per-library setting) inside the scheduler.
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
@@ -2683,7 +2686,7 @@ func runWatcher(ctx context.Context, sqlDB *sql.DB, args ServeCmd, watchCfg watc
 		MaxDepth:       args.Depth,
 		BFS:            args.BFS,
 		EmbeddedLyrics: embeddedLyricsMode(args.EmbeddedLyrics, cfg.Output.EmbeddedLyrics),
-	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion, strongTitlePredicate(cfg))
+	}, nil, cfg.InstrumentalDetector.Enabled, cacheRepo, rlg, rlgBackup, providersVersion, titleRulesFor(cfg))
 	sched.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	pruner := prune.New(sqlDB)
 	pruner.SetIdentityKeys(cfg.Realign.IdentityKeys)
@@ -2931,7 +2934,7 @@ func runScan(ctx context.Context, out io.Writer, args ScanCmd) int {
 		// providersVersion 0: a one-shot `scan` constructs no provider set, so it
 		// has no generation to compare a stored verdict against. Zero never
 		// suppresses, so the CLI keeps its pre-#679 behavior exactly.
-	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup, 0, strongTitlePredicate(cfg))
+	}, detectOverride, cfg.InstrumentalDetector.Enabled, nil, rlg, rlgBackup, 0, titleRulesFor(cfg))
 	s.EnrichOverride = enrichOverride
 	s.GlobalEnrichDefault = cfg.Enrichment.Enabled
 	if len(args.Libraries) > 0 {
@@ -3010,6 +3013,34 @@ func resolveDetectOverride(detect, noDetect bool) (*bool, error) {
 	return resolveFlagOverride(detect, noDetect, "--detect-instrumental and --no-detect-instrumental")
 }
 
+// titleRules carries the instrumental_title.mode seams the scan scheduler
+// wires. nil (and each nil field) is mode off: the scheduler behaves exactly as
+// before either rule existed.
+type titleRules struct {
+	// strong is the enqueuer's cache-door predicate (strongTitlePredicate).
+	strong func(models.Track) bool
+	// edition is the queue's edition rule (editionRuleFor).
+	edition queue.EditionRule
+}
+
+// titleRulesFor builds the scheduler's titleRules from the mode, nil when off.
+func titleRulesFor(cfg config.Config) *titleRules {
+	if !titleRuleOn(cfg) {
+		return nil
+	}
+	return &titleRules{strong: strongTitlePredicate(cfg), edition: editionRuleFor(cfg)}
+}
+
+// editionRuleFor is the queue's edition rule (#1562), queue.ReleaseEdition: the
+// album-level verdict the worker's title gate acts on, so the two agree. nil
+// under instrumental_title.mode=off: every row keeps the empty edition.
+func editionRuleFor(cfg config.Config) queue.EditionRule {
+	if !titleRuleOn(cfg) {
+		return nil
+	}
+	return queue.ReleaseEdition
+}
+
 // strongTitlePredicate is the scan enqueuer's instrumental-title predicate
 // (#1469): true for a track whose title classifies Strong. It is nil under
 // instrumental_title.mode=off so the enqueuer behaves exactly as before. The
@@ -3044,7 +3075,7 @@ func (c scanIdentityCache) Record(ctx context.Context, path string, facts scanne
 // already-cached tracks at enqueue time; pass the worker's shared repo in serve
 // mode so the /metrics hit-rate covers scheduler lookups too (#308),
 // or nil for a one-shot scan (a fresh, uncounted repo is created).
-func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo, realigner *realign.Realigner, realignBackupPath string, providersVersion int, titleInstrumental func(models.Track) bool) scan.Scheduler {
+func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, globalDetectDefault bool, cacheRepo *cache.CacheRepo, realigner *realign.Realigner, realignBackupPath string, providersVersion int, rules *titleRules) scan.Scheduler {
 	results := scan.New(sqlDB)
 	if cacheRepo == nil {
 		cacheRepo = cache.New(sqlDB)
@@ -3058,6 +3089,14 @@ func scheduler(sqlDB *sql.DB, opts scanner.ScanOptions, detectOverride *bool, gl
 	// (serve) that has a generation at all. A one-shot CLI scan passes 0 here,
 	// which is the pre-existing default and changes nothing.
 	workQueue.SetProvidersVersion(providersVersion)
+	// The edition rule (#1562) is set on this queue too, not only the serve
+	// queue: the scan enqueues through this one, so without it the scheduler
+	// would fold an instrumental-release copy into its sung twin's row.
+	var titleInstrumental func(models.Track) bool
+	if rules != nil {
+		workQueue.SetEditionRule(rules.edition)
+		titleInstrumental = rules.strong
+	}
 	// One durations store shared between the scanner's own duration bank
 	// (WithDurationStore below) and the enqueuer's #952 cache-hit check, so a
 	// duration the scan just banked for this file is immediately visible to the

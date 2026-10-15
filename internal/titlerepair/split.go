@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/sydlexius/canticle/internal/instrumentaltitle"
 	"github.com/sydlexius/canticle/internal/models"
 	"github.com/sydlexius/canticle/internal/queue"
 	"github.com/sydlexius/canticle/internal/reports"
@@ -102,10 +101,7 @@ type querier interface {
 // edition is the edition a copy with these tags belongs to: the album-level
 // verdict, from the stored tags.
 func edition(title, album, artist, albumArtist string) string {
-	if instrumentaltitle.InstrumentalRelease(title, album, artist, albumArtist) {
-		return queue.EditionInstrumental
-	}
-	return queue.EditionNone
+	return queue.ReleaseEdition(models.Track{TrackName: title, AlbumName: album, ArtistName: artist, AlbumArtist: albumArtist})
 }
 
 // Split walks every row with an empty edition and splits the ones that need

@@ -144,8 +144,10 @@ func (w *Worker) runWordRecheck(ctx context.Context, item queue.WorkItem, track 
 			return w.deferWordRecheck(ctx, item, verr)
 		}
 		song.FetchedAt = w.now()
-		if serr := w.store(ctx, track, song); serr != nil {
-			return w.deferWordRecheck(ctx, item, serr)
+		if usesCache(item) { // an instrumental-edition row stores nothing (#1562)
+			if serr := w.store(ctx, track, song); serr != nil {
+				return w.deferWordRecheck(ctx, item, serr)
+			}
 		}
 		return w.writeWordRecheck(ctx, item, track, song)
 	}

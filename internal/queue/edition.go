@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sydlexius/canticle/internal/instrumentaltitle"
 	"github.com/sydlexius/canticle/internal/models"
 )
 
@@ -24,11 +25,39 @@ const (
 // return EditionNone or EditionInstrumental; anything else fails the enqueue.
 type EditionRule func(models.Track) string
 
+// ReleaseEdition is the one edition rule (#1562): a copy whose album-level
+// verdict holds (instrumentaltitle.Settles at PositionRelease) is an
+// instrumental-edition copy. The queues, the worker's tests and the title
+// repair's split share it, so they cannot drift.
+func ReleaseEdition(t models.Track) string {
+	if v, ok := instrumentaltitle.Settles(t.TrackName, t.AlbumName, t.ArtistName, t.AlbumArtist); ok && v.Position == instrumentaltitle.PositionRelease {
+		return EditionInstrumental
+	}
+	return EditionNone
+}
+
 // SetEditionRule configures the rule Enqueue and the adoption inserts use to
 // compute a new row's edition, in the style of SetProvidersVersion. nil (the
 // default) gives every row EditionNone, which is the identity before #1525.
 func (q *DBQueue) SetEditionRule(rule EditionRule) {
 	q.editionRule = rule
+}
+
+// EditionOf returns the edition Enqueue would store a copy of track at
+// sourcePath under, without writing anything: the scan enqueuer's cache door
+// asks it so an edition copy never reads the lyric cache (#1562). With no rule
+// it is EditionNone and nothing is read.
+func (q *DBQueue) EditionOf(ctx context.Context, track models.Track, sourcePath string) (string, error) {
+	if q.editionRule == nil {
+		return EditionNone, nil
+	}
+	tx, err := q.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return "", fmt.Errorf("queue: begin edition read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	artistKey, titleKey := IdentityKeys(track)
+	return q.resolveEditionTx(ctx, tx, artistKey, titleKey, track, sourcePath)
 }
 
 // resolveEditionTx returns the edition a row for track at sourcePath is stored

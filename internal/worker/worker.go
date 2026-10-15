@@ -1579,8 +1579,9 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	// provider set: bypass the cache so the orchestrator revalidates the track
 	// against today's lanes (Gap 1 of docs/multi-provider-orchestration.md).
 	// An upgrade trip (#553) always asks a provider: the key's cache entry is
-	// what wrote the file being upgraded.
-	bypassCache := item.UpgradeQueued || (w.providersVersion != 0 && item.ProvidersVersion != w.providersVersion)
+	// what wrote the file being upgraded. An instrumental-edition row never
+	// reads the cache (usesCache): the entry under its keys is the sung twin's.
+	bypassCache := item.UpgradeQueued || !usesCache(item) || (w.providersVersion != 0 && item.ProvidersVersion != w.providersVersion)
 	// detectorPath is the audio path handed to every lane via FindLyrics. It is
 	// deliberately empty when instrumental detection is disabled for this item
 	// (see detectorPathFor): the detector lane treats an empty path as a benign
@@ -2029,9 +2030,14 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 		//
 		// A store failure fails the row AFTER the write: the retry re-fetches and
 		// rewrites the same sidecar, which is idempotent.
-		if !lyrics.RefusedByTimingGuard(song, resolvedTrack.TrackLength) {
+		//
+		// An instrumental-edition row stores nothing (usesCache): its entry
+		// would be served to the sung twin under the same key.
+		if usesCache(item) && !lyrics.RefusedByTimingGuard(song, resolvedTrack.TrackLength) {
 			if err := w.store(ctx, resolvedTrack, song); err != nil {
-				slog.Warn("worker cache store failed", "id", item.ID, "artist", item.Inputs.Track.ArtistName, "track", item.Inputs.Track.TrackName, "error", err)
+				// The id and a class only: the artist, the title and the
+				// error's text (which may carry them) are library metadata.
+				slog.Warn("worker cache store failed", "id", item.ID, "error_class", cacheWriteErrClass(err))
 				return w.failPass(ctx, item, err, landed)
 			}
 		}
@@ -2298,8 +2304,9 @@ func (w *Worker) refreshRecordingIdentity(ctx context.Context, item queue.WorkIt
 	}
 	meta, err := w.resolveMetadata(ctx, item.Inputs.SourcePath)
 	if err != nil {
+		// The read error can carry the source path, so only the row id is logged.
 		slog.Warn("fetch-time metadata refresh failed; querying with enqueue-time identity",
-			"id", item.ID, "artist", track.ArtistName, "track", track.TrackName, "error", err)
+			"id", item.ID)
 		return track
 	}
 	if meta.TrackLength > 0 {

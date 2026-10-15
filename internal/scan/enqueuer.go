@@ -367,7 +367,18 @@ func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, for
 			}
 			return false
 		}
-		_, err := e.Cache.LookupAccepted(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength), accept)
+		// An instrumental-edition copy (#1562) skips the cache door and the
+		// timing suppression below: the cache entry and the timing verdict
+		// under its artist and title are the sung twin's, so the copy goes to
+		// its own row and the worker's title gate.
+		editionCopy, err := e.editionCopy(ctx, res)
+		if err != nil {
+			return enqueued, cacheHits, fmt.Errorf("scan: resolve edition %d: %w", res.ID, err)
+		}
+		err = sql.ErrNoRows
+		if !editionCopy {
+			_, err = e.Cache.LookupAccepted(ctx, res.Track.ArtistName, res.Track.TrackName, normalize.DurationBucket(res.Track.TrackLength), accept)
+		}
 		switch {
 		case err == nil:
 			if err := e.Results.SetStatus(ctx, []int64{res.ID}, StatusDone); err != nil {
@@ -401,7 +412,7 @@ func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, for
 		// (queue.ErrCategoricalNotReopened) rather than link this file to a row
 		// it could not reopen.
 		reopenCategorical := false
-		if e.Timing != nil {
+		if e.Timing != nil && !editionCopy {
 			verdict, found, terr := e.Timing.LookupTiming(ctx, res.Track.ArtistName, res.Track.TrackName)
 			switch {
 			case terr != nil:
@@ -475,6 +486,23 @@ func (e *Enqueuer) EnqueueReopening(ctx context.Context, lib models.Library, for
 			"providers_version", e.ProvidersVersion)
 	}
 	return enqueued, cacheHits, nil
+}
+
+// EditionResolver names the edition Enqueue would store a scanned copy under
+// (#1562), read-only. *queue.DBQueue satisfies it.
+type EditionResolver interface {
+	EditionOf(ctx context.Context, track models.Track, sourcePath string) (string, error)
+}
+
+// editionCopy reports whether a scan result is an instrumental-edition copy.
+// A queue that is not an EditionResolver has no editions: every copy is not.
+func (e *Enqueuer) editionCopy(ctx context.Context, res models.ScanResult) (bool, error) {
+	er, ok := e.Queue.(EditionResolver)
+	if !ok {
+		return false, nil
+	}
+	edition, err := er.EditionOf(ctx, res.Track, res.FilePath)
+	return edition == queue.EditionInstrumental, err
 }
 
 // SourceRepointer moves a settled work_queue row whose audio file was replaced
