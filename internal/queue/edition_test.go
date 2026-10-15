@@ -228,3 +228,72 @@ func TestAdoptionIsEditionAware(t *testing.T) {
 		t.Fatalf("sung row links = %d; want 0", n)
 	}
 }
+
+// seedEditionRow inserts a row for editionInputs(album) under edition, then
+// applies set (a SET clause, "" for none) to shape the case under test.
+func seedEditionRow(t *testing.T, dbh *sql.DB, album, edition, set string) int64 {
+	t.Helper()
+	in := editionInputs(album)
+	a, ti := IdentityKeys(in.Track)
+	var id int64
+	if err := dbh.QueryRow(`INSERT INTO work_queue (artist, title, album, artist_key, title_key, edition, outdir, filename, source_path, output_paths, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'pending') RETURNING id`,
+		in.Track.ArtistName, in.Track.TrackName, album, a, ti, edition, in.Outdir, in.Filename, in.SourcePath).Scan(&id); err != nil {
+		t.Fatalf("seed %q row: %v", edition, err)
+	}
+	if set != "" {
+		if _, err := dbh.Exec(`UPDATE work_queue SET `+set+` WHERE id = ?`, id); err != nil {
+			t.Fatalf("shape row %d: %v", id, err)
+		}
+	}
+	return id
+}
+
+// A scan-origin enqueue of the instrumental copy looks only at its own
+// edition's row: the sung twin's categorical verdict neither refuses it nor is
+// reopened by it, and the twin's word recheck stays as it is (#1559).
+func TestScanReopensActOnlyOnTheirOwnEdition(t *testing.T) {
+	cases := []struct {
+		name string
+		set  string
+		in   func(models.Inputs) models.Inputs
+	}{
+		{
+			// Would refuse (ErrCategoricalNotReopened): a retired categorical row.
+			name: "categorical refusal",
+			set:  `status = 'unavailable', timing_outcome = 'categorical'`,
+			in:   func(in models.Inputs) models.Inputs { in.ReopenCategorical = true; return in },
+		},
+		{
+			// Would reopen: a done, fileless categorical row.
+			name: "categorical reopen",
+			set:  `status = 'done', timing_outcome = 'categorical', completed_at = '2026-10-01T12:00:00Z'`,
+			in:   func(in models.Inputs) models.Inputs { in.ReopenCategorical = true; return in },
+		},
+		{
+			name: "word recheck",
+			set:  `status = 'deferred', word_timing_state = 'queued', outcome_type = 'synced'`,
+			in:   func(in models.Inputs) models.Inputs { return in },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, dbh := newEditionQueue(t, albumEditionRule)
+			sungID := seedEditionRow(t, dbh, "Low Tide", EditionNone, tc.set)
+			before := getRow(t, dbh, sungID)
+
+			in := tc.in(editionInputs("Low Tide (Instrumental)"))
+			in.FromScan = true
+			got, err := q.Enqueue(context.Background(), in, PriorityScan)
+			if err != nil {
+				t.Fatalf("instrumental enqueue: %v; want its own row", err)
+			}
+			if got.ID == sungID || got.Edition != EditionInstrumental || got.Status != StatusPending {
+				t.Fatalf("instrumental enqueue = id %d edition %q status %q; want a new pending instrumental row", got.ID, got.Edition, got.Status)
+			}
+			if after := getRow(t, dbh, sungID); !reflect.DeepEqual(after, before) {
+				t.Errorf("sung row changed:\n got %+v\nwant %+v", after, before)
+			}
+		})
+	}
+}
