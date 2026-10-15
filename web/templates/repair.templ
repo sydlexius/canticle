@@ -67,6 +67,8 @@ templ RepairRunBody(view RepairRunView) {
 		case RepairFinished:
 			<div id="mx-repair-run" class="mx-repair-run">
 				switch {
+					case view.NoRun:
+						<p class="mx-repair-line" role="status">No run of this repair is live.</p>
 					case view.Failed:
 						<p class="mx-repair-line mx-status-error" role="alert">The run failed. Details are in the server log.</p>
 					case view.Canceled:

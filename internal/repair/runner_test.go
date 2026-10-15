@@ -62,11 +62,12 @@ func newTestRunner(t *testing.T, repairs ...Repair) (*Runner, *fakeClock) {
 	return r, clock
 }
 
-// waitRun waits for the live run's goroutine, if any, to return.
+// waitRun waits for the latest run's goroutine, if any, to return (its final
+// log line included, so a captured log is safe to read after it).
 func waitRun(t *testing.T, r *Runner) {
 	t.Helper()
 	r.mu.Lock()
-	live := r.live
+	live := r.last
 	r.mu.Unlock()
 	if live == nil {
 		return
@@ -466,5 +467,36 @@ func TestRunnerNoDoneButBusyWindow(t *testing.T) {
 	close(hold)
 	if err := <-errc; err != nil {
 		t.Errorf("Start after Finish = %v, want nil", err)
+	}
+}
+
+// TestRunnerCancelKeyStopsOnlyThatRepair: CancelKey leaves another repair's
+// run alone and returns the id of the run it cancels.
+func TestRunnerCancelKeyStopsOnlyThatRepair(t *testing.T) {
+	a, started, _ := blocking("settle-tiers", 1, 2)
+	b, _, _ := blocking("tag-reread", 0, 0)
+	r, _ := newTestRunner(t, a, b)
+	if id, ok := r.CancelKey("settle-tiers"); ok || id != 0 {
+		t.Errorf("CancelKey with nothing live = %d, %v", id, ok)
+	}
+	if _, err := r.Start("settle-tiers", Options{Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if id, ok := r.CancelKey("tag-reread"); ok || id != 0 {
+		t.Errorf("CancelKey(other) = %d, %v, want 0, false", id, ok)
+	}
+	if s := r.Snapshot(); s.State != StateRunning {
+		t.Fatalf("CancelKey(other) stopped the run: %s", s.State)
+	}
+	if id, ok := r.CancelKey("settle-tiers"); !ok || id != 1 {
+		t.Errorf("CancelKey(live) = %d, %v, want 1, true", id, ok)
+	}
+	waitRun(t, r)
+	if s := r.Snapshot(); s.State != StateCanceled {
+		t.Errorf("state after CancelKey = %s, want canceled", s.State)
+	}
+	if _, ok := r.CancelKey("settle-tiers"); ok {
+		t.Error("CancelKey after the run ended reported a cancel")
 	}
 }

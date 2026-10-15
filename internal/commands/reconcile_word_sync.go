@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,29 +15,11 @@ import (
 	"github.com/sydlexius/canticle/internal/config"
 	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/library"
-	"github.com/sydlexius/canticle/internal/lyrics"
 	"github.com/sydlexius/canticle/internal/musixmatch"
 	"github.com/sydlexius/canticle/internal/providers"
 	"github.com/sydlexius/canticle/internal/queue"
+	"github.com/sydlexius/canticle/internal/wordsyncrepair"
 )
-
-// wordSyncFlipBatch bounds one flip transaction, which holds the writer lock,
-// so a library-sized run in one transaction would stall a live serve.
-const wordSyncFlipBatch = 500
-
-// wordSyncBackupRecord is one JSONL line: a flipped row's prior value of every
-// column the flip writes (nil = NULL), so writing it back restores the row.
-type wordSyncBackupRecord struct {
-	ID                   int64   `json:"id"`
-	Status               string  `json:"status"`
-	Priority             int     `json:"priority"`
-	NextAttemptAt        string  `json:"next_attempt_at"`
-	Attempts             int     `json:"attempts"`
-	LastError            string  `json:"last_error"`
-	RefusedWaits         int     `json:"refused_waits"`
-	WordTimingState      *string `json:"word_timing_state"`
-	WordTimingGeneration *int64  `json:"word_timing_generation"`
-}
 
 // runReconcileWordSync queues settled line-synced rows for a word-timing
 // re-check (#982). It never fetches: a running serve worker drains the rows at
@@ -102,77 +83,51 @@ func runReconcileWordSync(ctx context.Context, out io.Writer, args ScanReconcile
 	}
 
 	q := queue.NewDBQueue(sqlDB)
-	candidates, err := q.CountWordRecheckCandidates(ctx, opts)
-	if err != nil {
-		slog.Error("reconcile-word-sync: count candidates failed", "error", err)
-		return 1
-	}
-	already, err := q.CountWordRecheckQueued(ctx, opts.LibraryIDs)
-	if err != nil {
-		slog.Error("reconcile-word-sync: count queued rows failed", "error", err)
-		return 1
-	}
-	selected := candidates
-	if args.Limit > 0 && args.Limit < selected {
-		selected = args.Limit
-	}
-
-	queued, written := 0, 0
 	backupPath := args.Backup
 	if backupPath == "" {
 		backupPath = filepath.Join(filepath.Dir(cfg.DB.Path), fmt.Sprintf("reconcile-word-sync-backup-%s.jsonl", time.Now().UTC().Format("20060102-150405")))
 	}
-	var backupFile *os.File
+	// The seams are read at call time so a test can swap them per run.
+	backup := &wordsyncrepair.FileBackup{
+		Path:     backupPath,
+		Write:    func(f *os.File, p queue.WordRecheckPrior) error { return writeWordSyncBackup(f, p) },
+		SyncFile: func(f *os.File) error { return syncWordSyncBackup(f) },
+	}
 	defer func() {
-		if backupFile != nil {
-			if cerr := backupFile.Close(); cerr != nil {
-				slog.Warn("failed to close reconcile-word-sync backup file", "path", backupPath, "error", cerr)
-			}
+		if cerr := backup.Close(); cerr != nil {
+			slog.Warn("failed to close reconcile-word-sync backup file", "path", backupPath, "error", cerr)
 		}
 	}()
-	if args.Yes && selected > 0 {
-		// report runs INSIDE the flip transaction, before that row's UPDATE. It
-		// must not touch the database: the handle has one connection, which the
-		// flip's own transaction holds, so a query here would deadlock.
-		report := func(p queue.WordRecheckPrior) error {
-			if backupFile == nil {
-				f, ferr := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // reason: G304 -- backupPath is operator-supplied (--backup) or derived from the configured db dir, not untrusted input
-				if ferr != nil {
-					return fmt.Errorf("open reconcile-word-sync backup %q: %w", backupPath, ferr)
-				}
-				backupFile = f
-				// A new directory entry is not durable until its parent is
-				// fsynced; do it before the first batch can commit.
-				lyrics.FsyncDir(filepath.Dir(backupPath))
-			}
-			if err := writeWordSyncBackup(backupFile, p); err != nil {
-				return err
-			}
-			written++
-			return nil
-		}
-		// One fsync per batch, before its COMMIT (write-ahead): every record of
-		// the batch is durable before any of its rows flips.
-		opts.BeforeCommit = func() error { return syncWordSyncBackup(backupFile) }
-		ids, lerr := q.ListWordRecheckCandidates(ctx, opts)
-		if lerr != nil {
-			slog.Error("reconcile-word-sync: list candidates failed", "error", lerr)
-			return 1
-		}
-		for start := 0; start < len(ids); start += wordSyncFlipBatch {
-			end := min(start+wordSyncFlipBatch, len(ids))
-			prior, ferr := q.MarkWordRecheckQueued(ctx, ids[start:end], opts, report)
-			if ferr != nil {
-				_, _ = fmt.Fprintf(out, "reconcile-word-sync: stopped after queuing %d row(s); the failed batch was rolled back\n", queued)
-				if backupFile != nil {
-					_, _ = fmt.Fprintf(out, "backup %s: its last %d record(s) belong to the rolled-back batch; do not restore them\n", backupPath, written-queued)
-				}
-				slog.Error("reconcile-word-sync: flip failed", "error", ferr)
-				return 1
-			}
-			queued += len(prior)
-		}
+	runOpts := wordsyncrepair.Options{Apply: args.Yes, Query: opts}
+	if args.Yes {
+		runOpts.Backup = backup
 	}
+	res, err := wordsyncrepair.Run(ctx, q, runOpts)
+	if err != nil {
+		var se *wordsyncrepair.StageError
+		isStage := errors.As(err, &se)
+		ctxStop := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		switch {
+		// Only a flip failure, or a stop between batches (no stage error), has a
+		// rolled-back batch to report. A cancel that surfaces from a count or
+		// list stage falls through to the "<stage> failed" case, as on main.
+		case isStage && se.Stage == "flip", !isStage && ctxStop:
+			_, _ = fmt.Fprintf(out, "reconcile-word-sync: stopped after queuing %d row(s); the failed batch was rolled back\n", res.Queued)
+			if backup.Opened() {
+				_, _ = fmt.Fprintf(out, "backup %s: its last %d record(s) belong to the rolled-back batch; do not restore them\n", backupPath, res.Written-res.Queued)
+			}
+			if se != nil {
+				err = se.Err
+			}
+			slog.Error("reconcile-word-sync: flip failed", "error", err)
+		case se != nil:
+			slog.Error("reconcile-word-sync: "+se.Stage+" failed", "error", se.Err)
+		default:
+			slog.Error("reconcile-word-sync: run failed", "error", err)
+		}
+		return 1
+	}
+	candidates, already, selected, queued := res.Candidates, res.AlreadyQueued, res.Selected, res.Queued
 
 	// A floor: the worker is serial at serve's poll interval (config tiers only;
 	// a serve --work-interval flag is invisible here), behind fresh work.
@@ -186,7 +141,7 @@ func runReconcileWordSync(ctx context.Context, out io.Writer, args ScanReconcile
 		_, _ = fmt.Fprintf(out, "%s\n", suffixDryRun(false))
 	}
 	_, _ = fmt.Fprintln(out, "reconcile-word-sync: this command fetches nothing; a running `canticle serve` worker drains queued rows behind fresh work")
-	if backupFile != nil {
+	if backup.Opened() {
 		_, _ = fmt.Fprintf(out, "backup of queued rows' prior state written to %s\n", backupPath)
 	}
 	return 0
@@ -218,23 +173,6 @@ func configuredWordGeneration(cfg config.Config) (int64, error) {
 // writeWordSyncBackup and syncWordSyncBackup are seams so a test can fail a
 // record or the batch's fsync.
 var (
-	writeWordSyncBackup = appendWordSyncBackup
+	writeWordSyncBackup = func(f *os.File, p queue.WordRecheckPrior) error { return wordsyncrepair.AppendRecord(f, p) }
 	syncWordSyncBackup  = func(f *os.File) error { return f.Sync() }
 )
-
-// appendWordSyncBackup writes one record inside the flip transaction; the
-// batch's last record also fsyncs (write-ahead), and any failure rolls it back.
-func appendWordSyncBackup(f *os.File, p queue.WordRecheckPrior) error {
-	b, err := json.Marshal(wordSyncBackupRecord{
-		ID: p.ID, Status: p.Status, Priority: p.Priority, NextAttemptAt: p.NextAttemptAt,
-		Attempts: p.Attempts, LastError: p.LastError, RefusedWaits: p.RefusedWaits,
-		WordTimingState: p.WordTimingState, WordTimingGeneration: p.WordTimingGeneration,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal reconcile-word-sync backup record: %w", err)
-	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("write reconcile-word-sync backup record: %w", err)
-	}
-	return nil
-}

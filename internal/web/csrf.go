@@ -22,11 +22,15 @@ const csrfTokenMaxAge = 3600 // 1 hour
 // bytes hex-encoded = 64 characters.
 const csrfTokenLen = 64
 
+// csrfRandRead is the entropy source for CSRF tokens; a test swaps it to force
+// a generation failure. Production never reassigns it.
+var csrfRandRead = rand.Read
+
 // generateCSRFToken returns a 64-character hex-encoded random token (32 random
 // bytes from crypto/rand) used as the double-submit CSRF token.
 func generateCSRFToken() (string, error) {
 	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
+	if _, err := csrfRandRead(buf); err != nil {
 		return "", fmt.Errorf("csrf: generate token: %w", err)
 	}
 	return hex.EncodeToString(buf), nil

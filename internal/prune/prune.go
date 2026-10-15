@@ -2246,7 +2246,7 @@ func (p *Pruner) identityHeld(ctx context.Context, src string, c *candidate, roo
 
 // sharedAcrossLibraries reports whether a queue row of c is also linked to
 // another library's scan_results row. work_queue is unique on (artist_key,
-// title_key), so two libraries' files of one song share ONE queue row, and
+// title_key, edition), so two libraries' files of one song share ONE queue row, and
 // aging it out for the copy that is gone would delete the row the other
 // library's file still uses (and cascade its link). Such a row never ages out,
 // on any sweep; it is classified as it was before the age-out (#1293 tracks

@@ -133,6 +133,20 @@ func (a *Auth) RequireSession(next http.Handler) http.Handler {
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
+		// The answer depends on HX-Request, so both branches say so.
+		w.Header().Add("Vary", "HX-Request")
+		// A history restore is the exception: htmx's cache-miss loader never
+		// reads HX-Redirect and swaps any 2xx body into the page, so an empty
+		// 200 would blank it; it follows the 303 to the login page instead.
+		if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-History-Restore-Request") != "true" {
+			// htmx would follow a 303 and swap the login page into the
+			// request's target (a poll keeps doing it); HX-Redirect makes it
+			// navigate the whole page instead, back to where the operator was.
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("HX-Redirect", "/login?next="+url.QueryEscape(htmxReturnPath(r)))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		http.Redirect(w, r, "/login?next="+url.QueryEscape(safeReturnPath(r)), http.StatusSeeOther)
 	})
 }
@@ -362,6 +376,16 @@ func wantsJSON(r *http.Request) bool {
 // URI, sanitized so it can only point back into this site.
 func safeReturnPath(r *http.Request) string {
 	return safeNext(r.URL.RequestURI())
+}
+
+// htmxReturnPath is the post-login return path for an htmx request: the page
+// the browser shows (HX-Current-URL), not the fragment URL it polled, reduced
+// to its local path and sanitized like any return path.
+func htmxReturnPath(r *http.Request) string {
+	if cur, err := url.Parse(r.Header.Get("HX-Current-URL")); err == nil && cur.Path != "" {
+		return safeNext(cur.RequestURI())
+	}
+	return dashboardPath
 }
 
 // safeNext sanitizes a caller-supplied return path to a local, same-site path,
