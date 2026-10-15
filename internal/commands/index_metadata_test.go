@@ -1407,3 +1407,123 @@ func TestIndexMetadataFillsScanRowStoredUnderSymlinkedRoot(t *testing.T) {
 		t.Errorf("symlink-rooted scan row recording ID = %q, want %q", got, recordingID)
 	}
 }
+
+// writeIndexRoot writes three tagged audio files into a fresh temp dir and returns it.
+func writeIndexRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for i := 0; i < 3; i++ {
+		if err := testutil.WriteAudioFile(root, fmt.Sprintf("t%02d.mp3", i), fmt.Sprintf("Artist%d", i), "Title", "Album", ""); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+	return root
+}
+
+// TestIndexMetadataResultTallies proves IndexMetadata reports each count in its
+// own field against a caller-supplied open database: a first applying run
+// indexes everything, a second skips everything, and a missing root is a walk
+// error rather than a silent empty walk.
+func TestIndexMetadataResultTallies(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := dbtest.Open(t)
+	root := writeIndexRoot(t)
+
+	res, err := IndexMetadata(ctx, sqlDB, []string{root}, IndexMetadataOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("IndexMetadata: %v", err)
+	}
+	if res.Walked != 3 || res.Indexed != 3 || res.WorkDone != 3 || res.Skipped != 0 || res.Unreadable != 0 || res.WalkErrors != 0 || res.LimitReached {
+		t.Errorf("first run tally = %+v", res)
+	}
+
+	res, err = IndexMetadata(ctx, sqlDB, []string{root, filepath.Join(root, "missing")}, IndexMetadataOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("IndexMetadata rerun: %v", err)
+	}
+	if res.Walked != 3 || res.Skipped != 3 || res.Indexed != 0 || res.WorkDone != 0 || res.WalkErrors != 1 {
+		t.Errorf("second run tally = %+v", res)
+	}
+}
+
+// TestIndexMetadataResultLimitIsPerRun proves the --limit budget carried in the
+// result spans roots: three roots of three files under Limit 4 read exactly four, and the
+// walk stops at the fifth file reached instead of opening the third root.
+func TestIndexMetadataResultLimitIsPerRun(t *testing.T) {
+	sqlDB := dbtest.Open(t)
+	roots := []string{writeIndexRoot(t), writeIndexRoot(t), writeIndexRoot(t)}
+
+	res, err := IndexMetadata(context.Background(), sqlDB, roots, IndexMetadataOptions{Apply: true, Limit: 4})
+	if err != nil {
+		t.Fatalf("IndexMetadata: %v", err)
+	}
+	if res.Indexed != 4 || res.WorkDone != 4 || res.Walked != 5 || !res.LimitReached {
+		t.Errorf("tally = %+v; want Indexed=4 WorkDone=4 Walked=5 LimitReached", res)
+	}
+}
+
+// TestIndexMetadataProgressCallback proves Progress fires once per audio file
+// reached with a rising done count and an unknown (0) total, counts skipped
+// files too, and that a nil Progress is safe.
+func TestIndexMetadataProgressCallback(t *testing.T) {
+	ctx := context.Background()
+	sqlDB := dbtest.Open(t)
+	root := writeIndexRoot(t)
+
+	var dones, totals []int64
+	opts := IndexMetadataOptions{Apply: true, Progress: func(done, total int64) {
+		dones = append(dones, done)
+		totals = append(totals, total)
+	}}
+	if _, err := IndexMetadata(ctx, sqlDB, []string{root}, opts); err != nil {
+		t.Fatalf("IndexMetadata: %v", err)
+	}
+	if fmt.Sprint(dones) != "[1 2 3]" || fmt.Sprint(totals) != "[0 0 0]" {
+		t.Errorf("progress calls done=%v total=%v; want [1 2 3] / [0 0 0]", dones, totals)
+	}
+
+	dones = nil // a rerun reaches the same files as skips; progress still counts them
+	if _, err := IndexMetadata(ctx, sqlDB, []string{root}, opts); err != nil {
+		t.Fatalf("IndexMetadata rerun: %v", err)
+	}
+	if fmt.Sprint(dones) != "[1 2 3]" {
+		t.Errorf("progress over skipped files = %v; want [1 2 3]", dones)
+	}
+
+	if _, err := IndexMetadata(ctx, sqlDB, []string{root}, IndexMetadataOptions{}); err != nil {
+		t.Fatalf("nil Progress must be safe: %v", err)
+	}
+}
+
+// TestIndexMetadataCanceledReturnsPartialResult proves a cancellation landing
+// after a committed row returns context.Canceled together with the tally of the
+// work already committed, not a zero result, so the caller can still print an
+// accurate summary.
+func TestIndexMetadataCanceledReturnsPartialResult(t *testing.T) {
+	_, dbPath, root := setupIndexMetadata(t, "a.mp3", "b.mp3", "c.mp3")
+	sqlDB, err := dbtest.OpenAt(context.Background(), t, dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer sqlDB.Close() //nolint:errcheck // test cleanup
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	indexMetadataRowCommitted = cancel // cancel right after the first commit
+	t.Cleanup(func() { indexMetadataRowCommitted = nil })
+
+	res, err := IndexMetadata(ctx, sqlDB, []string{root}, IndexMetadataOptions{Apply: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v; want context.Canceled", err)
+	}
+	if res.Indexed < 1 {
+		t.Fatalf("res.Indexed = %d; want >= 1 (partial result must survive the error)", res.Indexed)
+	}
+	var rows int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM audio_metadata`).Scan(&rows); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if res.Indexed != rows {
+		t.Errorf("res.Indexed = %d, committed rows = %d; want equal", res.Indexed, rows)
+	}
+}
