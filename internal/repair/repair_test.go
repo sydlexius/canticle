@@ -278,6 +278,7 @@ func TestRegistryRegister(t *testing.T) {
 		{"duplicate key", fakeRepair{Info{Key: "tier-unknown", Title: "Other"}}, ErrDuplicateKey, 1},
 		{"second key", fakeRepair{validInfo("tag-reread")}, nil, 2},
 		{"nil repair", nil, ErrNilRepair, 1},
+		{"typed nil repair", (*fakeRepair)(nil), ErrNilRepair, 1},
 		{"invalid info", fakeRepair{Info{Key: "Bad", Title: "x"}}, ErrInvalidInfo, 1},
 	}
 	for _, c := range cases {

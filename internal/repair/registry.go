@@ -3,6 +3,7 @@ package repair
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 )
 
@@ -28,11 +29,12 @@ func NewRegistry() *Registry {
 	return &Registry{}
 }
 
-// Register adds r under its Info().Key. A nil repair, an Info that fails
+// Register adds r under its Info().Key. A nil repair (including a typed nil,
+// such as a nil pointer whose type implements Repair), an Info that fails
 // Validate, or a key already registered is an error and leaves the Registry
 // unchanged.
 func (g *Registry) Register(r Repair) error {
-	if r == nil {
+	if isNil(r) {
 		return ErrNilRepair
 	}
 	info := r.Info()
@@ -65,4 +67,18 @@ func (g *Registry) Keys() []Key {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return append([]Key(nil), g.order...)
+}
+
+// isNil reports whether r is nil or an interface holding a nil pointer, map,
+// slice, func, channel or interface, so Register rejects it instead of
+// panicking in r.Info().
+func isNil(r Repair) bool {
+	if r == nil {
+		return true
+	}
+	switch v := reflect.ValueOf(r); v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	}
+	return false
 }
