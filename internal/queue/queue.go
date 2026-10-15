@@ -29,7 +29,7 @@ const dequeueMaxAttempts = 5
 
 // workQueueColumns is the full work_queue row column list, in the order the row scan
 // reads it. Every query that returns a whole WorkItem uses it, so a new column is added once.
-const workQueueColumns = `id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts, miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete`
+const workQueueColumns = `id, artist, title, album, album_artist, outdir, filename, source_path, status, priority, attempts, miss_count, providers_version, detect_instrumental, next_attempt_at, last_error, created_at, updated_at, completed_at, output_paths, scan_result_id, instrumental_result, music_sum, vocal_peak, speech_mean, vocal_class, detector_version, word_timing_state, upgrade_queued, timing_outcome, gate_complete, edition`
 
 const (
 	// StatusPending marks queued work ready to be processed.
@@ -176,6 +176,9 @@ type WorkItem struct {
 	// TimingOutcome is the row's stored timing verdict (#440); empty means NULL.
 	// An upgrade trip over a mis_synced row reads it (#1120).
 	TimingOutcome string
+	// Edition is part of the row identity (#1525): EditionNone or
+	// EditionInstrumental. Set on insert only; never updated in place.
+	Edition string
 }
 
 // DBQueue is a SQLite-backed queue for durable lyrics work.
@@ -202,6 +205,9 @@ type DBQueue struct {
 	// backward compatibility with call sites that do not supply a generation.
 	// Set via SetProvidersVersion from the commands layer after config is loaded.
 	providersVersion int
+	// editionRule computes a new row's edition (SetEditionRule); nil gives
+	// every row EditionNone.
+	editionRule EditionRule
 }
 
 // NewDBQueue returns a durable queue backed by db.
@@ -325,12 +331,18 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 	}
 
 	artistKey, titleKey := IdentityKeys(inputs.Track)
+	edition, err := q.resolveEditionTx(ctx, tx, artistKey, titleKey, inputs.Track, inputs.SourcePath)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	// edition is identity (#1525): the conflict target names it and the update
+	// below never writes it.
 	row := tx.QueryRowContext(ctx,
 		`INSERT INTO work_queue (
-             artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, detect_instrumental, next_attempt_at
+             artist, title, album, album_artist, artist_key, title_key, edition, outdir, filename, source_path, output_paths, scan_result_id, status, priority, providers_version, detect_instrumental, next_attempt_at
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(artist_key, title_key) DO UPDATE SET
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(artist_key, title_key, edition) DO UPDATE SET
              artist = CASE
                  WHEN work_queue.status IN ('done', 'unavailable', 'processing') THEN work_queue.artist
                  WHEN COALESCE(work_queue.word_timing_state, '') = 'queued' THEN work_queue.artist
@@ -422,6 +434,7 @@ func (q *DBQueue) Enqueue(ctx context.Context, inputs models.Inputs, priority in
 		inputs.Track.AlbumArtist,
 		artistKey,
 		titleKey,
+		edition,
 		inputs.Outdir,
 		inputs.Filename,
 		inputs.SourcePath,
@@ -1748,7 +1761,7 @@ func (q *DBQueue) CountRecheckDeferred(ctx context.Context, libraryID *int64) (i
 //
 // Enqueue dedup safety: after revival the work_queue row is status='deferred'.
 // A subsequent scan-priority Enqueue for the same artist/title will hit the
-// ON CONFLICT(artist_key, title_key) path and preserve the 'deferred' status
+// ON CONFLICT(artist_key, title_key, edition) path and preserve the 'deferred' status
 // (the upsert keeps work_queue.status for deferred/done/unavailable/processing
 // rows), so no duplicate work_queue row is created alongside the revived one.
 func (q *DBQueue) RecheckRetired(ctx context.Context, libraryID *int64) (int64, error) {
@@ -3764,6 +3777,7 @@ func scanWorkItem(row rowScanner) (WorkItem, error) {
 		&item.UpgradeQueued,
 		&timingOutcome,
 		&gateComplete,
+		&item.Edition,
 	)
 	if err != nil {
 		return WorkItem{}, err

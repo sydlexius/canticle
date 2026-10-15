@@ -140,7 +140,11 @@ func (q *DBQueue) LinkSettled(ctx context.Context, c AdoptCandidate, now time.Ti
 		return AdoptNoRow, fmt.Errorf("queue: link settled: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // no-op once committed
-	res, err := q.linkExistingTx(ctx, tx, c, now, backup)
+	edition, err := q.resolveEditionTx(ctx, tx, c.ArtistKey, c.TitleKey, c.Track, c.FilePath)
+	if err != nil {
+		return AdoptNoRow, err
+	}
+	res, err := q.linkExistingTx(ctx, tx, c, edition, now, backup)
 	if err != nil || res != AdoptLinked {
 		return res, err
 	}
@@ -150,11 +154,13 @@ func (q *DBQueue) LinkSettled(ctx context.Context, c AdoptCandidate, now time.Ti
 	return AdoptLinked, nil
 }
 
-// linkExistingTx links c to the work_queue row with its identity, inside tx.
-func (q *DBQueue) linkExistingTx(ctx context.Context, tx *sql.Tx, c AdoptCandidate, now time.Time, backup func(AdoptRecord) error) (AdoptResult, error) {
+// linkExistingTx links c to the work_queue row with its identity (its keys and
+// edition, from resolveEditionTx), inside tx.
+func (q *DBQueue) linkExistingTx(ctx context.Context, tx *sql.Tx, c AdoptCandidate, edition string, now time.Time, backup func(AdoptRecord) error) (AdoptResult, error) {
 	var id int64
 	var status string
-	err := tx.QueryRowContext(ctx, `SELECT id, status FROM work_queue WHERE artist_key = ? AND title_key = ?`, c.ArtistKey, c.TitleKey).Scan(&id, &status)
+	err := tx.QueryRowContext(ctx, `SELECT id, status FROM work_queue WHERE artist_key = ? AND title_key = ? AND edition = ?`,
+		c.ArtistKey, c.TitleKey, edition).Scan(&id, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AdoptNoRow, nil
 	}
@@ -210,9 +216,9 @@ func (q *DBQueue) linkExistingTx(ctx context.Context, tx *sql.Tx, c AdoptCandida
 // fallback finds the link already present it returns AdoptAlreadyLinked: the
 // transaction rolls back with nothing written and no backup record.
 //
-// TODO(#1559): the identity here is (artist_key, title_key). When the queue
-// identity gains an edition column this insert and the lookup in
-// linkExistingTx must become edition-aware, or two editions collapse.
+// The identity is (artist_key, title_key, edition) (#1525): the edition comes
+// from resolveEditionTx, as for Enqueue, so an adoption never collapses two
+// editions into one row.
 func (q *DBQueue) InsertSettledDone(ctx context.Context, c AdoptCandidate, cls AdoptClass, now time.Time, backup func(AdoptRecord) error) (AdoptResult, error) {
 	outputPaths, err := marshalOutputPaths(models.Inputs{Outdir: c.Outdir, Filename: c.Filename})
 	if err != nil {
@@ -223,6 +229,10 @@ func (q *DBQueue) InsertSettledDone(ctx context.Context, c AdoptCandidate, cls A
 		return AdoptNoRow, fmt.Errorf("queue: insert settled: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // no-op once committed
+	edition, err := q.resolveEditionTx(ctx, tx, c.ArtistKey, c.TitleKey, c.Track, c.FilePath)
+	if err != nil {
+		return AdoptNoRow, err
+	}
 	stamp := formatTime(now)
 	var wordChecked any
 	if cls.OutcomeType == "synced" {
@@ -230,11 +240,11 @@ func (q *DBQueue) InsertSettledDone(ctx context.Context, c AdoptCandidate, cls A
 	}
 	var id int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO work_queue (artist, title, album, album_artist, artist_key, title_key, outdir, filename, source_path, output_paths,
+		`INSERT INTO work_queue (artist, title, album, album_artist, artist_key, title_key, edition, outdir, filename, source_path, output_paths,
              scan_result_id, status, attempts, outcome_type, sync_tier, completed_at, word_timing_checked_at, adopted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'done', 0, ?, ?, ?, ?, ?)
-         ON CONFLICT(artist_key, title_key) DO NOTHING RETURNING id`,
-		c.Track.ArtistName, c.Track.TrackName, c.Track.AlbumName, c.Track.AlbumArtist, c.ArtistKey, c.TitleKey,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'done', 0, ?, ?, ?, ?, ?)
+         ON CONFLICT(artist_key, title_key, edition) DO NOTHING RETURNING id`,
+		c.Track.ArtistName, c.Track.TrackName, c.Track.AlbumName, c.Track.AlbumArtist, c.ArtistKey, c.TitleKey, edition,
 		c.Outdir, c.Filename, c.FilePath, outputPaths, c.ScanResultID, cls.OutcomeType, nullIfEmpty(cls.SyncTier), stamp, wordChecked, stamp).Scan(&id)
 	switch {
 	case err == nil:
@@ -252,7 +262,7 @@ func (q *DBQueue) InsertSettledDone(ctx context.Context, c AdoptCandidate, cls A
 		}
 		return AdoptInserted, nil
 	case errors.Is(err, sql.ErrNoRows):
-		res, lerr := q.linkExistingTx(ctx, tx, c, now, backup)
+		res, lerr := q.linkExistingTx(ctx, tx, c, edition, now, backup)
 		if lerr != nil || res != AdoptLinked {
 			return res, lerr
 		}
