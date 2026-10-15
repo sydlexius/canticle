@@ -280,19 +280,17 @@ func TestReconcileInstrumentalTitlesSplitsWeakRowsByStoredVerdict(t *testing.T) 
 	ritNoLeak(t, "dry run stdout", out, f)
 }
 
-// ritReleaseLines finds the two release lines, in their place after the three
-// weak detector lines.
-var ritReleaseLines = regexp.MustCompile(`(?m)^weak: (\d+)\n(?:weak, detector says [a-z ]+: \d+\n){2}weak, never scored: \d+\n` +
-	`weak, album named as instrumental: (\d+)\nweak, plain title on an instrumental release \(counted only, a lower bound\): (\d+)\nstrong: `)
+// ritStrongLines finds the strong line and the by-title and by-album lines
+// after it.
+var ritStrongLines = regexp.MustCompile(`(?m)^strong: (\d+)\nstrong by title: (\d+)\nstrong by album: (\d+)\n`)
 
-// A plain title on an instrumental release is counted on two aggregate lines,
-// an upper and a lower bound inside the weak rows, and never acted on (#1525):
-// with --yes its lyric file, its cache entry and its row are as they were, and
-// no block is added for it. The row Strong by its own title is the control: the
-// same run repairs it.
-func TestReconcileInstrumentalTitlesCountsInstrumentalReleases(t *testing.T) {
+// A plain title on an instrumental release is strong by album, counted apart
+// from strong by title, and the two sum to strong; the #1526 weak line is gone.
+// It is not repaired yet (#1564): with --yes its lyric file, its cache entry
+// and its row are as they were, with no block added. The row Strong by its own
+// title is the control: the same run repairs it.
+func TestReconcileInstrumentalTitlesCountsStrongByTitleAndByAlbum(t *testing.T) {
 	const release = "Low Tide (Instrumental)"
-	const upperLine, countLine = "weak, album named as instrumental: 3", "weak, plain title on an instrumental release (counted only, a lower bound): 2"
 	f := newRITFixture(t, "strong", "", false)
 	byTitle, byTitleLRC := f.row(t, "", 0)
 	a1, a1LRC := f.titled(t, "", "", 0)
@@ -304,31 +302,43 @@ func TestReconcileInstrumentalTitlesCountsInstrumentalReleases(t *testing.T) {
 		q("INSERT INTO lyrics_cache (artist, title, duration_bucket, lyrics) SELECT artist_key, title_key, 0, 'cached words' FROM work_queue WHERE id IN (?, ?, ?) RETURNING artist",
 			byTitle, a1, a2)
 	})
+	// The release rows' entries; the by-title row's title carries the word.
+	cache := func() (s string) {
+		f.db(t, func(q func(string, ...any) string) {
+			s = q("SELECT COALESCE(group_concat(artist || '|' || title || '|' || lyrics || '|' || updated_at, ';'), '') FROM (SELECT * FROM lyrics_cache ORDER BY id) WHERE title NOT LIKE '%instrumental%'")
+		})
+		return s
+	}
+	cached := cache()
 	out, code := f.run(t, ScanReconcileInstrumentalTitlesCmd{Tail: f.tail, Backup: f.backup})
 	if code != 0 {
 		t.Fatalf("dry run = %d:\n%s", code, out)
 	}
-	ritWant(t, "dry run", out, "rows examined: 5", "weak: 4", upperLine, countLine, "strong: 1", "candidates: 1", "rows that would be repaired: 1")
-	m := ritReleaseLines.FindStringSubmatch(out)
-	if m == nil {
-		t.Fatalf("dry run lacks the two release lines after the weak detector lines:\n%s", out)
+	ritWant(t, "dry run", out, "rows examined: 5", "weak: 2", "weak, album named as instrumental: 1", "strong: 3", "strong by title: 1",
+		"strong by album: 2", "strong, skipped, by album (not repaired yet): 2", "candidates: 1", "rows that would be repaired: 1")
+	if strings.Contains(out, "plain title on an instrumental release") {
+		t.Errorf("dry run still prints the #1526 line:\n%s", out)
 	}
-	weak, _ := strconv.Atoi(m[1])
-	upper, _ := strconv.Atoi(m[2])
-	strict, _ := strconv.Atoi(m[3])
-	if strict > upper || upper > weak {
-		t.Errorf("release lines: lower bound %d, upper bound %d, weak %d; want lower <= upper <= weak", strict, upper, weak)
+	m := ritStrongLines.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("dry run lacks the by-title and by-album lines after the strong line:\n%s", out)
+	}
+	strong, _ := strconv.Atoi(m[1])
+	byT, _ := strconv.Atoi(m[2])
+	byA, _ := strconv.Atoi(m[3])
+	if byT+byA != strong {
+		t.Errorf("strong by title %d + strong by album %d != strong %d", byT, byA, strong)
 	}
 	ritNoLeak(t, "dry run stdout", out, f)
-	if strings.Contains(out, "Low Tide") || strings.Contains(out, "Paper Lighthouse") {
-		t.Errorf("dry run stdout leaks an album or a title:\n%s", out)
+	if strings.Contains(out, "Low Tide") {
+		t.Errorf("dry run stdout leaks an album:\n%s", out)
 	}
 
 	out, code = f.run(t, ScanReconcileInstrumentalTitlesCmd{Yes: true, Backup: f.backup})
 	if code != 0 {
 		t.Fatalf("apply = %d:\n%s", code, out)
 	}
-	ritWant(t, "apply", out, "weak: 4", upperLine, countLine, "strong: 1", "candidates: 1", "rows repaired: 1",
+	ritWant(t, "apply", out, "weak: 2", "strong: 3", "strong by title: 1", "strong by album: 2", "candidates: 1", "rows repaired: 1",
 		"lyric files removed: 1", "new blocks: 1", "cache entries invalidated: 1", "rows reopened: 1")
 	ritNoLeak(t, "apply stdout", out, f)
 	if _, err := os.Stat(byTitleLRC); err == nil || f.state(t, byTitle) != "pending|null|1" {
@@ -342,14 +352,12 @@ func TestReconcileInstrumentalTitlesCountsInstrumentalReleases(t *testing.T) {
 		if got := f.state(t, r.id); ritRead(t, r.lrc) != ritLRC || got != "done|musixmatch|1" {
 			t.Errorf("row %s = %s, want it still settled with its lyric file as written and only the by-title row's block", r.id, got)
 		}
-		f.db(t, func(q func(string, ...any) string) {
-			if n := q("SELECT COUNT(*) FROM lyrics_cache c JOIN work_queue w ON c.artist = w.artist_key AND c.title = w.title_key WHERE w.id = ?", r.id); n != "1" {
-				t.Errorf("row %s: %s cache entries left for a release row, want 1", r.id, n)
-			}
-		})
 	}
-	if tail := ritRead(t, f.tailApply); tail != byTitle+"\trepaired\n" {
-		t.Errorf("apply tail = %q, want the by-title row alone", tail)
+	if got := cache(); got != cached || strings.Count(cached, ";") != 1 {
+		t.Errorf("cache entries of the two release rows changed:\n got %s\nwant %s", got, cached)
+	}
+	if tail := ritRead(t, f.tailApply); tail != byTitle+"\trepaired\n"+a1+"\tby-album\n"+a2+"\tby-album\n" {
+		t.Errorf("apply tail = %q, want the by-title row repaired and the release rows by album", tail)
 	}
 }
 

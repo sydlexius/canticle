@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/models"
+	"github.com/sydlexius/canticle/internal/prune"
 )
 
 // fakeHealer answers the library-root questions from fixed data and counts how
@@ -42,6 +43,11 @@ func (f *fakeHealer) HealOutputPaths(_ context.Context, _ int64, _, _, _ string,
 // EntryProvablyStale answers f.stale for every entry.
 func (f *fakeHealer) EntryProvablyStale(context.Context, int64, string, models.OutputPath, func(string) bool) (bool, error) {
 	return f.stale, nil
+}
+
+// SourceStateOf never proves anything: this fake does not touch the disk.
+func (f *fakeHealer) SourceStateOf(context.Context, string) (prune.SourceState, error) {
+	return prune.SourceUnproven, nil
 }
 
 // clockedWorker is a fakeQueue worker whose clock the test moves by hand.

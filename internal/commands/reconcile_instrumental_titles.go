@@ -26,8 +26,8 @@ import (
 // ScanReconcileInstrumentalTitlesCmd repairs rows a provider settled with
 // lyrics before the instrumental title rule existed (#1470): the lyric file is
 // backed up and removed, its words are blocked, and the row is reopened so the
-// worker's title rule settles it with a marker. Dry-run unless --yes. Stdout is
-// counts only; row ids go to the --tail file and paths to the backup file.
+// worker's title rule settles it with a marker. Dry-run unless --yes. Stdout
+// is counts only; row ids go to the --tail file and paths to the backup file.
 type ScanReconcileInstrumentalTitlesCmd struct {
 	Yes        bool   `arg:"--yes" help:"actually repair (without it, prints what would change); needs --backup and instrumental_title.mode on"`
 	Backup     string `arg:"--backup" help:"JSONL file each lyric file is appended to before it is removed (required with --yes; appended to if it exists)" default:""`
@@ -295,8 +295,9 @@ func printTitleRepair(out io.Writer, res titlerepair.Result, applied bool) {
 	line("weak, detector says not instrumental", res.WeakDetectorNotInstrumental)
 	line("weak, never scored", res.WeakDetectorUnscored)
 	line("weak, album named as instrumental", res.WeakAlbumInstrumental)
-	line("weak, plain title on an instrumental release (counted only, a lower bound)", res.InstrumentalRelease)
 	line("strong", res.Strong)
+	line("strong by title", res.StrongByTitle)
+	line("strong by album", res.StrongByAlbum)
 	cells := make([]string, 0, len(res.StrongBy))
 	for k, n := range res.StrongBy {
 		if n > 0 {
@@ -314,6 +315,7 @@ func printTitleRepair(out io.Writer, res titlerepair.Result, applied bool) {
 	line("strong, skipped, in flight", res.InFlight)
 	line("strong, skipped, hand-marked", res.HandMarked)
 	line("strong, skipped, artist before the dash or no artist known", res.ArtistPrefixed)
+	line("strong, skipped, by album (not repaired yet)", res.ByAlbum)
 	line("candidates", res.Candidates)
 	line("skipped, symlinked lyric file", res.Symlink)
 	line("skipped, outside library roots", res.OutsideRoots)
