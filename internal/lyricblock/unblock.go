@@ -27,11 +27,12 @@ type UnblockRequest struct {
 // UnblockResult holds counts only.
 type UnblockResult struct {
 	Removed  int // blocks deleted
-	Reopened int // rows settled as blocked that went back to pending
+	Reopened int // rows settled as blocked that went back to pending (one per edition)
 }
 
-// Unblock deletes the named block(s) and reopens a done row on the same track
-// identity that settled as blocked, in one transaction. It does not restore any
+// Unblock deletes the named block(s) and reopens every done row on the same
+// track keys that settled as blocked (one per edition, #1561), in one
+// transaction. It does not restore any
 // lyric file: the next fetch decides what the track gets.
 func (s *Service) Unblock(ctx context.Context, req UnblockRequest) (UnblockResult, error) {
 	if (req.BlockID == 0) == (req.WorkItemID == 0) {
@@ -90,14 +91,13 @@ func (s *Service) unblockTx(ctx context.Context, req UnblockRequest, res *Unbloc
 		}
 		res.Removed = n
 	}
-	// work_queue is unique on (artist_key, title_key), so at most one row matches.
-	ok, err := queue.ReopenBlockedTx(ctx, tx, artistKey, titleKey, time.Now())
+	// One row per edition can share the keys (#1561), and the blocks are keyed
+	// by the two columns alone, so every blocked row on them is reopened.
+	n, err := queue.ReopenBlockedTx(ctx, tx, artistKey, titleKey, time.Now())
 	if err != nil {
 		return err
 	}
-	if ok {
-		res.Reopened++
-	}
+	res.Reopened += n
 	if req.DryRun {
 		// The counts above came from the real delete and reopen; the deferred
 		// rollback discards them, so a dry run can never drift from a real run.

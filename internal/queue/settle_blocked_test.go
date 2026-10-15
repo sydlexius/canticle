@@ -164,7 +164,7 @@ func TestReopenBlockedTx(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ok, err := ReopenBlockedTx(ctx, tx, a, ti, time.Now().UTC())
+		n, err := ReopenBlockedTx(ctx, tx, a, ti, time.Now().UTC())
 		if err != nil {
 			_ = tx.Rollback()
 			t.Fatal(err)
@@ -172,7 +172,7 @@ func TestReopenBlockedTx(t *testing.T) {
 		if err := tx.Commit(); err != nil {
 			t.Fatal(err)
 		}
-		return ok
+		return n > 0
 	}
 
 	t.Run("blocked row reopens and dequeues", func(t *testing.T) {
