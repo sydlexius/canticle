@@ -247,7 +247,7 @@ instrumental gets a marker and no lyrics. With the upgrade sweep on and
 the sweep's population like any detector marker, and a later provider lyric can
 replace it.
 
-**Instrumental releases (counted, not acted on).** Some releases are
+**Instrumental releases.** Some releases are
 instrumental as a whole and say so in the album name, not in each title:
 `Low Tide (Instrumental)`. Canticle recognizes a plain-titled track on such a
 release, and `scan reconcile-instrumental-titles` counts those tracks as
@@ -262,14 +262,20 @@ strong by album: N
 The two add up to `strong`. A row with an unrecognized shape below stays in
 `weak`, on the line `weak, album named as instrumental`.
 
-Nothing acts on a row strong by album yet. The track is looked up like any other, keeps
-the lyrics it has, and its album stays the weaker signal it always was. The
-reason: the queue row, the lyric cache and the lyric block identify a track by
-artist and title, with no album. A library holding both the sung album and its
-instrumental edition has one row per artist and title, carrying the album of
-whichever copy settled first, so such a track is counted or not by scan order,
-and acting on it would affect the sung copy. That is why nothing acts yet
-(#1525).
+Before the edition column (#1525), the queue row identified a track by
+artist and title, with no album, so a library holding both the sung album and
+its instrumental edition had one row for both, carrying the album of whichever
+copy settled first. With `--yes`, the command first splits such legacy rows,
+database-only: a row that describes the release copy is re-keyed to the
+instrumental edition, and the other edition's scan results are detached and
+returned to pending, so the next scan gives that copy its own row.
+
+Then the repair culls a row strong by album like one strong by title, but adds
+no block (#1564): the words are the sung copy's too, and a block under the
+shared artist and title would refuse them there. It acts only on the release's
+own row (the instrumental edition) whose audio file's album still names the
+release. A row the split left shared (one with an output in both editions'
+folders, say) keeps its lyrics and is counted.
 
 The album name must end in the marker. The marker's whole content is one of
 `Instrumental`, `Instrumentals`, `Instrumental Version`, `Instrumental Edition`
@@ -404,8 +410,9 @@ Turning the rule on changes nothing for a track that already has a lyric on
 disk. `scan reconcile-instrumental-titles` finds the tracks a provider settled
 with lyrics whose title the rule would now settle as instrumental, and repairs
 the ones it can prove it is safe to touch: the lyric file is saved to a backup
-and removed, its words are blocked for that track, and the track is queued
-again. The running worker then settles it with a `[source:title-rule]` marker.
+and removed, its words are blocked for that track (a track strong by its
+title; a track strong by album gets no block, see "Instrumental releases"),
+and the track is queued again. The running worker then settles it with a `[source:title-rule]` marker.
 
 ```sh
 canticle scan reconcile-instrumental-titles                                # dry run: counts only
@@ -445,18 +452,23 @@ appear only inside the backup file.
 
 | Line | Meaning |
 |---|---|
+| `legacy rows shared by two editions or on an instrumental release` | The split, which runs first and is printed first (#1525): rows made before the edition column that describe a copy on an instrumental release, or link the scan result of a copy of the other edition. Equals the split line and the four after it. |
+| `rows would be split` / `rows split` | Rows the split re-keys or detaches from. Database-only: no file, cache entry or block is touched and no row is reopened; a hand-protected row is split too. A record of each is appended to `--backup` first. |
+| `split skipped, in flight` / `split skipped, an output in the other edition's folder` / `split skipped, an instrumental row with the same keys exists` | Left as they are: a worker holds the row; an output sits in a folder of the other edition's copy; or the instrumental row the re-key would make exists already. |
+| `split errors` | The row could not be split. See the exit status. |
+| `rows would be re-keyed as instrumental` / `rows re-keyed as instrumental`, `scan results would be detached` / `scan results detached`, `scan results returned to pending` | What the split does: the row moves to the instrumental edition, and the other edition's scan results are unlinked and set back to pending (unless another row links them) so the next scan offers them again. |
 | `rows examined` | Tracks whose lyrics came from a provider: settled ones, and ones a worker holds right now (`processing`). Equals no signal + weak + strong. |
 | `no signal or excluded (a cappella, karaoke, sing-along)` | The title carries no qualifier, or is a cappella, or the title or album names karaoke or a sing-along product. Never touched. |
 | `weak` | A weak signal only. Never touched. |
 | `weak, detector says instrumental` / `weak, detector says not instrumental` / `weak, never scored` | The weak rows by the verdict the detector already stored for them; the three add up to `weak`. Nothing is run to get it. It sizes a possible weak-tier repair. |
 | `weak, album named as instrumental` | The weak rows whose own title carries no signal and whose stored album name says instrumental in a shape the release rule does not recognize. A count only. |
 | `strong` | A strong qualifier, or a plain title on an instrumental release. The `strong <family> <position>` lines and the three detector lines break this number down. It equals the five `strong, skipped` lines plus `candidates`. |
-| `strong by title` / `strong by album` | The strong rows the title decides, and those the album name decides (see "Instrumental releases" above, from the stored album and artists; no audio file is read for them). The two add up to `strong`. |
-| `strong, skipped, audio file unreadable` | The audio file's album tag could not be read, so the title could not be judged the way the worker judges it. |
+| `strong by title` / `strong by album` | The strong rows the title decides, and those the album name decides (see "Instrumental releases" above, from the stored album and artists). The two add up to `strong`. |
+| `strong, skipped, audio file unreadable` | The audio file's album tag could not be read, so the title could not be judged the way the worker judges it. A row strong by album is counted here too when its audio file is gone, even with enrichment off: with no block, its row would otherwise be reopened for a deleted track. |
 | `strong, skipped, in flight` | A worker holds the row right now. |
 | `strong, skipped, hand-marked` | The lyrics were edited by hand, or the track was marked instrumental by hand. |
 | `strong, skipped, artist before the dash or no artist known` | The rule declines the title (see "The artist check"): the text before the dash could be the artist, or no real artist is known. |
-| `strong, skipped, by album (not repaired yet)` | Strong by album and none of the skips above. Not repaired by this version: its row, cache entry and block may be shared with the sung copy (#1525). |
+| `strong, skipped, by album, not the release's own row` | Strong by album and none of the skips above, but its row still has an empty edition (the split left it shared with the sung copy), or its audio file's album no longer names the release. The rest strong by album are candidates, repaired with no block (#1564). |
 | `candidates` | Rows the repair examined on disk. Equals every line from here down to the repaired line. |
 | `skipped, symlinked lyric file` | A lyric file is a symlink. |
 | `skipped, outside library roots` | An output directory is in no configured library, or is gone. |
@@ -487,7 +499,7 @@ These tracks keep their lyrics. To replace one by hand, use `scan mark-wrong`.
 
 **Needs a manual mark.** A file appeared or changed while its row was being
 repaired. The row is left settled with its files in place, but its words are
-already blocked. A rerun skips it again. Find the ids in the `--tail` file and
+already blocked (unless it is strong by album). A rerun skips it again. Find the ids in the `--tail` file and
 run `canticle scan mark-wrong --id <id> --yes` for each.
 
 **One pass is not exhaustive.** A track waiting on an upgrade re-fetch or a
