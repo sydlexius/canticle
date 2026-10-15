@@ -1,0 +1,103 @@
+package templates
+
+// RepairPrompt is the reusable fragment a page embeds to offer an operator
+// repair (#1543): the pending count, what it changes, a cost warning when the
+// repair reads library files, and a link to the confirm page; or, while a run
+// is live, a one-line progress report. It renders NOTHING when the count is
+// zero and no run is live.
+templ RepairPrompt(v RepairPromptView) {
+	if v.Visible() {
+		<section class="mx-repair-prompt" aria-label={ v.Title }>
+			if v.Running {
+				<p class="mx-repair-line" role="status">{ v.Title }: running, { repairProgressText(v.Done, v.Total) }.</p>
+				<a class="mx-run-link" href={ v.StartHref }>View progress</a>
+			} else {
+				<p class="mx-repair-line"><strong>{ itoa64(v.Count) }</strong> pending: { v.Title }.</p>
+				<p class="mx-repair-desc">{ v.Description }</p>
+				@repairCost(v.ReadsFiles, v.CostNote)
+				<a class="mx-run-button" href={ v.StartHref }>Review and start</a>
+			}
+		</section>
+	}
+}
+
+// repairCost is the cost block: the files/spun-down sentence whenever the
+// repair reads files, and the repair's CostNote whenever it has one,
+// independent of ReadsFiles.
+templ repairCost(readsFiles bool, note string) {
+	if readsFiles || note != "" {
+		<p class="mx-repair-cost" role="note">
+			if readsFiles {
+				This reads your library files, which can wake a spun-down disk array.
+			}
+			if note != "" {
+				{ note }
+			}
+		</p>
+	}
+}
+
+// RepairRunPage is the run page: confirm, running or finished. A plain reload
+// re-renders the current state from the server.
+templ RepairRunPage(version string, view RepairRunView, reports []RailItem, musixmatchInactive bool, musixmatchServing bool) {
+	@Layout(view.Title, "/dashboard", version, reports, "", musixmatchInactive, musixmatchServing) {
+		<h1 class="mx-page-title">{ view.Title }</h1>
+		<p class="mx-page-subtitle">{ view.Description }</p>
+		@RepairRunBody(view)
+		<p class="mx-repair-back"><a class="mx-run-link" href={ view.BackHref }>Back</a></p>
+	}
+}
+
+// RepairRunBody is the state region, also the htmx poll response. While
+// running it polls itself and swaps in place; once the state is finished the
+// response carries no hx-trigger, so polling stops.
+templ RepairRunBody(view RepairRunView) {
+	switch view.State {
+		case RepairRunning:
+			<div id="mx-repair-run" class="mx-repair-run" hx-get={ view.PollHref } hx-trigger="every 2s" hx-swap="outerHTML">
+				<p class="mx-repair-line">Running: { repairProgressText(view.Done, view.Total) }.</p>
+				if view.Total > 0 {
+					<progress class="mx-repair-progress" aria-label="Repair progress" max={ itoa64(view.Total) } value={ itoa64(view.Done) }></progress>
+				}
+				<form method="post" action={ view.CancelAction }>
+					<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+					<button type="submit" class="mx-run-button">Cancel</button>
+				</form>
+			</div>
+		case RepairFinished:
+			<div id="mx-repair-run" class="mx-repair-run">
+				switch {
+					case view.Failed:
+						<p class="mx-repair-line mx-status-error" role="alert">The run failed. Details are in the server log.</p>
+					case view.Canceled:
+						<p class="mx-repair-line" role="status">The run was canceled. Rows already changed stay changed.</p>
+					default:
+						<p class="mx-repair-line" role="status">The run finished.</p>
+				}
+				if len(view.Counts) > 0 {
+					<dl class="mx-repair-counts">
+						for _, c := range view.Counts {
+							<dt>{ c.Label() }</dt>
+							<dd>{ itoa64(c.N) }</dd>
+						}
+					</dl>
+				}
+			</div>
+		default:
+			<div id="mx-repair-run" class="mx-repair-run">
+				<p class="mx-repair-line"><strong>{ itoa64(view.Pending) }</strong> pending.</p>
+				if view.Pending > 0 {
+					@repairCost(view.ReadsFiles, view.CostNote)
+					if view.NeedsBackup {
+						<p class="mx-repair-desc">A backup file is written beside the database before any change.</p>
+					}
+					<form method="post" action={ view.StartAction }>
+						<input type="hidden" name="csrf_token" value={ view.CSRFToken }/>
+						<button type="submit" class="mx-run-button">Start</button>
+					</form>
+				} else {
+					<p class="mx-repair-desc">Nothing to do.</p>
+				}
+			</div>
+	}
+}
