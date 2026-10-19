@@ -3,7 +3,7 @@
 # top-level-only requirements.txt). The full transitive hash lock is
 # per-architecture: requirements-linux-amd64.txt / requirements-linux-arm64.txt
 # (see either file's header for the exact regeneration command).
-fastapi==0.143.2
+fastapi==0.143.3
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
 # torch 2.14.1 / torchaudio 2.11.0. The 2.8.0 hold ended at torch 2.14.0
@@ -39,10 +39,10 @@ demucs==4.0.1
 # wrapped this same library plus its own bundled pyannote VAD). transformers:
 # the Hugging Face wav2vec2 forced-alignment models for the non-torchaudio
 # languages (see app.ALIGN_MODELS / _aligner_models.FasterWhisperAligner).
-# faster-whisper is pinned at 1.2.1 and transformers at 5.20.0. They were
+# faster-whisper is pinned at 1.2.1 and transformers at 5.20.1. They were
 # first pinned at 1.2.1/5.17.0, the same versions the whisperx image's own
-# freeze carried (measured, #1016 review); 5.18.0, 5.19.0 and then 5.20.0 are
-# later Dependabot bumps.
+# freeze carried (measured, #1016 review); 5.18.0, 5.19.0, 5.20.0 and then
+# 5.20.1 are later Dependabot bumps.
 # A fresh resolution of this file first picked transformers 4.57.1, which
 # carries known advisories a current release fixes (PYSEC-2026-2289, a
 # config.json-driven RCE fixed in 5.3.0; PYSEC-2026-3929, fixed in 5.10.0),
@@ -63,7 +63,7 @@ demucs==4.0.1
 # decode_audio only for a path or file object. That call shape is
 # load-bearing: passing model.transcribe a path needs `av<19` here first.
 faster-whisper==1.2.1
-transformers==5.20.0
+transformers==5.20.1
 # huggingface-hub is held at 1.33.0, the last 1.x. It is transitive (via
 # transformers, tokenizers and faster-whisper, which downloads every model
 # through it), pinned here only to keep the 2.x major out of a routine lock
