@@ -7,9 +7,10 @@
 # index (https://download.pytorch.org/whl/cpu), and uv's hash set covers
 # only the wheel it actually resolved for the target platform, not every
 # wheel the sdist could produce elsewhere. Every package in this closure
-# ships a wheel for BOTH arches except demucs and antlr4-python3-runtime,
-# which are pure-Python and sdist-only (built at image build time; both
-# are named --no-binary below). The recipe passes --only-binary :all: so a
+# ships a wheel for BOTH arches except demucs, which is pure-Python and
+# sdist-only (built at image build time; named --no-binary below). The
+# recipe's --no-binary antlr4-python3-runtime is now inert: omegaconf 2.4.0
+# dropped that dependency. The recipe passes --only-binary :all: so a
 # dependency with no wheel for a target arch fails at resolve time instead
 # of at image build (demucs 4.1.0's sphn has no aarch64 wheel, #1102). Entries
 # are identical between the two files except for hashes; only
@@ -36,7 +37,7 @@
 #   (then re-add this header block)
 #
 # Generated: --exclude-newer 2026-10-15T19:00:00Z (verified to reproduce this
-# exact lock, including filelock==4.0.12, byte-for-byte).
+# exact lock, including filelock==4.2.0, byte-for-byte).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
     --hash=sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb
