@@ -63,7 +63,7 @@ demucs==4.0.1
 # decode_audio only for a path or file object. That call shape is
 # load-bearing: passing model.transcribe a path needs `av<19` here first.
 faster-whisper==1.2.1
-transformers==5.20.0
+transformers==5.20.1
 # huggingface-hub is held at 1.33.0, the last 1.x. It is transitive (via
 # transformers, tokenizers and faster-whisper, which downloads every model
 # through it), pinned here only to keep the 2.x major out of a routine lock
