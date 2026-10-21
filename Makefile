@@ -12,7 +12,7 @@ TAILWIND ?= tailwindcss
 
 # Pinned govulncheck version for reproducible vulnerability scans. Manual pin:
 # scripts/check-tool-versions.sh asserts the golangci-lint and grype version pins.
-GOVULNCHECK_VERSION=v1.1.4
+GOVULNCHECK_VERSION=v1.9.0
 
 ## build: Build the binary (regenerates web UI assets first)
 # Generated web assets (web/templates/*_templ.go, web/static/css/output.css) are

@@ -91,7 +91,7 @@ make test                # race tests
 make test-shuffle        # race tests with randomized order (-shuffle=on)
 make test-cover          # coverage profile + HTML report
 make coverage-floor      # enforce the per-package coverage floor
-make vulncheck           # govulncheck (pinned: govulncheck@v1.1.4)
+make vulncheck           # govulncheck (pinned: govulncheck@v1.9.0)
 make scan                # build the Docker image and scan it for HIGH+ CVEs (needs Docker + grype at the ci.yml pin)
 make sync-tool-versions  # assert the golangci-lint and grype pins match across CI and local (scripts/check-tool-versions.sh)
 ```
