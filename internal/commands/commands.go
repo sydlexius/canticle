@@ -993,6 +993,11 @@ func lyricPreview(song models.Song, n int) string {
 // checkpoints they record are exactly as ordered as the source is.
 var serveStartupOrderHook func(checkpoint string)
 
+// serveWriterDBHook, non-nil only in tests, receives runServe's writer handle
+// right after it opens and migrates, so a test can seed it or hold its single
+// connection (#1649: a held writer must not stall the web UI's report reads).
+var serveWriterDBHook func(*sql.DB)
+
 // titleRuleOn reports whether the instrumental title rule is on (#1468): every
 // mode but off settles a Strong title the same way. It reads the mode through
 // the normalizing accessor, never the raw field, so an unrecognized value is
@@ -1039,6 +1044,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if err != nil {
 		slog.Error("failed to open database", "error", err)
 		return 1
+	}
+	if serveWriterDBHook != nil {
+		serveWriterDBHook(sqlDB)
 	}
 
 	// Resolve the master key and build the encrypted secret store. The key is
@@ -1344,6 +1352,39 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		redirectLn = ln
 	}
 
+	// The web UI's reports read through their own query-only pool on the same
+	// file (#1649), so a dashboard render never waits behind the worker,
+	// scanner and watcher for sqlDB's single connection. Opened after sqlDB
+	// migrated the schema. A failure here is a fatal startup error rather than
+	// a silent fallback to the writer, which would bring back the timeouts.
+	var reportsReadDB *sql.DB
+	if cfg.Server.WebUIEnabled {
+		if serveStartupOrderHook != nil {
+			serveStartupOrderHook("reports_read_pool_opening")
+		}
+		reportsReadDB, err = db.OpenReadPool(ctx, cfg.DB.Path, serveReportsReadConns)
+		if err != nil {
+			if redirectLn != nil {
+				_ = redirectLn.Close()
+			}
+			_ = sqlDB.Close()
+			slog.Error("failed to open the web UI read pool", "error", err)
+			return 1
+		}
+	}
+	// closeReportsReadDB runs only after httpDrained, so no request still holds it.
+	closeReportsReadDB := func() {
+		if reportsReadDB == nil {
+			return
+		}
+		if err := reportsReadDB.Close(); err != nil {
+			slog.Warn("failed to close the web UI read pool", "error", err)
+		}
+		if serveStartupOrderHook != nil {
+			serveStartupOrderHook("reports_read_pool_closed")
+		}
+	}
+
 	// Word-sync recheck sweep (#1048): built here, before any goroutine starts,
 	// because it reads the worker's lane set for the word generation. Only with
 	// a live provider, since the flipped rows need the worker to drain them.
@@ -1408,8 +1449,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			server.WithNoWordLane(noWordLane(fetcher, lyricsDisabled, fallbacks)),
 			server.WithOnboarding(onboarding),
 			// Back the Reports workspace with the same DB the rest of serve mode
-			// uses; the handler builds a read-only reports.Repo from it (#211).
+			// uses (#211); its read-only reports.Repo reads through the pool.
 			server.WithReportsDB(sqlDB),
+			server.WithReportsReadDB(reportsReadDB),
 			// The lyric offset editor (#481 Stage 2) judges a save against the
 			// exact audio duration and records its rewrite so the watcher drops it.
 			server.WithLyricEditDeps(audiodur.New(sqlDB, scanner.DurationReaderVersion), selfWrites),
@@ -1506,6 +1548,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		// The shutdown goroutine is already running (cancel released it); wait
 		// for it so it never outlives runServe.
 		<-httpDrained
+		closeReportsReadDB()
 		_ = sqlDB.Close()
 		slog.Error("HTTP listener failed to bind; aborting startup", "addr", addr, "error", listenErr)
 		return 1
@@ -1693,6 +1736,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	cancel()
 	wg.Wait()
 	<-httpDrained
+	closeReportsReadDB()
 	if serveStartupOrderHook != nil {
 		serveStartupOrderHook("db_closing")
 	}
@@ -1812,6 +1856,10 @@ func bootstrapAdminFromEnv(ctx context.Context, svc *webauth.Service) error {
 	slog.Info("bootstrapped web admin from environment", "user", user)
 	return nil
 }
+
+// serveReportsReadConns sizes the web UI's read pool (#1649): enough for a few
+// concurrent page renders, each of which runs its report queries in sequence.
+const serveReportsReadConns = 4
 
 // sessionSweepInterval is how often the background sweeper deletes expired and
 // revoked sessions.

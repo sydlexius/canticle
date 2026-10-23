@@ -100,6 +100,7 @@ type Handler struct {
 	noWordLane         bool // no word-capable lane is enabled in config: line is the reports' top rung too (#1350)
 	onboarding         *web.Onboarding
 	reportsDB          *sql.DB
+	reportsReadDB      *sql.DB
 	editDurations      *audiodur.Store
 	editSelfWrites     *selfwrite.Registry
 	previewFlacFFmpeg  string
@@ -293,12 +294,27 @@ func WithOnboarding(o *web.Onboarding) Option {
 }
 
 // WithReportsDB wires the database that backs the serve-mode Reports workspace.
-// The handler builds a reports.Repo from db for the read-only reports and, on the
-// same read-write handle, the queue action backend behind the revive page (see
-// NewHandler); it attaches both to the mounted web UI. It is meaningful only
+// The handler builds a reports.Repo from db for the read-only reports (unless
+// WithReportsReadDB supplies a read pool) and, on this read-write handle, the
+// queue action backend behind the revive page (see NewHandler); it attaches both
+// to the mounted web UI. It is meaningful only
 // alongside a mounted web UI; with no UI, or a nil db, it is a no-op (the reports routes never mount).
 func WithReportsDB(db *sql.DB) Option {
 	return func(h *Handler) { h.reportsDB = db }
+}
+
+// WithReportsReadDB moves the read-only reports.Repo off the WithReportsDB
+// handle onto db, a query-only pool from db.OpenReadPool (#1649), so reads do
+// not queue behind the worker for the single writer connection. The pool serves
+// every reports.Repo read: the Dashboard, Queue and Reports pages and the
+// preview, FLAC-fallback, auto-run and lyric-editor lookups, including the
+// editor's re-check after a mark (safe: the mark commits on the writer first,
+// and each pooled SELECT outside a transaction takes a fresh WAL snapshot).
+// Every write (queue actions, revive, the editor's save) stays on the
+// WithReportsDB handle. A nil db leaves the reports on that handle; without
+// WithReportsDB nothing mounts either way.
+func WithReportsReadDB(db *sql.DB) Option {
+	return func(h *Handler) { h.reportsReadDB = db }
 }
 
 // WithLyricEditDeps supplies the lyric offset editor (#481 Stage 2) with the
@@ -423,7 +439,11 @@ func NewHandler(a Authenticator, q WorkQueue, outdir string, opts ...Option) *Ha
 			h.webui.AttachOnboarding(h.onboarding)
 		}
 		if h.reportsDB != nil {
-			h.webui.AttachReports(reports.New(h.reportsDB, reports.WithLineTopRung(h.wordSyncOff || h.noWordLane)))
+			readDB := h.reportsDB
+			if h.reportsReadDB != nil {
+				readDB = h.reportsReadDB
+			}
+			h.webui.AttachReports(reports.New(readDB, reports.WithLineTopRung(h.wordSyncOff || h.noWordLane)))
 			h.webui.AttachQueueActions(queue.NewDBQueue(h.reportsDB))
 			h.webui.AttachLyricEditor(web.EditDeps{
 				Queue: queue.NewDBQueue(h.reportsDB), Durations: h.editDurations, SelfWrites: h.editSelfWrites,

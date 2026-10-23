@@ -162,3 +162,75 @@ func OpenReadOnly(ctx context.Context, path string) (*sql.DB, error) {
 	}
 	return sqlDB, nil
 }
+
+// readPoolDSN is the query string OpenReadPool opens with. The driver runs each
+// _pragma on every new connection it opens (modernc.org/sqlite newConn ->
+// applyQueryParams), so unlike a PRAGMA executed once on the handle, these hold
+// for every connection the pool ever creates, including ones it opens later to
+// replace a closed or expired one. busy_timeout covers the brief WAL-index and
+// checkpoint locks a reader can still meet; query_only rejects any write.
+const readPoolDSN = "?_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+
+// OpenReadPool opens an existing, already-migrated database as a pool of up to
+// conns query-only connections (#1649). It is for read-heavy serve paths, such
+// as the web UI's reports, that must not queue behind the single writer
+// connection Open returns.
+//
+// Open and OpenReadOnly hold one connection because they set their PRAGMAs once
+// on the handle, which only reaches the connection open at the time. This
+// handle can be multi-connection because its PRAGMAs ride in the DSN and apply
+// to every pooled connection, and because it never writes: in WAL mode any
+// number of readers run alongside the one writer, each on its own snapshot.
+// Every handle that writes stays single-connection.
+//
+// Like OpenReadOnly it does not create the file or its directory, change the
+// journal mode, or run migrations; the writer handle owns all of that and must
+// have opened the database first. It errors unless the file is already in WAL
+// mode. The caller must close the returned DB.
+func OpenReadPool(ctx context.Context, path string, conns int) (*sql.DB, error) {
+	if path == "" {
+		return nil, fmt.Errorf("db: path must not be empty")
+	}
+	if conns < 1 {
+		return nil, fmt.Errorf("db: read pool size must be at least 1, got %d", conns)
+	}
+	// The driver opens with SQLITE_OPEN_CREATE, so a missing file would be
+	// created empty rather than reported.
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("db: open read pool %s: %w", path, err)
+	}
+	sqlDB, err := sql.Open("sqlite", path+readPoolDSN)
+	if err != nil {
+		return nil, fmt.Errorf("db: open read pool %s: %w", path, err)
+	}
+	sqlDB.SetMaxOpenConns(conns)
+	// Keep every connection warm: the dashboard fans out in bursts, and a
+	// connection dropped between bursts must be reopened and re-pragma'd.
+	sqlDB.SetMaxIdleConns(conns)
+
+	// Fail at startup, not on the first page load, if a connection cannot be
+	// opened or the DSN pragmas did not take. This does not read the schema;
+	// the writer handle has already opened and migrated the file.
+	var queryOnly int
+	if err := sqlDB.QueryRowContext(ctx, "PRAGMA query_only").Scan(&queryOnly); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("db: read pool query_only: %w", err)
+	}
+	if queryOnly != 1 {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("db: read pool query_only = %d, want 1", queryOnly)
+	}
+	// Open only warns when WAL does not take, but this pool is safe beside the
+	// writer only in WAL: in a rollback journal its readers and the writer's
+	// commits block each other. Refuse rather than bring the timeouts back.
+	var journalMode string
+	if err := sqlDB.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("db: read pool journal_mode: %w", err)
+	}
+	if journalMode != "wal" {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("db: read pool journal_mode = %q, want wal", journalMode)
+	}
+	return sqlDB, nil
+}
