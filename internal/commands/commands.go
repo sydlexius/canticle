@@ -1372,7 +1372,9 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 			return 1
 		}
 	}
-	// closeReportsReadDB runs only after httpDrained, so no request still holds it.
+	// closeReportsReadDB runs only after httpDrained. If Shutdown hit its timeout a
+	// handler may still be running; Close waits for its in-flight query and fails
+	// any new one, as sqlDB.Close does right after.
 	closeReportsReadDB := func() {
 		if reportsReadDB == nil {
 			return

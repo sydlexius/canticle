@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -45,6 +46,9 @@ func writeWebUIServeConfig(t *testing.T, extra string) (cfgPath, dbPath, addr st
 // had already bound. The database file is removed just before the pool opens,
 // so the writer (holding its descriptor) is up but the pool's stat fails.
 func TestRunServe_ReportsReadPoolOpenFailureAbortsStartup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cannot remove a database file the writer still holds open on Windows")
+	}
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	redirectAddr := freePort(t)
