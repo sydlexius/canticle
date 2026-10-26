@@ -3,6 +3,7 @@
 # multi-arch manifest-list (index) digest, NOT a local arch-specific one, so the
 # pin resolves on any build arch:
 #   docker buildx imagetools inspect python:3.13-slim --format '{{.Manifest.Digest}}'
+# Keep .python-version (Dependabot's resolver Python) on this same minor.
 FROM python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0
 
 # libsndfile is the native backend soundfile needs to decode the WAV samples.

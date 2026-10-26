@@ -68,6 +68,11 @@ updates:
   #
   # Dependabot regenerates the --require-hashes hashes on a bump, so both the
   # runtime lock and the test lock stay installable.
+  #
+  # deploy/yamnet-detector/.python-version pins Dependabot's resolver to 3.13,
+  # the image's Python (Dockerfile FROM python:3.13-slim). Without it Dependabot
+  # resolves on its newest Python (3.14), where tensorflow-cpu 2.21.0 has no
+  # wheel, so every update job here failed as dependency_file_not_resolvable.
   - package-ecosystem: pip
     directory: /deploy/yamnet-detector
     schedule:
