@@ -16,11 +16,11 @@
 #   cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
 #     bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
 #       --python-version 3.14 --no-header --no-emit-index-url \
-#       --exclude-newer 2026-10-20T03:00:00Z \
+#       --exclude-newer 2026-10-23T00:00:00Z \
 #       requirements-test.in -o requirements-test.txt'
 #   (then re-add this header block)
 #
-# Generated: --exclude-newer 2026-10-20T03:00:00Z (verified to reproduce this
+# Generated: --exclude-newer 2026-10-23T00:00:00Z (verified to reproduce this
 # exact lock byte-for-byte).
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
@@ -42,9 +42,9 @@ certifi==2026.10.19 \
     # via
     #   httpcore
     #   httpx
-fastapi==0.143.3 \
-    --hash=sha256:75e8bd68e2f52f77d29b2879749c257d64de2d85282d25270caf2bfccce5efe5 \
-    --hash=sha256:b9ab567ee57afb4454004ce04c889f8f0160ac47946b99795887cd6e88484848
+fastapi==0.161.1 \
+    --hash=sha256:4076b88434452e20289379068e976c4a04c65ffc8e6be31510106e150a422f0f \
+    --hash=sha256:a1363080cf9aeedecd99f4e1a23669d7e77542227f6536f4d7bbd59f07ecaa94
     # via
     #   -c requirements.in
     #   -r requirements-test.in
