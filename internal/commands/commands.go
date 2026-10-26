@@ -1314,13 +1314,51 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 		return 1
 	}
 
+	// Reads go through their own query-only pool on the same file (#1649 reports,
+	// #1652 session/user lookups and /readyz), so a page render, a signed-in
+	// request or a readiness probe never waits behind the worker, scanner and
+	// watcher for sqlDB's single connection. Opened after sqlDB migrated the
+	// schema and before buildWebAuth, which wires the auth stores to it. It is
+	// opened even with the web UI off (one connection, for /readyz alone, so a
+	// headless daemon's healthcheck survives a long write); only the UI wiring
+	// below is gated on the setting. A failure here is a fatal startup error
+	// rather than a silent fallback to the writer, which would bring back the
+	// timeouts.
+	readConns := 1
+	if cfg.Server.WebUIEnabled {
+		readConns = serveReportsReadConns
+	}
+	// The checkpoints name the web UI's pool; the headless readiness pool stays
+	// out of the startup-order contract other tests pin.
+	if cfg.Server.WebUIEnabled && serveStartupOrderHook != nil {
+		serveStartupOrderHook("reports_read_pool_opening")
+	}
+	reportsReadDB, err := db.OpenReadPool(ctx, cfg.DB.Path, readConns)
+	if err != nil {
+		_ = sqlDB.Close()
+		slog.Error("failed to open the read pool", "error", err)
+		return 1
+	}
+	// closeReportsReadDB runs only after httpDrained. If Shutdown hit its timeout a
+	// handler may still be running; Close waits for its in-flight query and fails
+	// any new one, as sqlDB.Close does right after.
+	closeReportsReadDB := func() {
+		if err := reportsReadDB.Close(); err != nil {
+			slog.Warn("failed to close the web UI read pool", "error", err)
+		}
+		if cfg.Server.WebUIEnabled && serveStartupOrderHook != nil {
+			serveStartupOrderHook("reports_read_pool_closed")
+		}
+	}
+
 	// Build the authenticated web UI subsystem (#204, lane 4) only when the UI is
 	// enabled. It backs both the browser-session login and the first-run
 	// onboarding flow, and bootstraps an env-provided admin (#259). When the UI
 	// is disabled all returns are nil and serve mode keeps its pre-#204 behavior
 	// (webhook + health only).
-	webAuthSvc, webAuth, onboarding, err := buildWebAuth(ctx, cfg, sqlDB, store, trustPolicy, version)
+	webAuthSvc, webAuth, onboarding, err := buildWebAuth(ctx, cfg, sqlDB, reportsReadDB, store, trustPolicy, version)
 	if err != nil {
+		closeReportsReadDB()
 		_ = sqlDB.Close()
 		slog.Error("failed to initialize web authentication", "error", err)
 		return 1
@@ -1333,6 +1371,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// return rather than a leaked listener.
 	certMgr, err := servetls.BuildCertManager(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.SelfSigned, filepath.Dir(cfg.DB.Path), cfg.Server.TLS.SelfSignedHosts)
 	if err != nil {
+		closeReportsReadDB()
 		_ = sqlDB.Close()
 		slog.Error("failed to initialize TLS", "error", err)
 		return 1
@@ -1345,46 +1384,12 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	if certMgr != nil && cfg.Server.TLS.RedirectHTTP != "" {
 		ln, listenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Server.TLS.RedirectHTTP)
 		if listenErr != nil {
+			closeReportsReadDB()
 			_ = sqlDB.Close()
 			slog.Error("HTTP redirect listener failed to bind; aborting startup", "addr", cfg.Server.TLS.RedirectHTTP, "error", listenErr)
 			return 1
 		}
 		redirectLn = ln
-	}
-
-	// The web UI's reports read through their own query-only pool on the same
-	// file (#1649), so a dashboard render never waits behind the worker,
-	// scanner and watcher for sqlDB's single connection. Opened after sqlDB
-	// migrated the schema. A failure here is a fatal startup error rather than
-	// a silent fallback to the writer, which would bring back the timeouts.
-	var reportsReadDB *sql.DB
-	if cfg.Server.WebUIEnabled {
-		if serveStartupOrderHook != nil {
-			serveStartupOrderHook("reports_read_pool_opening")
-		}
-		reportsReadDB, err = db.OpenReadPool(ctx, cfg.DB.Path, serveReportsReadConns)
-		if err != nil {
-			if redirectLn != nil {
-				_ = redirectLn.Close()
-			}
-			_ = sqlDB.Close()
-			slog.Error("failed to open the web UI read pool", "error", err)
-			return 1
-		}
-	}
-	// closeReportsReadDB runs only after httpDrained. If Shutdown hit its timeout a
-	// handler may still be running; Close waits for its in-flight query and fails
-	// any new one, as sqlDB.Close does right after.
-	closeReportsReadDB := func() {
-		if reportsReadDB == nil {
-			return
-		}
-		if err := reportsReadDB.Close(); err != nil {
-			slog.Warn("failed to close the web UI read pool", "error", err)
-		}
-		if serveStartupOrderHook != nil {
-			serveStartupOrderHook("reports_read_pool_closed")
-		}
 	}
 
 	// Word-sync recheck sweep (#1048): built here, before any goroutine starts,
@@ -1410,7 +1415,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	repairs.closeOnDone(runCtx, &wg)
 
 	handlerOpts := []server.Option{
-		server.WithReadiness(sqlDB),
+		server.WithReadiness(reportsReadDB),
 		server.WithStatusReporter(workQ),
 		// WithMetricsReporter is required: omitting it causes GET /metrics to return 500.
 		// Decorate the queue reporter with the shared cache repo so /metrics also
@@ -1768,7 +1773,7 @@ func buildRedirectServer(redirectAddr, tlsAddr string) *http.Server {
 // all-nil components (and no error), so the caller keeps the pre-#204 behavior.
 // A bootstrap failure (e.g. a too-short env password) is returned as a fatal
 // error.
-func buildWebAuth(ctx context.Context, cfg config.Config, sqlDB *sql.DB, store secrets.Store, policy *trustnet.Policy, version string) (*webauth.Service, *web.Auth, *web.Onboarding, error) {
+func buildWebAuth(ctx context.Context, cfg config.Config, sqlDB, readDB *sql.DB, store secrets.Store, policy *trustnet.Policy, version string) (*webauth.Service, *web.Auth, *web.Onboarding, error) {
 	if !cfg.Server.WebUIEnabled {
 		// Credentials were supplied for a feature that is switched off. Without
 		// this warning the operator gets a healthy startup, no admin account, and
@@ -1788,7 +1793,9 @@ func buildWebAuth(ctx context.Context, cfg config.Config, sqlDB *sql.DB, store s
 		}
 		return nil, nil, nil, nil
 	}
-	svc := webauth.NewService(webauth.NewSQLUserStore(sqlDB), webauth.NewSQLSessionStore(sqlDB))
+	svc := webauth.NewService(
+		webauth.NewSQLUserStore(sqlDB).WithReadDB(readDB),
+		webauth.NewSQLSessionStore(sqlDB).WithReadDB(readDB))
 	// #259: bootstrap the first admin from the environment before serving so a
 	// Docker deployment can come up with credentials and no interactive setup.
 	if err := bootstrapAdminFromEnv(ctx, svc); err != nil {
@@ -1859,7 +1866,7 @@ func bootstrapAdminFromEnv(ctx context.Context, svc *webauth.Service) error {
 	return nil
 }
 
-// serveReportsReadConns sizes the web UI's read pool (#1649): enough for a few
+// serveReportsReadConns sizes the web UI's read pool (#1649, one connection when the UI is off): enough for a few
 // concurrent page renders, each of which runs its report queries in sequence.
 const serveReportsReadConns = 4
 

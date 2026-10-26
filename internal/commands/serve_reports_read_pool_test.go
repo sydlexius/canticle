@@ -5,12 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +24,12 @@ import (
 // verbatim to [server].
 func writeWebUIServeConfig(t *testing.T, extra string) (cfgPath, dbPath, addr string) {
 	t.Helper()
+	return writeServeConfigUI(t, true, extra)
+}
+
+// writeServeConfigUI is writeWebUIServeConfig with the web UI switch exposed.
+func writeServeConfigUI(t *testing.T, webUI bool, extra string) (cfgPath, dbPath, addr string) {
+	t.Helper()
 	t.Setenv("MXLRC_DOCKER", "")
 	t.Setenv("MUSIXMATCH_TOKEN", "tok")
 	t.Setenv("MXLRC_SECRETS_KEY_FILE", filepath.Join(t.TempDir(), "test.key"))
@@ -33,7 +39,7 @@ func writeWebUIServeConfig(t *testing.T, extra string) (cfgPath, dbPath, addr st
 	addr = freePort(t)
 	cfg := "[db]\npath = " + tomlString(dbPath) + "\n\n" +
 		"[providers]\nprimary = \"musixmatch\"\n\n" +
-		"[server]\naddr = " + tomlString(addr) + "\nweb_ui_enabled = true\n" + extra
+		"[server]\naddr = " + tomlString(addr) + "\nweb_ui_enabled = " + strconv.FormatBool(webUI) + "\n" + extra
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -42,18 +48,16 @@ func writeWebUIServeConfig(t *testing.T, extra string) (cfgPath, dbPath, addr st
 
 // TestRunServe_ReportsReadPoolOpenFailureAbortsStartup pins the #1649 fail-fast:
 // when the web UI's read pool cannot open, serve exits 1 before it listens
-// rather than falling back to the writer, and releases the redirect listener it
-// had already bound. The database file is removed just before the pool opens,
-// so the writer (holding its descriptor) is up but the pool's stat fails.
+// rather than falling back to the writer. The database file is removed just
+// before the pool opens, so the writer (holding its descriptor) is up but the
+// pool's stat fails.
 func TestRunServe_ReportsReadPoolOpenFailureAbortsStartup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("cannot remove a database file the writer still holds open on Windows")
 	}
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	redirectAddr := freePort(t)
-	cfgPath, dbPath, _ := writeWebUIServeConfig(t,
-		"\n[server.tls]\nself_signed = true\nredirect_http = "+tomlString(redirectAddr)+"\n")
+	cfgPath, dbPath, _ := writeWebUIServeConfig(t, "")
 
 	var mu sync.Mutex
 	var fired []string
@@ -92,11 +96,6 @@ func TestRunServe_ReportsReadPoolOpenFailureAbortsStartup(t *testing.T) {
 	if slices.Contains(fired, "http_listening") {
 		t.Errorf("checkpoints = %v; serve listened despite the read pool failure", fired)
 	}
-	ln, err := net.Listen("tcp", redirectAddr)
-	if err != nil {
-		t.Fatalf("redirect listener %s still held after the aborted startup: %v", redirectAddr, err)
-	}
-	_ = ln.Close()
 }
 
 // TestRunServe_WebUIStartsWithReportsReadPool pins the #1649 success path: with
@@ -223,10 +222,6 @@ func TestRunServe_WebUIReportsReadPastHeldWriter(t *testing.T) {
 			t.Fatalf("GET /dashboard %s = %d, want 200", when, resp.StatusCode)
 		}
 	}
-	// First with the writer free: it latches the first-run admin check, which
-	// reads through the writer, so the held request below reaches the reports.
-	get("with the writer free")
-
 	holdCtx, holdCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer holdCancel()
 	conn, err := writer.Conn(holdCtx)
@@ -235,4 +230,78 @@ func TestRunServe_WebUIReportsReadPastHeldWriter(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 	get("with the writer's connection held")
+
+	// GET /readyz pings the read pool too (#1652): a probe must not time out
+	// behind the held writer and flip a healthy service to unavailable.
+	resp, err := client.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz with the writer's connection held: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /readyz with the writer's connection held = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestRunServe_ReadyzPastHeldWriterWithWebUIOff pins that the readiness probe
+// uses the read pool even when the web UI is off (#1652): a headless daemon's
+// Docker healthcheck must not go unhealthy while a long write holds the
+// writer's single connection.
+func TestRunServe_ReadyzPastHeldWriterWithWebUIOff(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	cfgPath, _, addr := writeServeConfigUI(t, false, "")
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var writer *sql.DB
+	serveWriterDBHook = func(d *sql.DB) { writer = d }
+	listening := make(chan struct{})
+	serveStartupOrderHook = func(c string) {
+		if c == "http_listening" {
+			close(listening)
+		}
+	}
+	t.Cleanup(func() { serveWriterDBHook, serveStartupOrderHook = nil, nil })
+
+	done := make(chan int, 1)
+	go func() {
+		done <- runServe(runCtx, &bytes.Buffer{}, ServeCmd{ConfigPath: cfgPath},
+			func(string) musixmatch.Fetcher { return fakeFetcher{} },
+			func(...string) lyrics.Writer { return fakeWriter{} })
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("runServe did not return after cancel")
+		}
+	})
+	select {
+	case <-listening:
+	case code := <-done:
+		t.Fatalf("runServe exited %d before listening", code)
+	case <-time.After(15 * time.Second):
+		t.Fatal("runServe did not start listening")
+	}
+
+	holdCtx, holdCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer holdCancel()
+	conn, err := writer.Conn(holdCtx)
+	if err != nil {
+		t.Fatalf("hold the writer's connection: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz with the writer's connection held and the web UI off: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /readyz with the writer held and the web UI off = %d, want 200", resp.StatusCode)
+	}
 }

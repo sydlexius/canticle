@@ -75,12 +75,25 @@ type UserStore interface {
 // SQLUserStore persists users in the SQLite `users` table.
 type SQLUserStore struct {
 	db   *sql.DB
+	read *sql.DB
 	rand io.Reader
 }
 
 // NewSQLUserStore returns a SQL-backed user store.
 func NewSQLUserStore(db *sql.DB) *SQLUserStore {
-	return &SQLUserStore{db: db, rand: rand.Reader}
+	return &SQLUserStore{db: db, read: db, rand: rand.Reader}
+}
+
+// WithReadDB routes the store's lookups (GetByUsername, GetByID, HasUsers) to
+// read, a query-only pool from db.OpenReadPool (#1652), so a per-request session
+// check never queues behind the writer's single connection. Every write, and the
+// read-back of a row this store just created, stays on the writer. A nil read
+// leaves the store on the writer. It returns the store for chaining.
+func (s *SQLUserStore) WithReadDB(read *sql.DB) *SQLUserStore {
+	if read != nil {
+		s.read = read
+	}
+	return s
 }
 
 // CreateUser inserts a user with a fresh random id. A username collision (the
@@ -150,7 +163,7 @@ func (s *SQLUserStore) CreateFirstUser(ctx context.Context, username, passwordHa
 
 // GetByUsername returns the user for username (case-insensitive via COLLATE NOCASE).
 func (s *SQLUserStore) GetByUsername(ctx context.Context, username string) (User, bool, error) {
-	return s.scanOne(ctx,
+	return s.scanOne(ctx, s.read,
 		`SELECT id, username, password_hash, created_at, updated_at FROM users WHERE username = ?`,
 		strings.TrimSpace(username),
 	)
@@ -158,7 +171,7 @@ func (s *SQLUserStore) GetByUsername(ctx context.Context, username string) (User
 
 // GetByID returns the user for id.
 func (s *SQLUserStore) GetByID(ctx context.Context, id string) (User, bool, error) {
-	return s.scanOne(ctx,
+	return s.scanOne(ctx, s.read,
 		`SELECT id, username, password_hash, created_at, updated_at FROM users WHERE id = ?`,
 		id,
 	)
@@ -167,7 +180,7 @@ func (s *SQLUserStore) GetByID(ctx context.Context, id string) (User, bool, erro
 // HasUsers reports whether the users table holds at least one row.
 func (s *SQLUserStore) HasUsers(ctx context.Context) (bool, error) {
 	var exists int
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users)`).Scan(&exists)
+	err := s.read.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users)`).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("webauth: has users: %w", err)
 	}
@@ -257,7 +270,9 @@ func (s *SQLUserStore) rotate(ctx context.Context, username string, onlyIf *stri
 }
 
 func (s *SQLUserStore) requireByID(ctx context.Context, id string) (User, error) {
-	user, ok, err := s.GetByID(ctx, id)
+	// Reads back on the writer, never the pool: the caller just wrote this row.
+	user, ok, err := s.scanOne(ctx, s.db,
+		`SELECT id, username, password_hash, created_at, updated_at FROM users WHERE id = ?`, id)
 	if err != nil {
 		return User{}, err
 	}
@@ -267,12 +282,12 @@ func (s *SQLUserStore) requireByID(ctx context.Context, id string) (User, error)
 	return user, nil
 }
 
-func (s *SQLUserStore) scanOne(ctx context.Context, query string, arg string) (User, bool, error) {
+func (s *SQLUserStore) scanOne(ctx context.Context, q *sql.DB, query string, arg string) (User, bool, error) {
 	var (
 		u                    User
 		createdAt, updatedAt string
 	)
-	err := s.db.QueryRowContext(ctx, query, arg).
+	err := q.QueryRowContext(ctx, query, arg).
 		Scan(&u.ID, &u.Username, &u.PasswordHash, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, false, nil

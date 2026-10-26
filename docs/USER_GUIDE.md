@@ -71,7 +71,7 @@ A missed window is skipped rather than run late - if the machine was down throug
 `serve` exposes lightweight endpoints for container orchestration:
 
 - `GET /healthz` (unauthenticated) returns `200` with `{"status":"ok"}` whenever the HTTP server is accepting requests. Use it for Docker/Unraid liveness probes.
-- `GET /readyz` (unauthenticated) verifies database reachability and returns `200` when ready or `503` when the database is unavailable. Error detail is omitted so it never leaks paths or connection strings.
+- `GET /readyz` (unauthenticated) verifies database reachability and returns `200` when ready or `503` when the database is unavailable. Error detail is omitted so it never leaks paths or connection strings. The check runs through a read-only connection, so a long write does not mark the daemon unready.
 - `GET /api/v1/status` (requires an `admin`-scoped API key) returns a queue summary grouped by status, for example `{"status":"ok","queue":{"pending":3,"failed":1}}`. It exposes no tokens, webhook keys, or filesystem paths.
 
 Example Docker healthcheck: `curl -fsS http://127.0.0.1:3876/readyz`.
