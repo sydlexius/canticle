@@ -52,7 +52,13 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # 1.3.2-r0 and fixed in 1.3.2-r1 per the Alpine 3.24 secdb. Arrives TRANSITIVELY,
 # so `apk upgrade` alone leaves 1.3.2-r0 in place while the base digest predates
 # the fix. Raise/drop when the base index ships it by default.
-RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.8-r0" "expat>=2.9.0-r0" "util-linux>=2.42.3-r0" "libpng>=1.6.59-r0" "zlib>=1.3.2-r1" su-exec tzdata && \
+# musl floor pinned to remediate CVE-2026-107891 (LOW, code-scanning alerts 144
+# and 145), present in 1.2.6-r2 and fixed in 1.2.6-r3 per the Alpine 3.24 index.
+# It supplies musl-utils, which the scanner also names; pinned on `musl` (the
+# ORIGIN package). musl ships in the base image, so `apk upgrade` should take it,
+# but a cached apk layer kept 1.2.6-r2; the explicit floor cache-busts it.
+# Raise/drop when the base digest ships it by default.
+RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.8-r0" "expat>=2.9.0-r0" "util-linux>=2.42.3-r0" "libpng>=1.6.59-r0" "zlib>=1.3.2-r1" "musl>=1.2.6-r3" su-exec tzdata && \
     apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
