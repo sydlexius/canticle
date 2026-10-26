@@ -1336,7 +1336,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	reportsReadDB, err := db.OpenReadPool(ctx, cfg.DB.Path, readConns)
 	if err != nil {
 		_ = sqlDB.Close()
-		slog.Error("failed to open the read pool", "error", err)
+		slog.Error("failed to open the read pool; serve requires the database to be in WAL mode on a filesystem that supports it", "error", err)
 		return 1
 	}
 	// closeReportsReadDB runs only after httpDrained. If Shutdown hit its timeout a
@@ -1344,7 +1344,7 @@ func runServe(ctx context.Context, out io.Writer, args ServeCmd, newFetcher func
 	// any new one, as sqlDB.Close does right after.
 	closeReportsReadDB := func() {
 		if err := reportsReadDB.Close(); err != nil {
-			slog.Warn("failed to close the web UI read pool", "error", err)
+			slog.Warn("failed to close the read pool", "error", err)
 		}
 		if cfg.Server.WebUIEnabled && serveStartupOrderHook != nil {
 			serveStartupOrderHook("reports_read_pool_closed")

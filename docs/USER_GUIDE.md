@@ -76,6 +76,8 @@ A missed window is skipped rather than run late - if the machine was down throug
 
 Example Docker healthcheck: `curl -fsS http://127.0.0.1:3876/readyz`.
 
+`serve` needs the database in WAL mode (a local filesystem that supports it) in every mode, with or without the web UI, and refuses to start otherwise.
+
 ### Metrics endpoint
 
 `GET /metrics` returns a Prometheus text-exposition (version 0.0.4) response suitable for scraping by Prometheus, Grafana Agent, or any compatible collector. Metrics are computed from read-only database queries at scrape time; there is no in-process registry or caching.
