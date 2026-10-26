@@ -71,4 +71,4 @@ transformers==5.20.2
 # --exclude-newer past 2026-10-09 resolves 2.x, which swaps httpx for
 # httpx2/httpcore2. Being a direct pin, the 2.x bump arrives as its own
 # Dependabot PR; take it there, after a real model-download smoke test (#1641).
-huggingface-hub==1.33.0
+huggingface-hub==2.3.0
