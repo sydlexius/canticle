@@ -1,5 +1,9 @@
 # Read by gate-runner.py (cc-orchestrator >= v0.49.0).
 [prep_pr]
+# Cost in the machine-wide gate pool (cc-orchestrator 0.107.0; inert until a
+# [pool] budget exists in ~/.claude/gate-queue/config.toml). Measured 2026-10-26
+# against budget 10 on a 10-core Mac: full race suite ~5.1 cores avg; two side by side ran 1.44x each.
+weight = 5
 gate = "make gate"   # -> scripts/pre-push-gate.sh
 
 [merge_pr]
