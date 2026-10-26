@@ -9,4 +9,4 @@ numpy==2.5.3
 # build time, so app.py loads the SavedModel directly. Dropping it also drops the
 # runtime pkg_resources import that forced setuptools<81 and blocked the
 # CVE-2026-59890 fix (fixed in setuptools 83.0.0).
-setuptools>=83.0.0
+setuptools>=84.1.0
