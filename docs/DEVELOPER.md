@@ -185,7 +185,7 @@ Ratchet to *current actuals*, not aspirational targets - do not nickel-and-dime 
 
 ## Documentation site
 
-The documentation site (this site) is built with [ProperDocs](https://github.com/properdocs/properdocs), a maintained drop-in continuation of MkDocs 1.x, using the Material theme. The pages live under `docs/` and the config is `properdocs.yml` at the repo root.
+The documentation site (this site) is built with [ProperDocs](https://github.com/properdocs/properdocs), a maintained drop-in continuation of MkDocs 1.x, using the Material theme. The pages live under `docs/` and the config is `properdocs.yml` at the repo root. The tooling needs Python 3.11 or newer (CI uses 3.12).
 
 ```sh
 make docs-deps    # install the Python doc tooling (pip install --require-hashes -r dev-requirements.lock)
