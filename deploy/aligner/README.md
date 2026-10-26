@@ -215,7 +215,7 @@ docker run --rm --gpus all -p 8080:8080 -v aligner-data:/data canticle-aligner:c
 curl -s localhost:8080/health   # "device": "cuda" on a GPU host, "cpu" otherwise
 ```
 
-Why cu126: ctranslate2 4.8.2 (faster-whisper's engine) links CUDA 12 cuBLAS
+Why cu126: ctranslate2 4.8.3 (faster-whisper's engine) links CUDA 12 cuBLAS
 (`libcublas.so.12`) and, with a static CUDA runtime, needs **no cuDNN at all**;
 torch 2.14 publishes cp314 wheels only for cu126 and cu130, and cu130 would
 ship cuBLAS 13. The old cuDNN 8 workaround (needed for ctranslate2 4.4.0 under
@@ -260,7 +260,7 @@ every `/align` returned 500 on amd64 (arm64's build of the library was
 unaffected).
 
 Dropping whisperx (#1016) lets faster-whisper resolve its own ctranslate2
-unconstrained by whisperx's `<4.5.0` pin; it resolves 4.8.2, whose bundled
+unconstrained by whisperx's `<4.5.0` pin; it resolves 4.8.3, whose bundled
 library already ships with the executable-stack flag clear on **both**
 arches -- verified at build time (see the Dockerfile's `patchelf
 --print-execstack` before/after log): `execstack: -` before the patch runs,
@@ -414,7 +414,7 @@ for arch in amd64 arm64; do
       --index-strategy unsafe-best-match --no-header --no-emit-index-url \
       --only-binary :all: --no-binary demucs \
       --no-binary antlr4-python3-runtime \
-      --exclude-newer 2026-10-23T00:00:00Z \
+      --exclude-newer 2026-10-23T09:00:00Z \
       requirements.in -o requirements-linux-$arch.txt"
 done
 
@@ -426,7 +426,7 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
     --index-strategy unsafe-best-match --no-header --no-emit-index-url \
     --only-binary :all: --no-binary demucs \
     --no-binary antlr4-python3-runtime \
-    --exclude-newer 2026-10-23T00:00:00Z \
+    --exclude-newer 2026-10-23T09:00:00Z \
     requirements.in -o requirements-linux-amd64-cuda.txt'
 ```
 
@@ -452,7 +452,7 @@ changing either file (same `--exclude-newer` reproducibility note applies):
 cd deploy/aligner && docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
   bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
     --python-version 3.14 --no-header --no-emit-index-url \
-    --exclude-newer 2026-10-23T00:00:00Z \
+    --exclude-newer 2026-10-23T09:00:00Z \
     requirements-test.in -o requirements-test.txt'
 ```
 

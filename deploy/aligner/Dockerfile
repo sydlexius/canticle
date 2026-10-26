@@ -6,7 +6,7 @@
 #
 # 3.14, the latest mainline CPython every native package in this closure
 # ships a linux/amd64 + linux/arm64 wheel for (#1068; torch now 2.14.1,
-# torchaudio 2.11.0, ctranslate2 4.8.2, onnxruntime 1.30.0, av, numpy,
+# torchaudio 2.11.0, ctranslate2 4.8.3, onnxruntime 1.30.0, av, numpy,
 # tokenizers, ... all publish cp314 manylinux wheels on both arches; the
 # lock's --only-binary recipe enforces that, with demucs and
 # antlr4-python3-runtime the two pure-Python sdist-only exceptions). 3.13 was the
@@ -104,7 +104,7 @@ RUN set -eu; \
 # that file rather than relaxing the loader for the whole process
 # (GLIBC_TUNABLES=glibc.rtld.execstack=2 also works, but re-enables the
 # exec-stack allowance for every library the process loads). Without
-# whisperx's pin, faster-whisper now resolves ctranslate2 4.8.2, already
+# whisperx's pin, faster-whisper now resolves ctranslate2 4.8.3, already
 # clear on both arches (README.md "amd64: ctranslate2's executable-stack
 # flag" has the measured before/after) -- this step is KEPT as a guard
 # against a future downgrade reintroducing the flag. The glob fails the
@@ -130,7 +130,7 @@ RUN set -eu; \
 # torch, whose own RUNPATH finds its libraries) nothing points the loader at
 # the pip-installed cuBLAS. Register its directory with ldconfig rather than
 # setting LD_LIBRARY_PATH, so the fix also holds for `docker exec`/child
-# processes. ctranslate2 4.8.2 needs no cuDNN at all (its CUDA runtime is
+# processes. ctranslate2 4.8.3 needs no cuDNN at all (its CUDA runtime is
 # static, so the cuDNN 8 workaround the 4.4.0 build needed is gone).
 RUN if [ "$VARIANT" = cuda ]; then \
         site="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
