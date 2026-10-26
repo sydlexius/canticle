@@ -26,7 +26,7 @@ def fail(msg: str) -> None:
 
 if not torch.version.cuda:
     fail("torch.version.cuda is unset: this is not a CUDA torch build (%s)" % torch.__version__)
-# ctranslate2 4.8.2 is built for CUDA 12 (dlopens libcublas.so.12); a torch
+# ctranslate2 4.8.3 is built for CUDA 12 (dlopens libcublas.so.12); a torch
 # whose cuBLAS is another major would leave the two unable to share a lib set.
 if torch.version.cuda.split(".")[0] != "12":
     fail("torch CUDA %s is not CUDA 12, which ctranslate2 needs" % torch.version.cuda)

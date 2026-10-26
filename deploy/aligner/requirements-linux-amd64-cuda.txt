@@ -4,7 +4,7 @@
 # --require-hashes`. torch/torchaudio resolve to the `+cu126` wheels of the
 # PyTorch cu126 index (https://download.pytorch.org/whl/cu126), which pull
 # the nvidia-*-cu12 libraries (cuBLAS 12, cuDNN 9, ...) from PyPI. cu126, not
-# cu130: ctranslate2 4.8.2 dlopens libcublas.so.12 (CUDA 12), and torch 2.14
+# cu130: ctranslate2 4.8.3 dlopens libcublas.so.12 (CUDA 12), and torch 2.14
 # publishes cp314 wheels only for cu126 and cu130. Every non-CUDA entry is
 # identical to requirements-linux-amd64.txt; ci.yml's "Verify aligner
 # per-arch locks agree" step enforces that.
