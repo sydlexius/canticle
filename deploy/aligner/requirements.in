@@ -64,11 +64,18 @@ demucs==4.0.1
 # load-bearing: passing model.transcribe a path needs `av<19` here first.
 faster-whisper==1.2.1
 transformers==5.20.2
-# huggingface-hub is held at 1.33.0, the last 1.x. It is transitive (via
-# transformers, tokenizers and faster-whisper, which downloads every model
-# through it), pinned here only to keep the 2.x major out of a routine lock
-# regeneration: tokenizers 0.23.3 lifted its `huggingface-hub<2.0` cap, so any
-# --exclude-newer past 2026-10-09 resolves 2.x, which swaps httpx for
-# httpx2/httpcore2. Being a direct pin, the 2.x bump arrives as its own
-# Dependabot PR; take it there, after a real model-download smoke test (#1641).
-huggingface-hub==1.33.0
+# huggingface-hub 2.x. It is transitive (via transformers, tokenizers and
+# faster-whisper, which downloads every model through it), pinned here so a
+# routine lock regeneration cannot swap majors unnoticed. 2.x replaces httpx
+# and httpcore with httpx2/httpcore2 and adds truststore, and the PyPI CA-bundle
+# package drops out of the closure: on Linux httpcore2 trusts the OS store (it honors
+# SSL_CERT_FILE / SSL_CERT_DIR, else OpenSSL's default paths; truststore is
+# used only on Windows/macOS), so every Hugging Face download now depends on
+# the base image's ca-certificates package. Dropping that package breaks every
+# model download with an SSLError. It was held at the last 1.x (1.33.0) until
+# a real model-download smoke ran against 2.x (#1641): in the built CPU image,
+# faster-whisper's own download path fetched and loaded a model and a Hugging
+# Face wav2vec2 align model loaded the way
+# _aligner_models.FasterWhisperAligner._load_align_model loads it, from an
+# empty cache. A cache written by 1.x loads offline under 2.x (same layout).
+huggingface-hub==2.3.0

@@ -6,7 +6,7 @@
 #
 # 3.14, the latest mainline CPython every native package in this closure
 # ships a linux/amd64 + linux/arm64 wheel for (#1068; torch now 2.14.1,
-# torchaudio 2.11.0, ctranslate2 4.8.2, onnxruntime 1.30.0, av, numpy,
+# torchaudio 2.11.0, ctranslate2 4.8.3, onnxruntime 1.30.0, av, numpy,
 # tokenizers, ... all publish cp314 manylinux wheels on both arches; the
 # lock's --only-binary recipe enforces that, with demucs and
 # antlr4-python3-runtime the two pure-Python sdist-only exceptions). 3.13 was the
