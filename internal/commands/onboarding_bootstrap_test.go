@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sydlexius/canticle/internal/config"
+	"github.com/sydlexius/canticle/internal/db"
 	"github.com/sydlexius/canticle/internal/dbtest"
 	"github.com/sydlexius/canticle/internal/trustnet"
 	"github.com/sydlexius/canticle/internal/webauth"
@@ -53,7 +54,7 @@ func openBootstrapDB(t *testing.T) *sql.DB {
 func TestBuildWebAuthDisabled(t *testing.T) {
 	sqlDB := openBootstrapDB(t)
 	cfg := config.Config{} // WebUIEnabled defaults to false
-	svc, auth, onboarding, err := buildWebAuth(context.Background(), cfg, sqlDB, nil, trustnet.LoopbackOnly(), "vtest")
+	svc, auth, onboarding, err := buildWebAuth(context.Background(), cfg, sqlDB, nil, nil, trustnet.LoopbackOnly(), "vtest")
 	if err != nil {
 		t.Fatalf("buildWebAuth: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestBuildWebAuthEnabled(t *testing.T) {
 	t.Setenv(envWebAdminPass, "")
 	cfg := config.Config{}
 	cfg.Server.WebUIEnabled = true
-	svc, auth, onboarding, err := buildWebAuth(context.Background(), cfg, sqlDB, nil, trustnet.LoopbackOnly(), "vtest")
+	svc, auth, onboarding, err := buildWebAuth(context.Background(), cfg, sqlDB, nil, nil, trustnet.LoopbackOnly(), "vtest")
 	if err != nil {
 		t.Fatalf("buildWebAuth: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestBuildWebAuthBootstrapErrorIsFatal(t *testing.T) {
 	t.Setenv(envWebAdminPass, "short") // too short -> fatal bootstrap error
 	cfg := config.Config{}
 	cfg.Server.WebUIEnabled = true
-	if _, _, _, err := buildWebAuth(context.Background(), cfg, sqlDB, nil, trustnet.LoopbackOnly(), "vtest"); err == nil {
+	if _, _, _, err := buildWebAuth(context.Background(), cfg, sqlDB, nil, nil, trustnet.LoopbackOnly(), "vtest"); err == nil {
 		t.Fatal("expected a fatal error from a too-short bootstrap password, got nil")
 	}
 }
@@ -212,5 +213,46 @@ func TestBootstrapAdminFromEnvNeverLogsPassword(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), secretPass) {
 		t.Error("the admin password leaked into the logs")
+	}
+}
+
+// TestBuildWebAuthReadsThroughPool pins the #1652 wiring: with a read pool, the
+// service buildWebAuth returns checks sessions and users on the pool, so a held
+// writer connection does not stall ValidateSession; the session the writer
+// committed is visible to the pool.
+func TestBuildWebAuthReadsThroughPool(t *testing.T) {
+	ctx := context.Background()
+	path := dbtest.Path(t)
+	writer, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	pool, err := db.OpenReadPool(ctx, path, 2)
+	if err != nil {
+		t.Fatalf("db.OpenReadPool: %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	t.Setenv(envWebAdminUser, "admin")
+	t.Setenv(envWebAdminPass, "correct-horse-battery")
+	cfg := config.Config{}
+	cfg.Server.WebUIEnabled = true
+	svc, _, _, err := buildWebAuth(ctx, cfg, writer, pool, nil, trustnet.LoopbackOnly(), "vtest")
+	if err != nil {
+		t.Fatalf("buildWebAuth: %v", err)
+	}
+	token, err := svc.Login(ctx, "admin", "correct-horse-battery")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	conn, err := writer.Conn(ctx)
+	if err != nil {
+		t.Fatalf("hold the writer's connection: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	vctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := svc.ValidateSession(vctx, token); err != nil {
+		t.Fatalf("ValidateSession with the writer held: %v", err)
 	}
 }

@@ -50,13 +50,26 @@ type SessionStore interface {
 // SQLSessionStore persists sessions in the SQLite `sessions` table.
 type SQLSessionStore struct {
 	db   *sql.DB
+	read *sql.DB
 	rand io.Reader
 	now  func() time.Time
 }
 
 // NewSQLSessionStore returns a SQL-backed session store.
 func NewSQLSessionStore(db *sql.DB) *SQLSessionStore {
-	return &SQLSessionStore{db: db, rand: rand.Reader, now: time.Now}
+	return &SQLSessionStore{db: db, read: db, rand: rand.Reader, now: time.Now}
+}
+
+// WithReadDB routes GetSessionByToken, the per-request session lookup, to read,
+// a query-only pool from db.OpenReadPool (#1652), so it never queues behind the
+// writer's single connection. Create, delete and the expiry sweep stay on the
+// writer; a session committed there is visible to the pool's next snapshot (WAL).
+// A nil read leaves the store on the writer. It returns the store for chaining.
+func (s *SQLSessionStore) WithReadDB(read *sql.DB) *SQLSessionStore {
+	if read != nil {
+		s.read = read
+	}
+	return s
 }
 
 // CreateSession generates a 32-byte base64url token, persists its SHA-256 hash
@@ -123,7 +136,7 @@ func (s *SQLSessionStore) GetSessionByToken(ctx context.Context, rawToken string
 		sess                 Session
 		createdAt, expiresAt string
 	)
-	err := s.db.QueryRowContext(ctx,
+	err := s.read.QueryRowContext(ctx,
 		`SELECT token_hash, user_id, created_at, expires_at
 		 FROM sessions WHERE token_hash = ? AND expires_at > ?`,
 		hashToken(rawToken), formatTime(s.now()),

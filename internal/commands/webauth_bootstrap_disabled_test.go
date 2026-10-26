@@ -28,7 +28,7 @@ func TestWebAuthBootstrapVarsIgnoredWhenWebUIDisabled(t *testing.T) {
 	cfg := config.Config{}
 	cfg.Server.WebUIEnabled = false
 
-	svc, auth, onboarding, err := buildWebAuth(t.Context(), cfg, nil, nil, nil, "test")
+	svc, auth, onboarding, err := buildWebAuth(t.Context(), cfg, nil, nil, nil, nil, "test")
 	if err != nil {
 		t.Fatalf("buildWebAuth: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestWebAuthNoWarningWhenBootstrapVarsUnset(t *testing.T) {
 	cfg := config.Config{}
 	cfg.Server.WebUIEnabled = false
 
-	if _, _, _, err := buildWebAuth(t.Context(), cfg, nil, nil, nil, "test"); err != nil {
+	if _, _, _, err := buildWebAuth(t.Context(), cfg, nil, nil, nil, nil, "test"); err != nil {
 		t.Fatalf("buildWebAuth: %v", err)
 	}
 	if strings.Contains(buf.String(), "level=WARN") {
