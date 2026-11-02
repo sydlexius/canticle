@@ -78,4 +78,4 @@ transformers==5.20.2
 # Face wav2vec2 align model loaded the way
 # _aligner_models.FasterWhisperAligner._load_align_model loads it, from an
 # empty cache. A cache written by 1.x loads offline under 2.x (same layout).
-huggingface-hub==2.3.0
+huggingface-hub==2.4.0
