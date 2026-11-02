@@ -153,7 +153,14 @@ The `aligner-gpu` compose profile (the `-cuda` image) needs:
 
 Docker Desktop on macOS has no GPU passthrough: use the CPU `aligner` profile
 there. A host without a usable GPU running the CUDA image falls back to CPU
-(`/health` reports `"device": "cpu"`). To build the images yourself instead
+(`/health` reports `"device": "cpu"`, and the sidecar logs a warning at
+startup naming the driver floor).
+
+**After pulling a new `-cuda` tag, confirm the GPU is still in use:** the
+driver floor above rose with the CUDA 13.2 image, and a host below it does
+not fail to start, it silently serves `/align` at CPU speed. Check that
+`curl -s localhost:8080/health` reports `"device": "cuda"`, or look for the
+`no usable GPU, running on cpu` warning in `docker logs`. To build the images yourself instead
 of pulling them, see `deploy/aligner/README.md`.
 
 ---
