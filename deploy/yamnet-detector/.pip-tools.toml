@@ -1,0 +1,9 @@
+# Read by Dependabot when it regenerates requirements.txt from requirements.in.
+# setuptools is a pip-tools "unsafe" package, dropped from the lock unless
+# allow-unsafe is on, and the Dockerfile's `pip install --require-hashes` then
+# fails because tensorflow-cpu needs setuptools and nothing pins it.
+# Dependabot #1669 regenerated the lock without the pin, and every detector
+# image build failed from then on. This file makes allow-unsafe explicit instead
+# of relying on Dependabot inferring it from the existing lock.
+[pip-tools]
+allow-unsafe = true
