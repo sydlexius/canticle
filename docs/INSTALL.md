@@ -132,14 +132,18 @@ images); the image name, tags and platforms are in "Published images" in
 `deploy/aligner/README.md`. Pull the tag that matches your Canticle version.
 The `aligner-gpu` compose profile (the `-cuda` image) needs:
 
-- A Linux Docker host with an NVIDIA GPU of roughly compute capability 6.0
-  (Pascal) through 9.0 (Hopper); a Quadro T600 (7.5) is supported. The CUDA
-  build's ctranslate2 ships SASS for sm_53 to sm_86 plus PTX for 8.6, and its
-  torch (cu126) ships sm_50 to sm_90 with no PTX. Hopper therefore relies on
-  PTX JIT, which needs an R570 or newer driver (the JIT consumes CUDA 12.8
-  PTX; the 525.60 floor does not cover it). Blackwell (10.x and
-  12.x) is NOT supported by this torch build.
-- The NVIDIA driver on the host (525.60 or newer for CUDA 12.6), and the
+- A Linux Docker host with an NVIDIA GPU of compute capability 7.5 (Turing)
+  or newer; a Quadro T600 (7.5) is supported. Pascal (6.x) and Volta (7.0)
+  are NOT supported: the CUDA image's torch is a CUDA 13.2 build (cu132),
+  which ships sm_75, sm_80, sm_86, sm_90, sm_100 and sm_120 (CUDA 13 dropped
+  the older architectures). Its ctranslate2 (a CUDA 12.8 build, with its own
+  CUDA 12 cuBLAS in the image) ships SASS for sm_53 to sm_86 plus PTX for
+  8.6, so on Hopper and Blackwell the transcript pass runs through PTX JIT
+  (expected to work on the driver below, not tested here).
+- The NVIDIA driver on the host: 595.45.04 or newer (the CUDA 13.2 driver,
+  per NVIDIA's CUDA 13.2 release notes; see `deploy/aligner/README.md`
+  "GPU support" for the citation and the 580 minor-version-compatibility
+  caveat), and the
   [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
   registered with Docker. The image carries the CUDA libraries itself; the
   toolkit injects the driver library at start.

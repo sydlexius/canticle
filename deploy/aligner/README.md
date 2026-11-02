@@ -202,9 +202,10 @@ be swapped in later behind the same seam.
 ### GPU support: the CUDA variant (#1013)
 
 `--build-arg VARIANT=cuda` (default `cpu`) builds an amd64-only CUDA image from
-the same Dockerfile: torch/torchaudio come from the PyTorch **cu126** index
-(`requirements-linux-amd64-cuda.txt`), with cuBLAS 12 and cuDNN 9 as pip
-`nvidia-*` packages on the same slim base (no CUDA base image). Everything
+the same Dockerfile: torch/torchaudio come from the PyTorch **cu132** index
+(CUDA 13.2, `requirements-linux-amd64-cuda.txt`), with the CUDA 13 libraries
+(cuBLAS 13, cuDNN 9, ...) as pip `nvidia-*` packages, plus a separate CUDA 12
+cuBLAS for ctranslate2, on the same slim base (no CUDA base image). Everything
 else, including the app and every CPU smoke step, is shared.
 
 To build the CUDA image locally instead of pulling it:
@@ -215,25 +216,53 @@ docker run --rm --gpus all -p 8080:8080 -v aligner-data:/data canticle-aligner:c
 curl -s localhost:8080/health   # "device": "cuda" on a GPU host, "cpu" otherwise
 ```
 
-Why cu126: ctranslate2 4.8.4 (faster-whisper's engine) links CUDA 12 cuBLAS
-(`libcublas.so.12`) and, with a static CUDA runtime, needs **no cuDNN at all**;
-torch 2.14 publishes cp314 wheels only for cu126 and cu130, and cu130 would
-ship cuBLAS 13. The old cuDNN 8 workaround (needed for ctranslate2 4.4.0 under
-whisperx) is gone, along with the execstack patch's purpose (kept as a guard).
-The Dockerfile registers the pip cuBLAS directory with `ldconfig` because
-nothing else points ctranslate2's loader at it.
+Why cu132, and two cuBLAS majors: torch 2.15.0 (taken for its
+`torch.load` security fixes, see `requirements.in`) publishes no CUDA 12
+wheel; its cp314 CUDA builds are cu132 and newer, and the lock names the cu132
+index explicitly so a later torch bump cannot silently move the CUDA line (and
+the host driver floor below). ctranslate2 4.8.4 (faster-whisper's engine,
+latest 4.8.5 likewise) is still a CUDA 12 build: it dlopens `libcublas.so.12`
+and, with a static CUDA runtime, needs **no cuDNN at all**. So the CUDA input
+file `requirements-cuda.in` adds `nvidia-cublas-cu12` (12.8.4.1, the cuBLAS
+ctranslate2 4.8.4's wheels are built against) for ctranslate2 alone. The two
+coexist by design: different sonames (`libcublas.so.13` in
+`site-packages/nvidia/cu13/lib`, `libcublas.so.12` in
+`site-packages/nvidia/cublas/lib`). torch finds its own through the DT_RPATH
+its libraries carry; the Dockerfile registers only the CUDA 12 directory with
+`ldconfig`, because nothing else points ctranslate2's loader at it. (`import
+torch` also ctypes-loads the CUDA 12 copy, because torch's CUDA preload
+checks `nvidia/cublas/lib` before `nvidia/cu13/lib`; it is loaded
+RTLD_LOCAL under a different soname, and `LD_DEBUG=bindings` shows every
+torch cuBLAS symbol binding to `libcublas.so.13`.) Once
+ctranslate2 ships a CUDA 13 build, drop `nvidia-cublas-cu12`. The old cuDNN 8
+workaround (needed for ctranslate2 4.4.0 under whisperx) is gone, along with
+the execstack patch's purpose (kept as a guard).
 
-The CUDA build runs `smoke_cuda.py`, an inverted check: torch must be a CUDA-12
-build with cuDNN, and every shared library under `torch/lib` and
-`site-packages/nvidia/*/lib` (plus `libcublas.so.12` by soname) must
-`ctypes.CDLL`-load, so a missing library fails the build instead of segfaulting
-the first `/align`. Only the optional nvshmem/cufile cluster plugins are
-skipped. There is no GPU at build time, so on-GPU behavior is verified by
+The CUDA build runs `smoke_cuda.py`, an inverted check: torch must be a CUDA
+13 build with cuDNN; `libcublas.so.12` and `libcublasLt.so.12` must load by
+soname in a fresh process, both alone and after `import torch` has mapped
+torch's CUDA 13 cuBLAS, and must resolve from the CUDA 12 wheel's directory;
+and every shared library under `torch/lib` and `site-packages/nvidia/*/lib`
+must `ctypes.CDLL`-load, so a missing library fails the build instead of
+segfaulting the first `/align`. Only the optional nvshmem/cufile cluster
+plugins are skipped. (That full sweep is why the CUDA variant apt-installs
+`libquadmath0`: torch 2.15.0 bundles a `libgfortran.so.5` that needs it.) There is no GPU at build time, so on-GPU behavior is verified by
 hand: run the container with `--gpus all` and check `/health` reports
 `cuda`, then POST a real `/align` request.
 
-Host: NVIDIA driver 525.60+ and the NVIDIA Container Toolkit (Linux only;
-macOS Docker has no GPU). `docker-compose.example.yml` has the `aligner` and
+Host: an NVIDIA driver that supports CUDA 13.2, i.e. **595.45.04 or newer**
+on Linux x86_64 (the R595 branch; "CUDA Toolkit and Corresponding Driver
+Versions", CUDA 13.2 release notes,
+https://docs.nvidia.com/cuda/archive/13.2.0/cuda-toolkit-release-notes/index.html).
+NVIDIA's minor-version compatibility lets CUDA 13.x applications start on
+580+ drivers, but without features that need the newer driver (PTX JIT of
+13.2-built kernels among them); that configuration is untested here, so treat
+595.45.04 as the floor. (cuBLAS 13.4.1.3 is CUDA 13.2 Update 2's own
+cuBLAS; only nvJitLink, 13.4.92, comes from a later 13.x toolkit, which
+cuda-toolkit 13.2.2's `>=13.2.86,<14` allows and which runs on an R595
+driver under that same minor-version compatibility.) The same driver runs
+ctranslate2's CUDA 12 cuBLAS (drivers are backward compatible). Also needed: the NVIDIA Container Toolkit
+(Linux only; macOS Docker has no GPU). `docker-compose.example.yml` has the `aligner` and
 `aligner-gpu` profiles (one shared anchor and network alias). The published
 tags and platforms are listed under "Published images" above.
 
@@ -243,10 +272,10 @@ tags and platforms are listed under "Published images" above.
 The CPU variant installs from one of
 `requirements-linux-amd64.txt` / `requirements-linux-arm64.txt` (picked by
 `TARGETARCH`, #1017), whose `torch`/`torchaudio` entries (pinned to
-2.14.1/2.11.0, see `requirements.in`) resolve against the PyTorch CPU index
+2.15.0/2.11.1, see `requirements.in`) resolve against the PyTorch CPU index
 (`https://download.pytorch.org/whl/cpu`, passed as `--extra-index-url`),
 because PyPI's x86_64 `torch` wheel is the CUDA build and would add ~5 GB of
-unused `nvidia-*-cu12` libraries. A build-time check fails the build if a
+unused `nvidia-*` CUDA libraries. A build-time check fails the build if a
 CUDA `torch`, any `nvidia-*` package, or `triton` is present (CPU variant
 only; the CUDA variant asserts the opposite in `smoke_cuda.py`).
 
@@ -385,14 +414,17 @@ portable file.
 
 The CUDA lock, `requirements-linux-amd64-cuda.txt` (#1013), is a third file
 of the same recipe with `--python-platform x86_64-manylinux_2_28` and
-`--extra-index-url https://download.pytorch.org/whl/cu126` (the exact command is
-in its header). It is regenerated together with the two above (the loop below has a separate CUDA step); it differs from
-`requirements-linux-amd64.txt` only by torch's `+cu126` tag and the added
+`--extra-index-url https://download.pytorch.org/whl/cu132` (the exact command is
+in its header), resolved from `requirements-cuda.in` (`-r requirements.in`
+plus the CUDA-only `nvidia-cublas-cu12` pin for ctranslate2) instead of
+`requirements.in`. It is regenerated together with the two above (the loop below has a separate CUDA step); it differs from
+`requirements-linux-amd64.txt` only by torch's `+cu132` tag and the added
 `nvidia-*`, `cuda-*` and `triton` pins. `scripts/check-aligner-locks-fresh.sh`
 re-resolves it and ci.yml's package-set step checks the non-CUDA pins against
-the CPU amd64 lock, so it cannot drift.
+the CPU amd64 lock and `requirements-cuda.in`'s own pins against this lock, so
+it cannot drift.
 
-To regenerate ALL THREE per-arch lock files after editing `requirements.in` (never edit
+To regenerate ALL THREE per-arch lock files after editing `requirements.in` or `requirements-cuda.in` (never edit
 `requirements-linux-*.txt` by hand -- always regenerate all three together, since
 a stale lock on only one arch is exactly the drift #1017 closes out).
 `--exclude-newer` pins resolution to a fixed point in time so the run is
@@ -418,16 +450,17 @@ for arch in amd64 arm64; do
       requirements.in -o requirements-linux-$arch.txt"
 done
 
-# CUDA lock (amd64 only): same recipe, cu126 index, its own output file.
+# CUDA lock (amd64 only): same recipe, cu132 index, its own input
+# (requirements-cuda.in) and output file.
 docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w python:3.14-slim \
   bash -c 'pip install -q uv==0.9.7 && uv pip compile --generate-hashes \
     --python-version 3.14 --python-platform x86_64-manylinux_2_28 \
-    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    --extra-index-url https://download.pytorch.org/whl/cu132 \
     --index-strategy unsafe-best-match --no-header --no-emit-index-url \
     --only-binary :all: --no-binary demucs \
     --no-binary antlr4-python3-runtime \
     --exclude-newer 2026-11-02T09:00:00Z \
-    requirements.in -o requirements-linux-amd64-cuda.txt'
+    requirements-cuda.in -o requirements-linux-amd64-cuda.txt'
 ```
 
 (`--platform linux/amd64` on `docker run` is the HOST container running the

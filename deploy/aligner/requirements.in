@@ -6,14 +6,24 @@
 fastapi==0.161.1
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
-# torch 2.14.1 / torchaudio 2.11.0. The 2.8.0 hold ended at torch 2.14.0
-# (#1068); 2.14.1 is a later Dependabot patch bump.
+# torch 2.15.0 / torchaudio 2.11.1. The 2.8.0 hold ended at torch 2.14.0
+# (#1068); 2.14.1 was a Dependabot patch bump and 2.15.0 is taken for its
+# `torch.load(weights_only=True)` hardening (2.15.0 release notes, Security:
+# pytorch/pytorch#194647 rejects NEWOBJ-without-BUILD pickles that exposed
+# uninitialized pybind11-backed objects; #200956 stops treating builtin
+# exceptions as safe globals after `import torch.distributed` and stops
+# calling overridden append/extend on allowlisted list subclasses). This
+# sidecar reaches that path: torchaudio's pipeline `bundle.get_model()`
+# (_aligner_models.py) loads its weights through torch.hub -> torch.load.
 # torch must be >= 2.13.0, the highest first-patched version among the torch
-# advisories open against the 2.8.0 pin. torchaudio 2.11.0 is its LAST
-# release, and it is built against torch's stable C ABI (abi3 extension, no
-# torch pin in its metadata) so it runs on later torch; 2.9/2.10 pin
-# torch==<same version> and cannot pair with a patched torch.
-# The old hold's reasons, re-checked against the 2.11.0 wheel:
+# advisories open against the 2.8.0 pin. torchaudio 2.11.x is its LAST
+# release line; 2.11.1 is a py3-none wheel built against torch's stable C ABI
+# whose metadata asks only `torch>=2.11` (2.11.0 declared no torch dependency
+# at all), so it runs on later torch; 2.9/2.10 pin torch==<same version> and
+# cannot pair with a patched torch.
+# The old hold's reasons, re-checked against the 2.11.0 wheel (2.11.1 is a
+# patch release; the Dockerfile's build-time forced_align call re-proves the
+# first point on every build):
 #   - torchaudio.functional.forced_align / merge_tokens (this sidecar's
 #     forced-alignment core) are still present and still compiled in; a
 #     build-time step in the Dockerfile CALLS both on a tiny emission.
@@ -21,15 +31,16 @@ python-multipart==0.0.32
 #     decode goes through ffmpeg (app.decode_pcm) and the stem is written with
 #     the stdlib wave module (#1016), so TorchCodec is NOT installed.
 #   - list_audio_backends is gone, but only whisperx called it (#1016).
-# Both ship cp314 manylinux wheels for aarch64 and x86_64 (see Dockerfile).
+# Both ship manylinux wheels for aarch64 and x86_64 that install on cp314
+# (torch cp314, torchaudio py3-none; see Dockerfile).
 # The Dockerfile installs from the arch-specific requirements-linux-*.txt
 # lock, whose torch/torchaudio entries resolve against the PyTorch CPU index
 # (https://download.pytorch.org/whl/cpu) via --extra-index-url: PyPI's
-# x86_64 torch is the CUDA build and pulls ~5 GB of nvidia-*-cu12 libraries.
+# x86_64 torch is the CUDA build and pulls ~5 GB of nvidia-* CUDA libraries.
 # Keep the pins in exactly this `name==version` form -- it is what the lock
 # regeneration command resolves against.
-torch==2.14.1
-torchaudio==2.11.0
+torch==2.15.0
+torchaudio==2.11.1
 # demucs is held at 4.0.1 (#1102 tracks 4.1.0): 4.1.0 requires sphn>=0.1.12,
 # which publishes no linux-aarch64 wheel (sdist only), and python:3.14-slim has
 # no compiler, so the arm64 image build fails. Revisit once sphn ships an
