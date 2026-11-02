@@ -97,9 +97,11 @@ updates:
           - "httpx"
 
   # The aligner sidecar's Python deps. requirements.in / requirements-test.in
-  # carry the exact top-level pins; the generated, fully hash-pinned locks
-  # (requirements-linux-amd64.txt / -arm64.txt / requirements-test.txt, #1017)
-  # are regenerated from them per deploy/aligner/README.md.
+  # carry the exact top-level pins (requirements-cuda.in adds the CUDA lock's
+  # one extra, nvidia-cublas-cu12 for ctranslate2); the generated, fully
+  # hash-pinned locks (requirements-linux-amd64.txt / -arm64.txt /
+  # -amd64-cuda.txt / requirements-test.txt, #1017) are regenerated from them
+  # per deploy/aligner/README.md.
   #
   # OBSERVED, no longer hypothetical: Dependabot edited the per-arch locks
   # directly, bumping TRANSITIVE packages to versions their parents forbid

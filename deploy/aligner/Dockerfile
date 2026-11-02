@@ -5,8 +5,8 @@
 #   docker buildx imagetools inspect python:3.14-slim --format '{{.Manifest.Digest}}'
 #
 # 3.14, the latest mainline CPython every native package in this closure
-# ships a linux/amd64 + linux/arm64 wheel for (#1068; torch now 2.14.1,
-# torchaudio 2.11.0, ctranslate2 4.8.4, onnxruntime 1.31.1, av, numpy,
+# ships a linux/amd64 + linux/arm64 wheel for (#1068; torch now 2.15.0,
+# torchaudio 2.11.1, ctranslate2 4.8.4, onnxruntime 1.31.1, av, numpy,
 # tokenizers, ... all publish cp314 manylinux wheels on both arches; the
 # lock's --only-binary recipe enforces that, with demucs and
 # antlr4-python3-runtime the two pure-Python sdist-only exceptions). 3.13 was the
@@ -50,9 +50,10 @@ WORKDIR /app
 # actually installs.
 ARG TARGETARCH
 # VARIANT selects the torch build (#1013): `cpu` (default, amd64 + arm64) or
-# `cuda` (amd64 only, torch +cu126 with pip-provided nvidia-* libraries; no
-# CUDA base image is needed, the host's NVIDIA container toolkit injects
-# libcuda). Everything else in the file is shared by both variants.
+# `cuda` (amd64 only, torch +cu132 on CUDA 13.2 with pip-provided nvidia-*
+# libraries, plus CUDA 12 cuBLAS for ctranslate2; no CUDA base image is
+# needed, the host's NVIDIA container toolkit injects libcuda). Everything
+# else in the file is shared by both variants.
 ARG VARIANT=cpu
 COPY requirements-linux-amd64.txt requirements-linux-amd64-cuda.txt requirements-linux-arm64.txt ./
 
@@ -68,12 +69,13 @@ COPY requirements-linux-amd64.txt requirements-linux-amd64-cuda.txt requirements
 # lock was generated against the CPU index resolution, so a same-name,
 # same-version artifact from the wrong index (or a future PyPI release)
 # fails the hash check rather than installing silently. torch/torchaudio
-# specifically pin `torch==2.14.1+cpu` / `torchaudio==2.11.0+cpu` on both
-# arches -- an exact version string pip cannot satisfy from PyPI's `2.14.1`
+# specifically pin `torch==2.15.0+cpu` / `torchaudio==2.11.1+cpu` on both
+# arches -- an exact version string pip cannot satisfy from PyPI's `2.15.0`
 # CUDA build, so it is forced to the CPU index regardless of search order.
-# (torchaudio 2.11 declares no torch dependency at all; its extension is
-# built against torch's stable ABI, see requirements.in.)
-# The CUDA variant (VARIANT=cuda, #1013) installs its own lock from cu126.
+# (torchaudio 2.11.1 declares only `torch>=2.11`; its extension is built
+# against torch's stable ABI, see requirements.in.)
+# The CUDA variant (VARIANT=cuda, #1013) installs its own lock from cu132
+# (`torch==2.15.0+cu132`, same exact-local-version argument as `+cpu`).
 # Quoted with a `:-` default (not bare "$TARGETARCH"): this script runs
 # under `set -u`, and an unset TARGETARCH -- buildx always sets it, but a
 # plain `docker build` without buildx, or `docker build .` on an older
@@ -87,7 +89,7 @@ RUN set -eu; \
     case "${VARIANT}-${TARGETARCH:-}" in \
         cpu-amd64) lock=requirements-linux-amd64.txt; index=cpu ;; \
         cpu-arm64) lock=requirements-linux-arm64.txt; index=cpu ;; \
-        cuda-amd64) lock=requirements-linux-amd64-cuda.txt; index=cu126 ;; \
+        cuda-amd64) lock=requirements-linux-amd64-cuda.txt; index=cu132 ;; \
         *) echo "FATAL: no hash lock for VARIANT=${VARIANT} TARGETARCH=${TARGETARCH:-<unset>} (cpu: amd64/arm64, cuda: amd64)" >&2; exit 1 ;; \
     esac; \
     pip install --no-cache-dir --require-hashes \
@@ -127,14 +129,33 @@ RUN set -eu; \
     done
 
 # CUDA variant only: ctranslate2 dlopens libcublas.so.12 by SONAME, and (unlike
-# torch, whose own RUNPATH finds its libraries) nothing points the loader at
+# torch, whose own DT_RPATH finds its libraries) nothing points the loader at
 # the pip-installed cuBLAS. Register its directory with ldconfig rather than
 # setting LD_LIBRARY_PATH, so the fix also holds for `docker exec`/child
 # processes. ctranslate2 4.8.4 needs no cuDNN at all (its CUDA runtime is
 # static, so the cuDNN 8 workaround the 4.4.0 build needed is gone).
+# Two cuBLAS majors coexist here on purpose: torch 2.15.0+cu132 links CUDA 13
+# cuBLAS (libcublas.so.13, from nvidia-cublas, in nvidia/cu13/lib), while
+# ctranslate2 4.8.4 is a CUDA 12 build and needs libcublas.so.12, which only
+# nvidia-cublas-cu12 (requirements-cuda.in) provides, in nvidia/cublas/lib.
+# Only that CUDA 12 directory is registered: the sonames differ, so nothing
+# torch loads can resolve to it, and torch's own libraries carry a DT_RPATH
+# ($ORIGIN/../../nvidia/cu13/lib, ...) that the loader searches before the
+# ld.so cache anyway. The directory test fails the build if the wheel is
+# missing or moved rather than writing a dead ldconfig entry.
+# libquadmath0: torch 2.15.0 bundles torch/lib/libgfortran.so.5 (2.14.1+cu126
+# did not), which NEEDs libquadmath.so.0, absent from the slim base. No torch
+# library links it today, but smoke_cuda.py loads every bundled library, so
+# ship the dependency rather than skip the file. CUDA-only because Debian
+# builds the package only for x86 (and the CUDA variant is amd64-only).
 RUN if [ "$VARIANT" = cuda ]; then \
+        set -eu; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends libquadmath0; \
+        rm -rf /var/lib/apt/lists/*; \
         site="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
-        echo "$site/nvidia/cublas/lib" > /etc/ld.so.conf.d/nvidia-cublas.conf; \
+        [ -e "$site/nvidia/cublas/lib/libcublas.so.12" ] || { echo "FATAL: no CUDA 12 cuBLAS at $site/nvidia/cublas/lib (nvidia-cublas-cu12 missing from the CUDA lock?)" >&2; exit 1; }; \
+        echo "$site/nvidia/cublas/lib" > /etc/ld.so.conf.d/nvidia-cublas-cu12.conf; \
         ldconfig; \
     fi
 

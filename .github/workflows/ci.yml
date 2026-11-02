@@ -661,7 +661,8 @@ jobs:
           echo "Aligner per-arch locks agree on $(wc -l < /tmp/amd64-pkgs.txt) packages."
 
           # The CUDA lock (#1013) is amd64's twin plus the CUDA runtime: drop
-          # the nvidia-*/cuda-*/triton pins torch's +cu126 wheels add and the
+          # the nvidia-*/cuda-*/triton pins torch's +cu132 wheels add (and
+          # requirements-cuda.in's nvidia-cublas-cu12 for ctranslate2) and the
           # remainder must equal the CPU amd64 set, or a bump landed in one
           # amd64 lock only.
           normalize requirements-linux-amd64-cuda.txt \
@@ -714,29 +715,40 @@ jobs:
           check_against_lock() {
             lock_file="$1"
             require_present="$2" # true: a source pin missing from this lock is also an error
+            pins="${3:-$SOURCE_PINS}" # default: requirements.in's pins
+            src="${4:-requirements.in}"
             lock_versions="$(extract_lock_versions "$lock_file")"
             while IFS=' ' read -r name pinned; do
               actual="$(printf '%s\n' "$lock_versions" | awk -v n="$name" '$1==n{print $2; exit}')"
               if [ -z "$actual" ]; then
                 if [ "$require_present" = "true" ]; then
-                  echo "::error::${name}==${pinned} from requirements.in is missing from ${lock_file} -- regenerate BOTH arch locks from requirements.in (source/lock drift)"
+                  echo "::error::${name}==${pinned} from ${src} is missing from ${lock_file} -- regenerate the locks from ${src} (source/lock drift)"
                   FAILED=1
                 fi
               elif [ "$actual" != "$pinned" ]; then
                 if [ "$require_present" = "true" ]; then
-                  echo "::error::requirements.in pins ${name}==${pinned} but ${lock_file} has ${name}==${actual} -- regenerate BOTH arch locks from requirements.in (source/lock drift)"
+                  echo "::error::${src} pins ${name}==${pinned} but ${lock_file} has ${name}==${actual} -- regenerate the locks from ${src} (source/lock drift)"
                 else
-                  echo "::error::requirements.in pins ${name}==${pinned} but ${lock_file} has ${name}==${actual} -- regenerate ${lock_file} (constraint drift)"
+                  echo "::error::${src} pins ${name}==${pinned} but ${lock_file} has ${name}==${actual} -- regenerate ${lock_file} (constraint drift)"
                 fi
                 FAILED=1
               fi
-            done <<< "$SOURCE_PINS"
+            done <<< "$pins"
           }
 
           check_against_lock requirements-linux-amd64.txt true
           check_against_lock requirements-linux-arm64.txt true
           check_against_lock requirements-linux-amd64-cuda.txt true
           check_against_lock requirements-test.txt false
+
+          # requirements-cuda.in's own exact pins (the CUDA-only extras, e.g.
+          # nvidia-cublas-cu12 for ctranslate2) must land in the CUDA lock too.
+          CUDA_SOURCE_PINS="$(extract_source_pins requirements-cuda.in)"
+          if [ -z "$CUDA_SOURCE_PINS" ]; then
+            echo "::error::no exact pins parsed from requirements-cuda.in -- the format changed or the parse regex no longer matches"
+            exit 1
+          fi
+          check_against_lock requirements-linux-amd64-cuda.txt true "$CUDA_SOURCE_PINS" requirements-cuda.in
 
           if [ "$FAILED" -ne 0 ]; then
             exit 1

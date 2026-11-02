@@ -1,0 +1,18 @@
+# CUDA-variant inputs (#1013): every top-level pin from requirements.in plus
+# the CUDA-only extras below. ONLY requirements-linux-amd64-cuda.txt is
+# resolved from this file; the CPU and test locks never see these lines.
+# Regenerate per that lock's header (deploy/aligner/README.md, "Dependency
+# lock" section).
+-r requirements.in
+# CUDA 12 cuBLAS, solely for ctranslate2 (faster-whisper's engine). torch
+# 2.15.0 is a CUDA 13.2 build and pulls cuBLAS 13 (libcublas.so.13) as
+# nvidia-cublas, but ctranslate2 4.8.4 dlopens libcublas.so.12 by soname, so
+# without this wheel the CUDA image has no cuBLAS ctranslate2 can load. The two
+# coexist: different sonames (.12 vs .13) in different directories
+# (nvidia/cublas/lib vs nvidia/cu13/lib), torch finds its own through its
+# RUNPATH and the Dockerfile registers only this one with ldconfig.
+# 12.8.4.1 is the exact cuBLAS ctranslate2 4.8.4's wheels were built against
+# (its python/tools/prepare_build_environment_linux.sh installs
+# libcublas-devel-12-8-12.8.4.1 with CUDA 12.8). Re-check that script when
+# ctranslate2 moves: a CUDA 13 ctranslate2 makes this wheel unnecessary.
+nvidia-cublas-cu12==12.8.4.1

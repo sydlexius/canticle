@@ -59,6 +59,29 @@ def test_select_device_override_is_case_insensitive():
     assert appmod.select_device(" Mps ", cuda_available=True, mps_available=True) == "mps"
 
 
+def test_log_selected_device_warns_when_cuda_image_falls_back_to_cpu(caplog):
+    # The CUDA image on a host whose driver is below the CUDA 13.2 floor:
+    # torch is a CUDA build, CUDA is unavailable, auto resolved to cpu.
+    with caplog.at_level(logging.INFO, logger="canticle.aligner"):
+        appmod.log_selected_device("cpu", torch_cuda_version="13.2", cuda_available=False)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "CUDA 13.2" in msg and "running on cpu" in msg and "595.45.04" in msg
+
+
+def test_log_selected_device_is_info_only_otherwise(caplog):
+    with caplog.at_level(logging.INFO, logger="canticle.aligner"):
+        # CPU image (torch.version.cuda is None) on cpu: expected, not a warning.
+        appmod.log_selected_device("cpu", torch_cuda_version=None, cuda_available=False)
+        # CUDA image that found its GPU.
+        appmod.log_selected_device("cuda", torch_cuda_version="13.2", cuda_available=True)
+        # Operator forced cpu on a working GPU host: deliberate, not a fallback.
+        appmod.log_selected_device("cpu", torch_cuda_version="13.2", cuda_available=True)
+    assert [r.levelno for r in caplog.records] == [logging.INFO] * 3
+    assert "device=cuda" in caplog.records[1].getMessage()
+
+
 # --------------------------------------------------------------------------
 # sequencing: all lines aligned as ONE sequence, mapped back to line indices
 # --------------------------------------------------------------------------
@@ -267,7 +290,9 @@ def _post(lyrics=None, files_override=None, **data):
 def test_boot_builds_the_real_model_layer_without_loading_a_model(monkeypatch):
     import _aligner_models
 
-    monkeypatch.setitem(sys.modules, "torch", ns(cuda=(no := ns(is_available=lambda: False)), backends=ns(mps=no)))
+    monkeypatch.setitem(
+        sys.modules, "torch", ns(cuda=(no := ns(is_available=lambda: False)), backends=ns(mps=no), version=ns(cuda=None))
+    )
     monkeypatch.setitem(sys.modules, "demucs", None)  # any model load at boot would ImportError
     appmod._state.clear()
     with TestClient(appmod.app):  # runs lifespan, which calls both builders

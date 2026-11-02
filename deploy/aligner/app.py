@@ -228,6 +228,26 @@ def select_device(env_value: str, cuda_available: bool, mps_available: bool) -> 
     return "cpu"
 
 
+def log_selected_device(device: str, torch_cuda_version: str | None, cuda_available: bool) -> None:
+    """Log the device lifespan() picked, loudly when the CUDA image lands on CPU.
+
+    Pure (versions and availability are passed in) so it is unit-testable with
+    no ML deps. A CUDA build of torch (`torch.version.cuda` set) that resolves
+    to cpu with CUDA unavailable means the host cannot run it, most often an
+    NVIDIA driver older than the image's CUDA runtime needs (595.45.04 for
+    CUDA 13.2, see README "GPU support") or a missing NVIDIA Container
+    Toolkit. Without this line that fallback was silent apart from /health.
+    """
+    if device == "cpu" and torch_cuda_version and not cuda_available:
+        logger.warning(
+            "aligner: CUDA build of torch (CUDA %s) but no usable GPU, running on cpu; "
+            "check the host NVIDIA driver (>= 595.45.04 for CUDA 13.2) and the NVIDIA Container Toolkit",
+            torch_cuda_version,
+        )
+        return
+    logger.info("aligner: device=%s (torch CUDA build: %s, cuda available: %s)", device, torch_cuda_version or "none", cuda_available)
+
+
 # --------------------------------------------------------------------------
 # Alignment planning (pure; the model layer supplies dictionary and spans)
 # --------------------------------------------------------------------------
@@ -489,7 +509,9 @@ async def lifespan(_: FastAPI):
 
     _configure_logging()
     validate_config(ALIGN_MODELS)
-    device = select_device(DEVICE_ENV, torch.cuda.is_available(), torch.backends.mps.is_available())
+    cuda_available = torch.cuda.is_available()
+    device = select_device(DEVICE_ENV, cuda_available, torch.backends.mps.is_available())
+    log_selected_device(device, torch.version.cuda, cuda_available)
     _state["device"] = device
     _state["separator"] = _build_separator(device)
     _state["aligner"] = _build_aligner(device)
