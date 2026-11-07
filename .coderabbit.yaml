@@ -5,6 +5,10 @@
 # was also tracked until #551; CodeRabbit loaded THIS file and silently ignored
 # that one, so edits to it did nothing and raised no warning. Do not re-add a
 # second file under either extension.
+# Inherit the organization CodeRabbit settings for every key not set here.
+# Without this, CodeRabbit uses ONLY this file and ignores the org config.
+inheritance: true
+
 language: en-US
 
 reviews:
