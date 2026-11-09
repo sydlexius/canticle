@@ -1,6 +1,6 @@
 fastapi==0.162.0
 uvicorn[standard]==0.54.0
-python-multipart==0.0.32
+python-multipart==0.0.33
 tensorflow-cpu==2.21.0
 soundfile==0.14.0
 numpy==2.5.4
