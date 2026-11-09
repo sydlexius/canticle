@@ -59,9 +59,16 @@ func TestReconcileWordSync_CancelDuringCountsPrintsNoRollbackLine(t *testing.T) 
 	stageFailed := 0
 	completed := false
 	for n := 1; n <= maxCancelSweep; n++ {
-		ctx, cfgPath, _ := setupWordSync(t, "")
+		ctx, cfgPath, dbh := setupWordSync(t, "")
 		logs.Reset()
 		code, out := runWS(t, newTripCtx(ctx, n), ScanReconcileWordSyncCmd{ConfigPath: cfgPath})
+		// Close this iteration's seed handle now rather than at test end: the
+		// sweep runs hundreds of iterations and setupWordSync's t.Cleanup would
+		// hold every handle open until the test returns. sql.DB.Close is
+		// idempotent, so the deferred cleanup is then a no-op.
+		if err := dbh.Close(); err != nil {
+			t.Fatalf("n=%d: close seed db: %v", n, err)
+		}
 		if code == 0 {
 			// The cancel landed past the command's last Done check, so every
 			// earlier index has already put a cancel on each database call.
