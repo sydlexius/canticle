@@ -40,6 +40,13 @@ func (c *tripCtx) Err() error {
 	}
 }
 
+// maxCancelSweep bounds the sweep below. It is a runaway guard, not a coverage
+// assumption: the sweep stops at the first index whose cancel lands after the
+// command's last Done check, and the driver decides where that is (modernc
+// sqlite 1.61.1 added wait-context checks that moved the count stages from
+// well under 80 to roughly n=200-227).
+const maxCancelSweep = 5000
+
 // A dry run applies nothing, so no batch exists to roll back: a cancel that
 // lands on a count or list stage must report "<stage> failed" on the log like
 // the pre-extraction command did, and never print the rolled-back line.
@@ -50,12 +57,16 @@ func TestReconcileWordSync_CancelDuringCountsPrintsNoRollbackLine(t *testing.T) 
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	stageFailed := 0
-	for n := 1; n <= 80; n++ {
+	completed := false
+	for n := 1; n <= maxCancelSweep; n++ {
 		ctx, cfgPath, _ := setupWordSync(t, "")
 		logs.Reset()
 		code, out := runWS(t, newTripCtx(ctx, n), ScanReconcileWordSyncCmd{ConfigPath: cfgPath})
 		if code == 0 {
-			continue
+			// The cancel landed past the command's last Done check, so every
+			// earlier index has already put a cancel on each database call.
+			completed = true
+			break
 		}
 		if strings.Contains(out, "rolled back") || strings.Contains(out, "stopped after queuing") {
 			t.Fatalf("n=%d: dry-run cancel printed a rollback line: %q", n, out)
@@ -67,6 +78,9 @@ func TestReconcileWordSync_CancelDuringCountsPrintsNoRollbackLine(t *testing.T) 
 		if strings.Contains(l, "flip failed") {
 			t.Fatalf("n=%d: a count-stage cancel was logged as a flip failure: %s", n, l)
 		}
+	}
+	if !completed {
+		t.Fatalf("command never finished uncanceled within %d Done checks; raise maxCancelSweep or look for a cancel loop", maxCancelSweep)
 	}
 	if stageFailed == 0 {
 		t.Fatal("no cancel landed on a count stage; the sweep proves nothing")
