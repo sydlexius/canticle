@@ -122,6 +122,13 @@ updates:
   # is not a required check on main, so a red run does NOT block a merge:
   # dependabot-auto-approve.yml leaves this directory's PRs unapproved and
   # without auto-merge for that reason. Merge one only after the follow-up.
+  #
+  # deploy/aligner/.python-version pins Dependabot's resolver to 3.14, the
+  # image's Python (Dockerfile FROM python:3.14-slim), for the same reason as
+  # the yamnet-detector pin above: on its newest Python (3.15) onnxruntime, via
+  # faster-whisper, has no wheel, so every update job here failed as
+  # dependency_file_not_resolvable. 3.14.0 is used because any pyenv that lists
+  # 3.15 lists it; Dependabot coerces it to 3.14.* and runs its own 3.14.x.
   - package-ecosystem: pip
     directory: /deploy/aligner
     schedule:
