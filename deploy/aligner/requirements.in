@@ -5,7 +5,7 @@
 # (see either file's header for the exact regeneration command).
 fastapi==0.161.1
 uvicorn[standard]==0.54.0
-python-multipart==0.0.32
+python-multipart==0.0.33
 # torch 2.15.0 / torchaudio 2.11.1. The 2.8.0 hold ended at torch 2.14.0
 # (#1068); 2.14.1 was a Dependabot patch bump and 2.15.0 is taken for its
 # `torch.load(weights_only=True)` hardening (2.15.0 release notes, Security:
