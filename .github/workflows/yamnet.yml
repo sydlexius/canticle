@@ -67,6 +67,24 @@ jobs:
         with:
           persist-credentials: false
 
+      # Fail in seconds, with the cause named, instead of minutes into the image
+      # build with a bare pip error. tensorflow-cpu needs setuptools, and a
+      # Dependabot regeneration deletes the pin unless the lock header keeps
+      # pip-compile's "unsafe" marker line (#1711).
+      - name: Check the setuptools pin survives in the lock
+        run: |
+          lock=deploy/yamnet-detector/requirements.txt
+          ok=1
+          if ! grep -q '^setuptools==' "$lock"; then
+            echo "::error file=$lock::no setuptools== pin. tensorflow-cpu needs it and pip install --require-hashes will fail. Regenerate per the lock header; see #1711."
+            ok=0
+          fi
+          if ! grep -q '^# The following packages are considered to be unsafe in a requirements file:$' "$lock"; then
+            echo "::error file=$lock::the header lost pip-compile's unsafe-section marker line, so the next Dependabot regeneration will drop setuptools. Restore it verbatim; see #1711."
+            ok=0
+          fi
+          [ "$ok" = 1 ]
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
