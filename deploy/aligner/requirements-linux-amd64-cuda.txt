@@ -8,7 +8,7 @@
 # cuDNN 9 for CUDA 13, ...). cu132 because torch 2.15.0 publishes no CUDA 12
 # wheel; the explicit index (not PyPI's default x86_64 torch, today the same
 # CUDA 13.2 build) keeps a future torch bump from silently changing the CUDA
-# line and with it the host driver floor. ctranslate2 4.8.4 still dlopens
+# line and with it the host driver floor. ctranslate2 4.9.0 still dlopens
 # libcublas.so.12, so requirements-cuda.in adds nvidia-cublas-cu12 (CUDA 12
 # cuBLAS) for it alone; the Dockerfile registers that wheel's directory with
 # ldconfig. Every non-CUDA entry is identical to requirements-linux-amd64.txt;
@@ -711,9 +711,10 @@ nvidia-cublas==13.4.1.3 \
     #   cuda-toolkit
     #   nvidia-cudnn-cu13
     #   nvidia-cusolver
-nvidia-cublas-cu12==12.9.3.13 \
-    --hash=sha256:918a8781956115d34b1db49e0e7b7befba8d101661c4b560ed4d42e0e17bebc3 \
-    --hash=sha256:d7d51055f161b317c7105ddaae90e71eda059026074ffef93cf7cde2886bfe72
+nvidia-cublas-cu12==12.8.4.1 \
+    --hash=sha256:47e9b82132fa8d2b4944e708049229601448aaad7e6f296f630f2d1a32de35af \
+    --hash=sha256:8ac4e771d5a348c551b2a426eda6193c19aa630236b418086020df5ba9667142 \
+    --hash=sha256:b86f6dd8935884615a0683b663891d43781b819ac4f2ba2b0c9604676af346d0
     # via -r requirements-cuda.in
 nvidia-cuda-cccl==13.3.5.0.6 \
     --hash=sha256:6e1f96b71d582171cebd9ae1d7ffbfc726e112a0a41aef77b9ead500aad7e0a2 \
@@ -733,11 +734,6 @@ nvidia-cuda-nvrtc==13.2.86 \
     # via
     #   cuda-toolkit
     #   nvidia-cublas
-nvidia-cuda-nvrtc-cu12==12.9.86 \
-    --hash=sha256:096d4de6bda726415dfaf3198d4f5c522b8e70139c97feef5cd2ca6d4cd9cead \
-    --hash=sha256:210cf05005a447e29214e9ce50851e83fc5f4358df8b453155d5e1918094dcb4 \
-    --hash=sha256:72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349
-    # via nvidia-cublas-cu12
 nvidia-cuda-runtime==13.2.86 \
     --hash=sha256:3498247680dfddce31bad102af7e3e26fc795342a3cac64722bb0fa95e7f60f0 \
     --hash=sha256:37844957894bfdecf90243568d21a2cb251b66106915b71459a23c8e6ef2da69 \
