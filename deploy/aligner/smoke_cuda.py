@@ -25,7 +25,7 @@ def fail(msg: str) -> None:
 
 
 # torch's CUDA major (the lock's +cu132 build). ctranslate2 is a DIFFERENT
-# major: 4.8.4 is a CUDA 12 build that dlopens libcublas.so.12, which the
+# major: 4.9.0 is a CUDA 12 build that dlopens libcublas.so.12, which the
 # image carries separately (nvidia-cublas-cu12, requirements-cuda.in) and
 # which is checked by soname below. Changing torch's CUDA line is a deliberate
 # edit here, the lock, the Dockerfile and the README's host-driver floor.

@@ -220,11 +220,11 @@ Why cu132, and two cuBLAS majors: torch 2.15.0 (taken for its
 `torch.load` security fixes, see `requirements.in`) publishes no CUDA 12
 wheel; its cp314 CUDA builds are cu132 and newer, and the lock names the cu132
 index explicitly so a later torch bump cannot silently move the CUDA line (and
-the host driver floor below). ctranslate2 4.8.4 (faster-whisper's engine,
-latest 4.8.5 likewise) is still a CUDA 12 build: it dlopens `libcublas.so.12`
+the host driver floor below). ctranslate2 4.9.0 (faster-whisper's engine)
+is still a CUDA 12 build: it dlopens `libcublas.so.12`
 and, with a static CUDA runtime, needs **no cuDNN at all**. So the CUDA input
 file `requirements-cuda.in` adds `nvidia-cublas-cu12` (12.8.4.1, the cuBLAS
-ctranslate2 4.8.4's wheels are built against) for ctranslate2 alone. The two
+ctranslate2's 4.8.4 and 4.9.0 wheels are built against) for ctranslate2 alone. The two
 coexist by design: different sonames (`libcublas.so.13` in
 `site-packages/nvidia/cu13/lib`, `libcublas.so.12` in
 `site-packages/nvidia/cublas/lib`). torch finds its own through the DT_RPATH
@@ -289,7 +289,7 @@ every `/align` returned 500 on amd64 (arm64's build of the library was
 unaffected).
 
 Dropping whisperx (#1016) lets faster-whisper resolve its own ctranslate2
-unconstrained by whisperx's `<4.5.0` pin; it resolves 4.8.4, whose bundled
+unconstrained by whisperx's `<4.5.0` pin; it resolves 4.9.0, whose bundled
 library already ships with the executable-stack flag clear on **both**
 arches -- verified at build time (see the Dockerfile's `patchelf
 --print-execstack` before/after log): `execstack: -` before the patch runs,

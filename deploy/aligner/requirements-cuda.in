@@ -6,13 +6,15 @@
 -r requirements.in
 # CUDA 12 cuBLAS, solely for ctranslate2 (faster-whisper's engine). torch
 # 2.15.0 is a CUDA 13.2 build and pulls cuBLAS 13 (libcublas.so.13) as
-# nvidia-cublas, but ctranslate2 4.8.4 dlopens libcublas.so.12 by soname, so
+# nvidia-cublas, but ctranslate2 4.9.0 dlopens libcublas.so.12 by soname, so
 # without this wheel the CUDA image has no cuBLAS ctranslate2 can load. The two
 # coexist: different sonames (.12 vs .13) in different directories
 # (nvidia/cublas/lib vs nvidia/cu13/lib), torch finds its own through its
 # RUNPATH and the Dockerfile registers only this one with ldconfig.
-# 12.8.4.1 is the exact cuBLAS ctranslate2 4.8.4's wheels were built against
-# (its python/tools/prepare_build_environment_linux.sh installs
-# libcublas-devel-12-8-12.8.4.1 with CUDA 12.8). Re-check that script when
+# 12.8.4.1 is the exact cuBLAS ctranslate2's wheels are built against (4.8.4 and
+# 4.9.0 alike: python/tools/prepare_build_environment_linux.sh installs
+# libcublas-devel-12-8-12.8.4.1 with CUDA 12.8). A newer 12.x minor is not taken
+# (Dependabot #1714 offered 12.9.3.13, which also pulls nvidia-cuda-nvrtc-cu12)
+# because CI never runs this image on a GPU. Re-check that script when
 # ctranslate2 moves: a CUDA 13 ctranslate2 makes this wheel unnecessary.
 nvidia-cublas-cu12==12.8.4.1
