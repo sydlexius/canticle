@@ -14,6 +14,14 @@
 #       --python-version 3.13 --python-platform x86_64-manylinux_2_28 \
 #       --no-header --no-emit-index-url requirements.in -o requirements.txt'
 #   (then re-add this header block)
+#
+# Dependabot (#1711): pip-compile writes setuptools, which tensorflow-cpu
+# needs at install time, under a trailing "unsafe" section, and Dependabot's
+# post-processing deletes that whole section unless the committed lock already
+# contains pip-compile's marker line. uv never emits it, so it is kept here,
+# verbatim; without it every Dependabot regeneration drops the setuptools pin
+# and `pip install --require-hashes` fails. Do not reword the next line.
+# The following packages are considered to be unsafe in a requirements file:
 absl-py==2.5.0 \
     --hash=sha256:0c996f25c0490700fadabe6351630f6111534fa0ae252cc6d2014ea3b141135f \
     --hash=sha256:0f17b89f2a4eaaedc4f28c622998aa690564b3012a396a4ffad0821007fe03ba

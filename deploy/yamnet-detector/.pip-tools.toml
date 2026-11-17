@@ -5,5 +5,10 @@
 # Dependabot #1669 regenerated the lock without the pin, and every detector
 # image build failed from then on. This file makes allow-unsafe explicit instead
 # of relying on Dependabot inferring it from the existing lock.
+#
+# This alone is NOT enough (#1711): with allow-unsafe, pip-compile writes
+# setuptools under a trailing "unsafe" section, which Dependabot then deletes
+# unless the committed lock already carries pip-compile's marker line. That
+# line is kept in requirements.txt's header; both halves are required.
 [pip-tools]
 allow-unsafe = true
