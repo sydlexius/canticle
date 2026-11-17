@@ -3,9 +3,9 @@
 # top-level-only requirements.txt). The full transitive hash lock is
 # per-architecture: requirements-linux-amd64.txt / requirements-linux-arm64.txt
 # (see either file's header for the exact regeneration command).
-fastapi==0.161.1
+fastapi==0.162.7
 uvicorn[standard]==0.54.0
-python-multipart==0.0.32
+python-multipart==0.0.33
 # torch 2.15.0 / torchaudio 2.11.1. The 2.8.0 hold ended at torch 2.14.0
 # (#1068); 2.14.1 was a Dependabot patch bump and 2.15.0 is taken for its
 # `torch.load(weights_only=True)` hardening (2.15.0 release notes, Security:
@@ -74,7 +74,7 @@ demucs==4.0.1
 # decode_audio only for a path or file object. That call shape is
 # load-bearing: passing model.transcribe a path needs `av<19` here first.
 faster-whisper==1.2.1
-transformers==5.22.0
+transformers==5.23.0
 # huggingface-hub 2.x. It is transitive (via transformers, tokenizers and
 # faster-whisper, which downloads every model through it), pinned here so a
 # routine lock regeneration cannot swap majors unnoticed. 2.x replaces httpx
