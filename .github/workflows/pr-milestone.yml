@@ -53,12 +53,20 @@ jobs:
             // the automation silently skip a PR that references only its epic.
             const pattern = /\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?|part\s+of)\s+#(\d+)/gi;
             const issueNumbers = [];
+            // Every reference costs one API call and the body is untrusted, so at
+            // most MAX_REFS distinct references are looked up.
+            const MAX_REFS = 25;
+            let truncated = false;
             let match;
             while ((match = pattern.exec(body)) !== null) {
               const num = parseInt(match[1], 10);
-              if (!issueNumbers.includes(num)) {
-                issueNumbers.push(num);
+              if (issueNumbers.includes(num)) continue;
+              if (issueNumbers.length === MAX_REFS) {
+                truncated = true;
+                core.warning(`The PR body references more than ${MAX_REFS} issues; only the first ${MAX_REFS} are used.`);
+                break;
               }
+              issueNumbers.push(num);
             }
 
             // No early return on an empty list: the conflict-note cleanup below
@@ -72,7 +80,7 @@ jobs:
             // other read failure leaves the set of milestones unknown, so the
             // conflict note below is left alone rather than judged on part of it.
             const milestones = new Map();
-            let incomplete = false;
+            let incomplete = truncated; // a cut-short list is not the whole set
             for (const num of issueNumbers) {
               try {
                 const issue = await github.rest.issues.get({
