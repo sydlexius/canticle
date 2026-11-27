@@ -81,7 +81,7 @@ govulncheck runs in the hook when `go.mod` or `go.sum` changed since the merge b
 
 `PUSH_GATE=full git push ...` runs the full `make gate` chain and ignores any receipt. It is the only override, and it only makes the push stricter: there is no skip value, and any other `PUSH_GATE` value fails the push with exit 2. Never use `git push --no-verify`. `make hooks-test` runs the hermetic tests for the hook, the receipt check, the package mapping, the PR-trigger guard and the Tailwind installer (retry window and fail-fast paths).
 
-`make scan` requires [grype](https://github.com/anchore/grype) at the version pinned in `.github/workflows/ci.yml` (the `grype-version` input on the Image Scan job). That file is the single source of truth -- `scripts/check-tool-versions.sh` parses the pin out of it rather than carrying its own copy, so this page deliberately does not restate the number. Install that version and `make doctor` will verify the local binary matches. CI runs grype with `only-fixed: true` to suppress CVEs that have no released fix, reducing flakes from transient vuln-DB churn that cannot be actioned.
+`make scan` requires [grype](https://github.com/anchore/grype) at the version pinned in `.github/workflows/ci.yml` (the `GRYPE_VERSION` env on the Image Scan job's install step). That file is the single source of truth -- `scripts/check-tool-versions.sh` parses the pin out of it rather than carrying its own copy, so this page deliberately does not restate the number. Install that version and `make doctor` will verify the local binary matches. CI runs grype with `--only-fixed` to suppress CVEs that have no released fix, reducing flakes from transient vuln-DB churn that cannot be actioned.
 
 Other useful targets:
 

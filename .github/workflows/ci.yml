@@ -425,16 +425,44 @@ jobs:
           tags: mxlrcgo-svc:scan
           cache-from: type=gha
 
+      - name: Install grype
+        # Installed from the pinned release asset, verified against a pinned
+        # sha256. Not via anchore/scan-action: its installer first resolves the
+        # tag through the github.com/<repo>/releases/<tag> HTML page, and an
+        # outage of that page (504s while the asset URL stayed up) failed every
+        # scan even though the version was pinned. To bump: change both values
+        # below, taking the sha256 from the release's checksums.txt.
+        env:
+          GRYPE_VERSION: v0.119.0
+          GRYPE_SHA256: 3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b
+        run: |
+          set -euo pipefail
+          ver="${GRYPE_VERSION#v}"
+          tarball="grype_${ver}_linux_amd64.tar.gz"
+          curl -sSfL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}/${tarball}"
+          echo "${GRYPE_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/grype-bin"
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/grype-bin" grype
+          echo "$RUNNER_TEMP/grype-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/grype-bin/grype" version
+
       - name: Scan image for HIGH+ CVEs
         id: scan
-        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
-        with:
-          image: mxlrcgo-svc:scan
-          severity-cutoff: high
-          fail-build: true
-          grype-version: v0.119.0
-          only-fixed: true # transient unfixable CVEs from vuln-DB updates cause flakes that cannot be actioned
-          output-format: sarif
+        # --only-fixed: transient unfixable CVEs from vuln-DB updates cause flakes that cannot be actioned.
+        # The sarif output is set only when grype wrote the file, so the upload
+        # steps below skip cleanly when grype failed before producing a report.
+        env:
+          GRYPE_CHECK_FOR_APP_UPDATE: "false" # as scan-action set it: no update probe on a pinned binary
+        run: |
+          set -uo pipefail
+          sarif="$RUNNER_TEMP/grype-results.sarif"
+          rc=0
+          grype mxlrcgo-svc:scan -c .grype.yaml --fail-on high --only-fixed -o "sarif=$sarif" || rc=$?
+          if [ -s "$sarif" ]; then
+            echo "sarif=$sarif" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$rc"
 
       - name: Upload SARIF artifact
         if: always() && steps.scan.outputs.sarif != ''
