@@ -26,14 +26,14 @@ else
   echo "OK: golangci-lint pinned to $ci_glci in ci.yml and .pre-commit-config.yaml."
 fi
 
-# grype: the grype-version input in the CI scan job vs the locally installed binary.
+# grype: the GRYPE_VERSION env in the CI scan job vs the locally installed binary.
 # Graceful skip if grype is not installed; it is optional for non-scan workflows.
 if ! command -v grype >/dev/null 2>&1; then
   echo "NOTE: grype not found in PATH; skipping grype version check."
 else
-  expected_grype="$(grep -oE 'grype-version: v[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/ci.yml 2>/dev/null | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  expected_grype="$(grep -oE 'GRYPE_VERSION: v[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/ci.yml 2>/dev/null | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || true)"
   if [ -z "$expected_grype" ]; then
-    echo "FAIL: could not parse grype-version from .github/workflows/ci.yml." >&2
+    echo "FAIL: could not parse GRYPE_VERSION from .github/workflows/ci.yml." >&2
     status=1
   else
     local_grype="$(grype version 2>/dev/null | grep '^Version:' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 | sed 's/^/v/' || true)"
