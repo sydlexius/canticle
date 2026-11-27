@@ -102,11 +102,15 @@ LABEL org.opencontainers.image.source="https://github.com/sydlexius/canticle" \
 # openssl floor raised to 3.5.9-r1 for the 3.5.9-r0 batch: 4 HIGH (CVE-2026-107496,
 # CVE-2026-88823, CVE-2026-95691, CVE-2026-95692), fixed in 3.5.9-r1 per the
 # Alpine 3.24 index. Supersedes the 3.5.8-r0 floor described above.
-# libxml2 floor pinned to remediate CVE-2026-86144 (HIGH, CVSS 7.8), present in
-# 2.13.9-r2 and fixed in 2.13.9-r3 per the Alpine 3.24 index. Arrives
-# TRANSITIVELY via ffmpeg, so `apk upgrade` alone leaves 2.13.9-r2 in place while
-# the base digest predates the fix. Raise/drop when the base index ships it by default.
-RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.9-r1" "libxml2>=2.13.9-r3" "expat>=2.11.0-r0" "util-linux>=2.42.3-r0" "libpng>=1.6.59-r0" "zlib>=1.4-r0" "musl>=1.2.6-r3" su-exec tzdata && \
+# libxml2 floor raised to 2.13.9-r5 for the 2.13.9-r3 batch: 6 HIGH (CVE-2026-11979,
+# CVE-2026-86138, CVE-2026-86139, CVE-2026-86140, CVE-2026-86142, CVE-2026-86143)
+# plus 6 MEDIUM/LOW (CVE-2026-0989, CVE-2026-0990, CVE-2026-0992, CVE-2026-1757,
+# CVE-2026-86137, CVE-2026-86141), all fixed by 2.13.9-r5 per the Alpine 3.24 index
+# (the earlier 2.13.9-r3 floor covered CVE-2026-86144). Arrives TRANSITIVELY via
+# ffmpeg, so `apk upgrade` alone leaves an older build in place while the base
+# digest predates the fix, and a cached apk layer keeps it even after the index
+# ships 2.13.9-r5. Raise/drop when the base index ships it by default.
+RUN apk add --no-cache bash ca-certificates "ffmpeg>=8.1.2-r0" "mbedtls3>=3.6.7-r0" "libssh>=0.12.2-r0" "openssl>=3.5.9-r1" "libxml2>=2.13.9-r5" "expat>=2.11.0-r0" "util-linux>=2.42.3-r0" "libpng>=1.6.59-r0" "zlib>=1.4-r0" "musl>=1.2.6-r3" su-exec tzdata && \
     apk upgrade --no-cache && \
     { grep -q "^mxlrcgo:" /etc/group || addgroup mxlrcgo; } && \
     { id -u mxlrcgo >/dev/null 2>&1 || adduser -u 99 -G mxlrcgo -s /bin/bash -D mxlrcgo; } && \
