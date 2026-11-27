@@ -16,7 +16,9 @@
 # The note is therefore found by the sentinel AND its author being this
 # workflow's bot (github-actions[bot]), so a planted sentinel is never updated or
 # deleted. The lookup runs on every run, so a stale note is removed once an edit
-# leaves the references in one milestone, in none, or absent.
+# leaves the references in one milestone, in none, or absent. If a referenced
+# issue cannot be read (other than not existing), the note is left as it is for
+# that run.
 
 name: PR Milestone
 
@@ -66,7 +68,11 @@ jobs:
               : 'No issue references found in PR body');
 
             // Look up milestones for each referenced issue
+            // A referenced number that does not exist (404) has no milestone. Any
+            // other read failure leaves the set of milestones unknown, so the
+            // conflict note below is left alone rather than judged on part of it.
             const milestones = new Map();
+            let incomplete = false;
             for (const num of issueNumbers) {
               try {
                 const issue = await github.rest.issues.get({
@@ -86,6 +92,7 @@ jobs:
                   milestones.get(ms.number).issues.push(num);
                 }
               } catch (err) {
+                if (err.status !== 404) incomplete = true;
                 core.warning(`Could not fetch issue #${num}: ${err.message}`);
               }
             }
@@ -105,10 +112,29 @@ jobs:
               issue_number: pr.number,
               per_page: 100,
             });
-            const existing = comments.find(c => c.body && c.body.includes(sentinel)
+            // Every matching note, not only the first: an older copy of this
+            // workflow read only the first page of comments and could post a
+            // second note, so extras are removed here.
+            const notes = comments.filter(c => c.body && c.body.includes(sentinel)
               && c.user && c.user.type === 'Bot' && c.user.login === 'github-actions[bot]');
+            const [existing, ...extras] = notes;
+            // Another run on the same PR may already have deleted a note: a 404
+            // here means it is gone, which is the goal.
+            const deleteNote = async (c) => {
+              try {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                });
+              } catch (err) {
+                if (err.status !== 404) throw err;
+              }
+            };
 
-            if (milestones.size > 1) {
+            if (incomplete) {
+              core.warning('A referenced issue could not be read; the conflict note is left as it is.');
+            } else if (milestones.size > 1) {
               const list = entries
                 .map(m => `- **${m.title}** (from ${m.issues.map(n => '#' + n).join(', ')})`)
                 .join('\n');
@@ -139,13 +165,15 @@ jobs:
                 });
               }
 
+              for (const c of extras) {
+                await deleteNote(c);
+              }
+
               core.warning(`Conflicting milestones detected, assigned "${target.title}"`);
-            } else if (existing) {
-              await github.rest.issues.deleteComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-              });
+            } else if (notes.length > 0) {
+              for (const c of notes) {
+                await deleteNote(c);
+              }
               core.info('Removed the conflict warning comment: references no longer span milestones');
             }
 
